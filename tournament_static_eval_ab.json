@@ -1,0 +1,74 @@
+{
+  "Game Mode": "Might",
+  "Map Type": "Lakes",
+  "Map Size": "Small",
+  "Glory Score Limit": 10000,
+  "Turn Limit": 220,
+  "Max Actions Per Turn": 0,
+  "Max Actions Per Game": 0,
+  "Match Retry Limit": 1,
+  "External Log Dir": "logs/static-eval-ab",
+  "Write Match Logs": false,
+  "Verbose": false,
+  "Level Seeds": [
+    "101", "102", "103", "104", "105",
+    "106", "107", "108", "109", "110",
+    "111", "112"
+  ],
+  "Participants": [
+    {
+      "Name": "baseline-200ms",
+      "Type": "External",
+      "Tribe": "Xin Xi",
+      "External Startup Timeout Ms": 30000,
+      "External Action Timeout Ms": 120000,
+      "External Shutdown Timeout Ms": 30000,
+      "External Command": [
+        "python",
+        "py/bots/native_static_mcts_bot.py",
+        "--static-eval-variant",
+        "baseline",
+        "--wall-clock-per-action-seconds",
+        "0.2",
+        "--max-depth",
+        "0",
+        "--top-k-actions",
+        "1000000",
+        "--max-actions",
+        "-1",
+        "--search-batch-size",
+        "64",
+        "--deterministic",
+        "--seed",
+        "9050"
+      ]
+    },
+    {
+      "Name": "tuned-200ms",
+      "Type": "External",
+      "Tribe": "Imperius",
+      "External Startup Timeout Ms": 30000,
+      "External Action Timeout Ms": 120000,
+      "External Shutdown Timeout Ms": 30000,
+      "External Command": [
+        "python",
+        "py/bots/native_static_mcts_bot.py",
+        "--static-eval-variant",
+        "tuned",
+        "--wall-clock-per-action-seconds",
+        "0.2",
+        "--max-depth",
+        "0",
+        "--top-k-actions",
+        "1000000",
+        "--max-actions",
+        "-1",
+        "--search-batch-size",
+        "64",
+        "--deterministic",
+        "--seed",
+        "9050"
+      ]
+    }
+  ]
+}

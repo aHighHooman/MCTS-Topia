@@ -1,0 +1,166 @@
+--- /mnt/data/static_mcts.py.bak	2026-05-19 02:58:31.983843730 +0000
++++ /mnt/data/static_mcts.py	2026-05-19 03:00:05.195806350 +0000
+@@ -1,8 +1,10 @@
+ from __future__ import annotations
+ 
+ from typing import Any, Dict, List
++import os
+ import random
+ import time
++import warnings
+ 
+ from ..config import ModelConfig, SearchConfig
+ from .cpp_extension import load_native_mcts_extension
+@@ -17,15 +19,24 @@
+ )
+ 
+ 
++def _uniform_priors(action_count: int) -> List[float]:
++    return [1.0 / action_count] * action_count if action_count else []
++
++
+ def _coerce_static_evaluation(raw: Dict[str, Any], action_count: int) -> _Evaluation:
+-    priors = [float(value) for value in list(raw.get("priors", []))[:action_count]]
++    raw_priors = list(raw.get("priors", []))
++    priors = [float(value) for value in raw_priors[:action_count]]
+     if len(priors) != action_count:
+-        priors = [1.0 / action_count] * action_count if action_count else []
++        message = f"Static eval prior/action mismatch: {len(raw_priors)} priors for {action_count} actions"
++        if os.getenv("TRIBES_STATIC_EVAL_STRICT", "0") == "1":
++            raise ValueError(message)
++        warnings.warn(message + "; falling back to uniform priors", RuntimeWarning, stacklevel=2)
++        priors = _uniform_priors(action_count)
+     total = sum(max(0.0, prior) for prior in priors)
+     if total > 0.0:
+         priors = [max(0.0, prior) / total for prior in priors]
+-    elif action_count:
+-        priors = [1.0 / action_count] * action_count
++    else:
++        priors = _uniform_priors(action_count)
+     return _Evaluation(priors=priors, value=float(raw.get("value", 0.0)))
+ 
+ 
+@@ -35,13 +46,60 @@
+     extension = load_native_mcts_extension()
+     if extension is None:
+         raise NativeSearchUnavailable("Native MCTS extension is unavailable.")
+-    raw_evaluations = extension.evaluate_static_batch(messages, int(max_actions))
++    raw_evaluations = list(extension.evaluate_static_batch(messages, int(max_actions)))
++    if len(raw_evaluations) != len(messages):
++        raise NativeSearchUnavailable(
++            f"Static evaluator returned {len(raw_evaluations)} evaluations for {len(messages)} messages."
++        )
+     evaluations: List[_Evaluation] = []
+     for message, raw in zip(messages, raw_evaluations):
+         evaluations.append(_coerce_static_evaluation(dict(raw), len(list(message.get("actions", []))) if message else 0))
+     return evaluations
+ 
+ 
++_ROOT_ALWAYS_KEEP_TYPES = {
++    "CAPTURE",
++    "MAKE_VETERAN",
++    "ATTACK",
++    "CONVERT",
++    "EXAMINE",
++    "RESOURCE_GATHERING",
++    "LEVEL_UP",
++    "RESEARCH_TECH",
++    "BUILD",
++    "SPAWN",
++    "BUILD_ROAD",
++    "RECOVER",
++    "HEAL_OTHERS",
++    "UPGRADE_SHIP",
++    "UPGRADE_BOAT",
++    "UPGRADE_RAMMER",
++    "UPGRADE_SCOUT",
++    "UPGRADE_BOMBER",
++}
++
++
++def _action_type(action: Dict[str, Any]) -> str:
++    payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
++    return str(action.get("type") or action.get("t") or payload.get("type") or payload.get("t") or "")
++
++
++def _select_root_indexes(root_actions: List[Dict[str, Any]], priors: List[float], top_k_actions: int) -> List[int]:
++    indexes = list(range(len(root_actions)))
++    if top_k_actions <= 0 or len(indexes) <= top_k_actions:
++        return indexes
++
++    forced = {idx for idx, action in enumerate(root_actions) if _action_type(action) in _ROOT_ALWAYS_KEEP_TYPES}
++    budget = max(int(top_k_actions), len(forced))
++    ranked = sorted(indexes, key=lambda idx: priors[idx], reverse=True)
++    selected = set(forced)
++    for idx in ranked:
++        if len(selected) >= budget:
++            break
++        selected.add(idx)
++    return sorted(selected)
++
++
+ def _root_static_priors(
+     message: Dict[str, Any],
+     search_cfg: SearchConfig,
+@@ -55,10 +113,7 @@
+         [{"player_id": int(message["player_id"]), "observation": message["observation"], "actions": root_actions}],
+         model_cfg.max_actions,
+     )[0]
+-    indexes = list(range(len(root_actions)))
+-    if len(indexes) > search_cfg.top_k_actions:
+-        ranked = sorted(indexes, key=lambda idx: root_eval.priors[idx], reverse=True)[: search_cfg.top_k_actions]
+-        indexes = sorted(ranked)
++    indexes = _select_root_indexes(root_actions, root_eval.priors, int(search_cfg.top_k_actions))
+     action_ids = [str(root_actions[index].get("id")) for index in indexes]
+     priors = [root_eval.priors[index] for index in indexes]
+     total = sum(max(0.0, prior) for prior in priors)
+@@ -121,7 +176,7 @@
+ 
+     while (deadline is not None and time.perf_counter() < deadline) or (deadline is None and simulations_remaining > 0):
+         frontier = batch_size if deadline is not None else min(batch_size, simulations_remaining)
+-        selections: List[tuple[int, int, int, int, int, _Evaluation | None]] = []
++        selections: List[tuple[int, int, int, int, int, bool, _Evaluation | None]] = []
+         eval_messages: List[Dict[str, Any]] = []
+         eval_index_by_key: Dict[Any, int] = {}
+         evals_only_batches = getattr(tree, "select_leaf_batches_evals_only", None)
+@@ -137,13 +192,14 @@
+                 selection_id, parent_node_id, parent_action_index, state_key, _selection_depth, raw_leaf_payload = raw_selection
+             else:
+                 selection_id, parent_node_id, parent_action_index, state_key, raw_leaf_payload = raw_selection
++            leaf_payload = dict(raw_leaf_payload or {})
++            leaf_is_terminal = bool(leaf_payload.get("is_terminal", False) or leaf_payload.get("terminal", False))
+             eval_key: Any = int(state_key)
+             cached = eval_cache.get(eval_key)
+             eval_index = -1
+             if cached is None:
+                 eval_index = eval_index_by_key.get(eval_key, -1)
+                 if eval_index < 0:
+-                    leaf_payload = dict(raw_leaf_payload or {})
+                     telemetry.observe(leaf_payload)
+                     if _leaf_requires_bootstrap(leaf_payload, root_payload, search_cfg):
+                         cached = _bootstrap_leaf_evaluation(leaf_payload, search_cfg)
+@@ -159,6 +215,7 @@
+                     int(parent_action_index),
+                     int(eval_index),
+                     int(eval_key),
++                    leaf_is_terminal,
+                     cached,
+                 )
+             )
+@@ -170,14 +227,14 @@
+ 
+         completed_selection_ids: List[int] = []
+         completed_leaf_values: List[float] = []
+-        for selection_id, parent_node_id, parent_action_index, eval_index, eval_key, cached_eval in selections:
++        for selection_id, parent_node_id, parent_action_index, eval_index, eval_key, leaf_is_terminal, cached_eval in selections:
+             evaluation = cached_eval if cached_eval is not None else evaluations[int(eval_index)]
+             tree.expand(
+                 int(parent_node_id),
+                 int(parent_action_index),
+                 evaluation.priors,
+                 float(evaluation.value),
+-                False,
++                bool(leaf_is_terminal),
+             )
+             completed_selection_ids.append(int(selection_id))
+             completed_leaf_values.append(float(evaluation.value))

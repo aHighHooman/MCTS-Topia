@@ -1,0 +1,794 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import unittest
+import sys
+from pathlib import Path
+
+
+PY_ROOT = Path(__file__).resolve().parents[1]
+if str(PY_ROOT) not in sys.path:
+    sys.path.insert(0, str(PY_ROOT))
+
+from tribes_rl.config import HybridAgentConfig
+from tribes_rl.encoding import encode_observation, normalize_message, TECH_TYPES
+from tribes_rl.model import HybridPolicyValueNet
+from tribes_rl.native import run_native_mcts, run_native_static_mcts
+from tribes_rl.native.cpp_extension import load_native_mcts_extension
+from tribes_rl.native.mcts import NativeSearchParityError, _apply_end_turn_visit_guard, _message_cache_key
+
+
+def _message() -> dict:
+    size = 4
+    return normalize_message({
+        "player_id": 0,
+        "observation": {
+            "active_player_id": 0,
+            "tick": 0,
+            "can_end_turn": True,
+            "board": {
+                "size": size,
+                "tiles": [
+                    [
+                        {
+                            "x": x,
+                            "y": y,
+                            "visible": True,
+                            "explored": True,
+                            "terrain": "PLAIN",
+                        }
+                        for x in range(size)
+                    ]
+                    for y in range(size)
+                ],
+            },
+            "units": [],
+            "cities": [],
+            "tribes": [
+                {"id": 0, "stars": 0, "score": 0, "researched_tech_ids": [], "cities": [], "extra_units": []},
+                {"id": 1, "stars": 0, "score": 0, "researched_tech_ids": [], "cities": [], "extra_units": []},
+            ],
+        },
+        "actions": [
+            {"id": "end", "type": "END_TURN"},
+            {"id": "spawn", "type": "SPAWN", "position": {"x": 1, "y": 1}},
+            {"id": "road", "type": "BUILD_ROAD", "position": {"x": 1, "y": 2}},
+        ],
+    })
+
+
+def _message_with_unit_move() -> dict:
+    message = _message()
+    message["observation"]["units"] = [
+        {
+            "id": 1,
+            "tribe_id": 0,
+            "city_id": 10,
+            "type": "WARRIOR",
+            "x": 1,
+            "y": 1,
+            "current_hp": 10,
+            "max_hp": 10,
+            "kills": 0,
+            "is_veteran": False,
+            "status": "FRESH",
+            "is_hidden": False,
+        }
+    ]
+    message["observation"]["board"]["tiles"][1][1]["unit_id"] = 1
+    message["actions"] = [
+        {"id": "move", "type": "MOVE", "unit_id": 1, "destination": {"x": 2, "y": 1}, "x": 2, "y": 1},
+        {"id": "road", "type": "BUILD_ROAD", "tribe_id": 0, "position": {"x": 1, "y": 2}, "x": 1, "y": 2},
+    ]
+    return message
+
+
+def _message_with_village_and_ruin_choices() -> dict:
+    message = _message()
+    observation = message["observation"]
+    observation["tribes"][0]["stars"] = 10
+    observation["tribes"][0]["researched_tech_ids"] = ["ROADS"]
+    observation["cities"] = [
+        {
+            "id": 10,
+            "tribe_id": 0,
+            "x": 0,
+            "y": 0,
+            "level": 1,
+            "population": 0,
+            "population_need": 2,
+            "production": 1,
+            "is_capital": True,
+            "has_walls": False,
+        }
+    ]
+    observation["board"]["tiles"][0][0]["terrain"] = "CITY"
+    observation["board"]["tiles"][0][0]["city_id"] = 10
+    observation["board"]["tiles"][1][2]["terrain"] = "VILLAGE"
+    observation["board"]["tiles"][2][1]["resource"] = "RUINS"
+    observation["units"] = [
+        {
+            "id": 1,
+            "tribe_id": 0,
+            "city_id": 10,
+            "type": "WARRIOR",
+            "x": 1,
+            "y": 1,
+            "current_hp": 10,
+            "max_hp": 10,
+            "kills": 0,
+            "is_veteran": False,
+            "status": "FRESH",
+            "is_hidden": False,
+        },
+        {
+            "id": 2,
+            "tribe_id": 0,
+            "city_id": 10,
+            "type": "WARRIOR",
+            "x": 1,
+            "y": 2,
+            "current_hp": 10,
+            "max_hp": 10,
+            "kills": 0,
+            "is_veteran": False,
+            "status": "FRESH",
+            "is_hidden": False,
+        },
+    ]
+    observation["board"]["tiles"][1][1]["unit_id"] = 1
+    observation["board"]["tiles"][2][1]["unit_id"] = 2
+    message["actions"] = [
+        {"id": "move_village", "type": "MOVE", "unit_id": 1, "u": 1, "destination": {"x": 2, "y": 1}, "x": 2, "y": 1},
+        {"id": "examine", "type": "EXAMINE", "unit_id": 2, "u": 2},
+        {"id": "isolated_road", "type": "BUILD_ROAD", "tribe_id": 0, "p": 0, "position": {"x": 3, "y": 3}, "x": 3, "y": 3},
+        {"id": "end", "type": "END_TURN"},
+    ]
+    return message
+
+
+def _message_with_village_capture() -> dict:
+    message = _message()
+    observation = message["observation"]
+    observation["tribes"][0]["stars"] = 5
+    observation["cities"] = [
+        {
+            "id": 10,
+            "tribe_id": 0,
+            "x": 0,
+            "y": 0,
+            "level": 1,
+            "population": 0,
+            "population_need": 2,
+            "production": 1,
+            "is_capital": True,
+            "has_walls": False,
+        }
+    ]
+    observation["board"]["tiles"][0][0]["terrain"] = "CITY"
+    observation["board"]["tiles"][0][0]["city_id"] = 10
+    observation["board"]["tiles"][1][1]["terrain"] = "VILLAGE"
+    observation["board"]["tiles"][1][1]["unit_id"] = 1
+    observation["units"] = [
+        {
+            "id": 1,
+            "tribe_id": 0,
+            "city_id": 10,
+            "type": "WARRIOR",
+            "x": 1,
+            "y": 1,
+            "current_hp": 10,
+            "max_hp": 10,
+            "kills": 0,
+            "is_veteran": False,
+            "status": "FRESH",
+            "is_hidden": False,
+        }
+    ]
+    message["actions"] = [
+        {"id": "capture_village", "type": "CAPTURE", "unit_id": 1, "u": 1, "target_city_id": -1, "tc": -1, "capture_type": "VILLAGE", "ct": "VILLAGE"}
+    ]
+    return message
+
+
+def _message_with_end_turn(unit_owner: int | None = None, city_owner: int | None = None) -> dict:
+    message = _message()
+    message["actions"] = [{"id": "end", "type": "END_TURN"}]
+    message["observation"]["tribes"] = [
+        {"id": 0, "stars": 5, "score": 0, "researched_tech_ids": [], "cities": [], "extra_units": []},
+        {"id": 1, "stars": 5, "score": 0, "researched_tech_ids": [], "cities": [], "extra_units": []},
+        {"id": 2, "stars": 5, "score": 0, "researched_tech_ids": [], "cities": [], "extra_units": []},
+    ]
+    if unit_owner is not None:
+        message["observation"]["units"] = [
+            {
+                "id": 20 + unit_owner,
+                "tribe_id": unit_owner,
+                "city_id": 0,
+                "type": "WARRIOR",
+                "x": 2,
+                "y": unit_owner,
+                "current_hp": 8,
+                "max_hp": 10,
+                "kills": 0,
+                "is_veteran": False,
+                "status": "MOVED",
+                "is_hidden": False,
+            }
+        ]
+        message["observation"]["board"]["tiles"][unit_owner][2]["unit_id"] = 20 + unit_owner
+    if city_owner is not None:
+        message["observation"]["cities"] = [
+            {
+                "id": 30 + city_owner,
+                "tribe_id": city_owner,
+                "x": 1,
+                "y": city_owner,
+                "level": 1,
+                "population": 0,
+                "population_need": 2,
+                "production": 2,
+                "is_capital": True,
+                "has_walls": False,
+            }
+        ]
+        message["observation"]["board"]["tiles"][city_owner][1]["city_id"] = 30 + city_owner
+    return message
+
+
+def _message_with_two_visible_enemies() -> dict:
+    message = _message_with_end_turn()
+    message["observation"]["active_player_id"] = 1
+    message["observation"]["units"] = [
+        {
+            "id": 21,
+            "tribe_id": 1,
+            "city_id": 0,
+            "type": "WARRIOR",
+            "x": 1,
+            "y": 1,
+            "current_hp": 10,
+            "max_hp": 10,
+            "kills": 0,
+            "is_veteran": False,
+            "status": "MOVED",
+            "is_hidden": False,
+        },
+        {
+            "id": 22,
+            "tribe_id": 2,
+            "city_id": 0,
+            "type": "WARRIOR",
+            "x": 2,
+            "y": 2,
+            "current_hp": 10,
+            "max_hp": 10,
+            "kills": 0,
+            "is_veteran": False,
+            "status": "MOVED",
+            "is_hidden": False,
+        },
+    ]
+    message["observation"]["board"]["tiles"][1][1]["unit_id"] = 21
+    message["observation"]["board"]["tiles"][2][2]["unit_id"] = 22
+    return message
+
+
+def _capital_city(city_id: int, owner: int, x: int, y: int) -> dict:
+    return {
+        "id": city_id,
+        "tribe_id": owner,
+        "p": owner,
+        "x": x,
+        "y": y,
+        "level": 1,
+        "population": 0,
+        "population_need": 2,
+        "production": 2,
+        "is_capital": True,
+        "cap": True,
+        "has_walls": False,
+    }
+
+
+def _message_with_capital_capture(
+    *,
+    root_player: int = 0,
+    capturer: int = 0,
+    target_city_id: int = 20,
+    mode: str = "MIGHT",
+    extra_capital_owner: int | None = None,
+    second_action: dict | None = None,
+) -> dict:
+    message = _message()
+    message["player_id"] = root_player
+    observation = message["observation"]
+    observation["mode"] = mode
+    observation["active_player_id"] = capturer
+    tribe_ids = [0, 1] if extra_capital_owner is None else [0, 1, extra_capital_owner]
+    observation["tribes"] = [
+        {
+            "id": tribe_id,
+            "stars": 5,
+            "score": 0,
+            "res": "INCOMPLETE",
+            "researched_tech_ids": [],
+            "cities": [],
+            "extra_units": [],
+        }
+        for tribe_id in tribe_ids
+    ]
+    cities = [
+        _capital_city(10, 0, 0, 0),
+        _capital_city(20, 1, 2, 2),
+    ]
+    if extra_capital_owner is not None:
+        cities.append(_capital_city(30, extra_capital_owner, 3, 3))
+    observation["cities"] = cities
+    for city in cities:
+        observation["board"]["tiles"][city["y"]][city["x"]]["city_id"] = city["id"]
+
+    target_city = next(city for city in cities if city["id"] == target_city_id)
+    observation["units"] = [
+        {
+            "id": 7,
+            "tribe_id": capturer,
+            "p": capturer,
+            "city_id": target_city_id,
+            "type": "WARRIOR",
+            "x": target_city["x"],
+            "y": target_city["y"],
+            "current_hp": 10,
+            "max_hp": 10,
+            "kills": 0,
+            "is_veteran": False,
+            "status": "FRESH",
+            "is_hidden": False,
+        }
+    ]
+    observation["board"]["tiles"][target_city["y"]][target_city["x"]]["unit_id"] = 7
+    actions = [
+        {
+            "id": "capture",
+            "type": "CAPTURE",
+            "unit_id": 7,
+            "u": 7,
+            "target_city_id": target_city_id,
+            "tc": target_city_id,
+            "capture_type": "CITY",
+            "ct": "CITY",
+        }
+    ]
+    if second_action is not None:
+        actions.append(second_action)
+    message["actions"] = actions
+    return message
+
+
+class NativeMCTSTest(unittest.TestCase):
+    def setUp(self) -> None:
+        if load_native_mcts_extension() is None:
+            self.skipTest("native MCTS extension is unavailable")
+
+    def test_strict_native_mcts_raises_on_approximate_opponent_turns(self) -> None:
+        cfg = HybridAgentConfig()
+        cfg.search.num_simulations = 8
+        cfg.search.batch_size = 4
+        cfg.search.sample_action = False
+        cfg.search.dirichlet_epsilon = 0.0
+        model = HybridPolicyValueNet(cfg.model).eval()
+
+        with self.assertRaises(NativeSearchParityError):
+            run_native_mcts(_message(), model, cfg.search, cfg.model, "cpu")
+
+    def test_strict_native_mcts_wall_clock_raises_on_approximate_opponent_turns(self) -> None:
+        cfg = HybridAgentConfig()
+        cfg.search.num_simulations = 10_000
+        cfg.search.batch_size = 2
+        cfg.search.sample_action = False
+        cfg.search.dirichlet_epsilon = 0.0
+        model = HybridPolicyValueNet(cfg.model).eval()
+
+        with self.assertRaises(NativeSearchParityError):
+            run_native_mcts(_message(), model, cfg.search, cfg.model, "cpu", wall_time_seconds=0.01)
+
+    def test_strict_native_mcts_deterministic_error_on_approximate_opponent_turns(self) -> None:
+        cfg = HybridAgentConfig()
+        cfg.search.num_simulations = 8
+        cfg.search.batch_size = 2
+        cfg.search.sample_action = False
+        cfg.search.dirichlet_epsilon = 0.0
+        cfg.search.seed = 123
+        model = HybridPolicyValueNet(cfg.model).eval()
+
+        with self.assertRaises(NativeSearchParityError):
+            run_native_mcts(_message(), model, cfg.search, cfg.model, "cpu")
+        with self.assertRaises(NativeSearchParityError):
+            run_native_mcts(_message(), model, cfg.search, cfg.model, "cpu")
+
+    def test_cpp_tree_accepts_full_payload_and_serializes_leaf_payload(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        tree = extension.NativeMCTS(_message(), [1, 2], [0.75, 0.25], 0.1, False, 7, 64)
+
+        with self.assertRaisesRegex(RuntimeError, "unsupported_or_failed_transition:SPAWN"):
+            tree.select_leaf(4, 1.5)
+
+    def test_strict_native_tree_rejects_missing_required_tile_field(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message()
+        del message["observation"]["board"]["tiles"][0][0]["city_id"]
+
+        with self.assertRaisesRegex(RuntimeError, "missing city_id/city"):
+            extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
+
+    def test_strict_native_tree_rejects_unknown_action_type(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message()
+        message["actions"] = [{"id": "bogus", "type": "BOGUS"}]
+        tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
+
+        with self.assertRaisesRegex(RuntimeError, "unsupported_or_failed_transition:BOGUS"):
+            tree.select_leaf(4, 1.5)
+
+    def test_strict_native_tree_rejects_invalid_root_action_index(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+
+        with self.assertRaisesRegex(IndexError, "Root action index out of range"):
+            extension.NativeMCTS(_message(), [99], [1.0], 0.1, False, 7, 64)
+
+    def test_capital_capture_terminal_leaf_has_root_win_value(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        for mode in ("MIGHT", "CAPITALS"):
+            with self.subTest(mode=mode):
+                tree = extension.NativeMCTS(
+                    _message_with_capital_capture(mode=mode),
+                    [0],
+                    [1.0],
+                    0.1,
+                    False,
+                    7,
+                    64,
+                )
+
+                selection = dict(tree.select_leaf(4, 1.5))
+
+                self.assertTrue(selection["needs_expansion"])
+                self.assertTrue(selection["leaf_terminal"])
+                self.assertEqual(selection["leaf_value"], 1.0)
+                leaf_payload = dict(selection["leaf_payload"])
+                self.assertTrue(leaf_payload["is_terminal"])
+                self.assertEqual(leaf_payload["winner_id"], 0)
+                self.assertEqual(leaf_payload["normalized_terminal_reward"], 1.0)
+                self.assertEqual(leaf_payload["native_terminal_reason"], "capital_objective:player_0")
+
+    def test_enemy_capital_capture_terminal_leaf_has_root_loss_value(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        tree = extension.NativeMCTS(
+            _message_with_capital_capture(capturer=1, target_city_id=10),
+            [0],
+            [1.0],
+            0.1,
+            False,
+            7,
+            64,
+        )
+
+        selection = dict(tree.select_leaf(4, 1.5))
+
+        self.assertTrue(selection["needs_expansion"])
+        self.assertTrue(selection["leaf_terminal"])
+        self.assertEqual(selection["leaf_value"], -1.0)
+        leaf_payload = dict(selection["leaf_payload"])
+        self.assertTrue(leaf_payload["is_terminal"])
+        self.assertEqual(leaf_payload["winner_id"], 1)
+        self.assertEqual(leaf_payload["normalized_terminal_reward"], -1.0)
+        self.assertEqual(leaf_payload["native_terminal_reason"], "capital_objective:player_1")
+
+    def test_capital_capture_without_all_capitals_regenerates_actions(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        tree = extension.NativeMCTS(
+            _message_with_capital_capture(extra_capital_owner=2),
+            [0],
+            [1.0],
+            0.1,
+            False,
+            7,
+            64,
+        )
+
+        selection = dict(tree.select_leaf(4, 1.5))
+        leaf_payload = dict(selection["leaf_payload"])
+
+        self.assertFalse(selection["leaf_terminal"])
+        self.assertFalse(leaf_payload["is_terminal"])
+        self.assertGreater(len(leaf_payload["actions"]), 0)
+        captured_city = next(city for city in leaf_payload["observation"]["cities"] if city["id"] == 20)
+        self.assertEqual(captured_city["tribe_id"], 0)
+        self.assertEqual(captured_city["p"], 0)
+        self.assertEqual(leaf_payload["observation"]["units"][0]["status"], "FINISHED")
+
+    def test_terminal_capital_value_backs_up_as_root_perspective(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message_with_capital_capture(
+            capturer=1,
+            target_city_id=10,
+            second_action={"id": "end", "type": "END_TURN"},
+        )
+        tree = extension.NativeMCTS(message, [0, 1], [0.95, 0.05], 0.0, False, 7, 64)
+
+        batch = tree.select_leaf_batch_evals_only(1, 4, 1.5)
+        self.assertEqual(len(batch), 0)
+        selection = dict(tree.select_leaf(4, 1.5))
+
+        self.assertEqual(selection["path_action_indexes"], [1])
+
+    def test_supported_move_regenerates_follow_up_actions(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        tree = extension.NativeMCTS(_message_with_unit_move(), [0, 1], [1.0, 0.0], 0.1, False, 7, 64)
+
+        selection = dict(tree.select_leaf(4, 1.5))
+
+        self.assertTrue(selection["needs_expansion"])
+        self.assertFalse(selection["leaf_terminal"])
+        leaf_payload = dict(selection["leaf_payload"])
+        self.assertFalse(leaf_payload["is_terminal"])
+        self.assertEqual([action["type"] for action in leaf_payload["actions"]], ["END_TURN"])
+        self.assertTrue(str(leaf_payload["actions"][0]["id"]).startswith("sim:p0:t0:"))
+        moved_unit = leaf_payload["observation"]["units"][0]
+        self.assertEqual((moved_unit["x"], moved_unit["y"]), (2, 1))
+        self.assertEqual(moved_unit["status"], "MOVED")
+        self.assertEqual(leaf_payload["observation"]["board"]["tiles"][1][1]["unit_id"], 0)
+        self.assertEqual(leaf_payload["observation"]["board"]["tiles"][1][2]["unit_id"], 1)
+
+    def test_end_turn_without_visible_enemy_advances_by_live_tribe_order(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        tree = extension.NativeMCTS(_message_with_end_turn(), [0], [1.0], 0.1, False, 7, 64)
+
+        with self.assertRaisesRegex(RuntimeError, "opponent-perspective observation parity"):
+            tree.select_leaf(4, 1.5)
+
+    def test_end_turn_cycles_back_to_root_when_no_enemy_visible(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        first_tree = extension.NativeMCTS(_message_with_end_turn(), [0], [1.0], 0.1, False, 7, 64)
+        with self.assertRaisesRegex(RuntimeError, "opponent-perspective observation parity"):
+            first_tree.select_leaf(4, 1.5)
+
+    def test_native_attack_transition_is_non_terminal(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message_with_unit_move()
+        message["observation"]["units"].append(
+            {
+                "id": 2,
+                "tribe_id": 1,
+                "city_id": 0,
+                "type": "WARRIOR",
+                "x": 2,
+                "y": 1,
+                "current_hp": 10,
+                "max_hp": 10,
+                "kills": 0,
+                "is_veteran": False,
+                "status": "FRESH",
+                "is_hidden": False,
+            }
+        )
+        message["observation"]["board"]["tiles"][1][2]["unit_id"] = 2
+        message["actions"] = [{"id": "attack", "type": "ATTACK", "unit_id": 1, "target_unit_id": 2, "tu": 2}]
+        tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
+
+        selection = dict(tree.select_leaf(4, 1.5))
+        leaf_payload = dict(selection["leaf_payload"])
+
+        self.assertFalse(selection["leaf_terminal"])
+        self.assertFalse(leaf_payload["is_terminal"])
+        target = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 2)
+        self.assertLess(target["current_hp"], 10)
+
+    def test_research_tech_identity_is_encoded(self) -> None:
+        cfg = HybridAgentConfig()
+        message = _message()
+        message["actions"] = [
+            {"id": "fish", "type": "RESEARCH_TECH", "tech": "FISHING"},
+            {"id": "ride", "type": "RESEARCH_TECH", "tech": "RIDING"},
+        ]
+
+        encoded = encode_observation(message, cfg.model)
+        tech_start = cfg.model.action_feature_dim - len(TECH_TYPES)
+        fish_features = encoded.action_features[0, 0, tech_start:]
+        ride_features = encoded.action_features[0, 1, tech_start:]
+
+        self.assertEqual(int(fish_features.sum().item()), 1)
+        self.assertEqual(int(ride_features.sum().item()), 1)
+        self.assertNotEqual(int(fish_features.argmax().item()), int(ride_features.argmax().item()))
+
+    def test_end_turn_with_visible_enemy_unit_switches_to_enemy_actions(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        tree = extension.NativeMCTS(_message_with_end_turn(unit_owner=1), [0], [1.0], 0.1, False, 7, 64)
+
+        with self.assertRaisesRegex(RuntimeError, "opponent-perspective observation parity"):
+            tree.select_leaf(4, 1.5)
+
+    def test_end_turn_with_visible_enemy_city_switches_to_enemy_actions(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        tree = extension.NativeMCTS(_message_with_end_turn(city_owner=1), [0], [1.0], 0.1, False, 7, 64)
+
+        with self.assertRaisesRegex(RuntimeError, "opponent-perspective observation parity"):
+            tree.select_leaf(4, 1.5)
+
+    def test_multiple_visible_enemies_use_cyclic_order(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        tree = extension.NativeMCTS(_message_with_two_visible_enemies(), [0], [1.0], 0.1, False, 7, 64)
+
+        with self.assertRaisesRegex(RuntimeError, "opponent-perspective observation parity"):
+            tree.select_leaf(4, 1.5)
+
+    def test_generated_leaf_payload_encodes_successfully(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        tree = extension.NativeMCTS(_message_with_end_turn(unit_owner=1), [0], [1.0], 0.1, False, 7, 64)
+
+        with self.assertRaisesRegex(RuntimeError, "opponent-perspective observation parity"):
+            tree.select_leaf(4, 1.5)
+
+    def test_strict_native_mcts_raises_before_approximate_follow_up_distribution(self) -> None:
+        cfg = HybridAgentConfig()
+        cfg.search.num_simulations = 12
+        cfg.search.batch_size = 4
+        cfg.search.sample_action = False
+        cfg.search.dirichlet_epsilon = 0.0
+        cfg.search.seed = 123
+        model = HybridPolicyValueNet(cfg.model).eval()
+
+        with self.assertRaises(NativeSearchParityError):
+            run_native_mcts(_message_with_unit_move(), model, cfg.search, cfg.model, "cpu")
+
+    def test_enemy_leaf_value_backs_up_from_root_perspective(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message_with_end_turn(unit_owner=1)
+        message["actions"].append({"id": "road", "type": "BUILD_ROAD", "tribe_id": 0, "x": 0, "y": 0, "position": {"x": 0, "y": 0}})
+        tree = extension.NativeMCTS(message, [0, 1], [0.5, 0.5], 0.1, False, 7, 64)
+
+        with self.assertRaisesRegex(RuntimeError, "opponent-perspective observation parity"):
+            tree.select_leaf(4, 1.5)
+
+    def test_end_turn_visit_guard_requires_non_end_exploration(self) -> None:
+        cfg = HybridAgentConfig()
+        cfg.search.min_non_end_turn_visits = 1
+        action_id = _apply_end_turn_visit_guard(
+            "end",
+            {"end": 1.0, "research": 0.0},
+            [{"id": "end", "type": "END_TURN"}, {"id": "research", "type": "RESEARCH_TECH"}],
+            cfg.search,
+        )
+
+        self.assertEqual(action_id, "research")
+
+    def test_eval_cache_key_distinguishes_same_actions_different_state(self) -> None:
+        first = _message()
+        second = _message()
+        second["observation"]["tribes"][0]["stars"] = 5
+
+        self.assertNotEqual(_message_cache_key(first), _message_cache_key(second))
+
+    def test_eval_cache_key_is_stable_for_dict_order(self) -> None:
+        first = {"player_id": 0, "observation": {"tick": 1, "active_player_id": 0}, "actions": [{"id": "a", "type": "END_TURN"}]}
+        second = {"actions": [{"type": "END_TURN", "id": "a"}], "observation": {"active_player_id": 0, "tick": 1}, "player_id": 0}
+
+        self.assertEqual(_message_cache_key(first), _message_cache_key(second))
+
+    def test_static_eval_returns_normalized_priors(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+
+        evaluation = dict(extension.evaluate_static(_message(), 64))
+        priors = [float(value) for value in evaluation["priors"]]
+
+        self.assertEqual(len(priors), 3)
+        self.assertAlmostEqual(sum(priors), 1.0, places=6)
+        self.assertGreaterEqual(float(evaluation["value"]), -1.0)
+        self.assertLessEqual(float(evaluation["value"]), 1.0)
+
+    def test_static_eval_prioritizes_capture_over_end_turn(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message_with_capital_capture(second_action={"id": "end", "type": "END_TURN"})
+
+        evaluation = dict(extension.evaluate_static(message, 64))
+        priors = [float(value) for value in evaluation["priors"]]
+
+        self.assertGreater(priors[0], priors[1])
+
+    def test_static_eval_values_villages_and_ruins_over_isolated_roads(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message_with_village_and_ruin_choices()
+
+        evaluation = dict(extension.evaluate_static(message, 64))
+        priors = [float(value) for value in evaluation["priors"]]
+
+        self.assertGreater(priors[0], priors[2])
+        self.assertGreater(priors[1], priors[2])
+
+    def test_native_tree_simulates_village_capture(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        tree = extension.NativeMCTS(_message_with_village_capture(), [0], [1.0], 0.1, False, 7, 64)
+
+        raw_selection = tree.select_leaf_batch_evals_only(1, 4, 1.0)[0]
+        leaf_payload = dict(raw_selection[-1])
+        cities = list(leaf_payload["observation"]["cities"])
+
+        self.assertEqual(leaf_payload.get("native_terminal_reason", ""), "")
+        self.assertEqual(len(cities), 2)
+        self.assertTrue(any(city["x"] == 1 and city["y"] == 1 and city["tribe_id"] == 0 for city in cities))
+
+    def test_static_eval_preserves_known_terminal_value(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message()
+        message["is_terminal"] = True
+        message["normalized_terminal_reward"] = 0.75
+        message["actions"] = []
+
+        evaluation = dict(extension.evaluate_static(message, 64))
+
+        self.assertEqual(list(evaluation["priors"]), [])
+        self.assertAlmostEqual(float(evaluation["value"]), 0.75)
+
+    def test_native_static_mcts_raises_on_approximate_opponent_turns(self) -> None:
+        cfg = HybridAgentConfig()
+        cfg.search.num_simulations = 12
+        cfg.search.batch_size = 4
+        cfg.search.sample_action = False
+        cfg.search.dirichlet_epsilon = 0.0
+        cfg.search.root_temperature = 1e-6
+        cfg.search.seed = 123
+
+        with self.assertRaises(NativeSearchParityError):
+            run_native_static_mcts(_message(), cfg.search, cfg.model)
+
+    def test_native_static_mcts_bot_protocol_smoke(self) -> None:
+        bot_path = Path(__file__).resolve().parents[1] / "bots" / "native_static_mcts_bot.py"
+        message = _message_with_capital_capture(second_action={"id": "end", "type": "END_TURN"})
+        message["type"] = "action_request"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(bot_path),
+                "--simulations",
+                "4",
+                "--search-batch-size",
+                "2",
+                "--deterministic",
+            ],
+            input=json.dumps(message) + "\n",
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        )
+
+        response = json.loads(completed.stdout.strip().splitlines()[-1])
+
+        self.assertIn(response.get("actionId"), {"capture", "end"})
+
+
+if __name__ == "__main__":
+    unittest.main()

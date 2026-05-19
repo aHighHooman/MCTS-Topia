@@ -1,0 +1,314 @@
+--- /mnt/data/native_static_eval.cpp.bak	2026-05-19 02:58:31.950689030 +0000
++++ /mnt/data/native_static_eval.cpp	2026-05-19 02:59:17.983871380 +0000
+@@ -28,6 +28,22 @@
+   }
+ }
+ 
++bool read_int_key(const py::handle& object, const char* key, int* out) {
++  if (out == nullptr || !py::isinstance<py::dict>(object)) {
++    return false;
++  }
++  py::dict dict = py::reinterpret_borrow<py::dict>(object);
++  if (!dict.contains(key) || dict[py::str(key)].is_none()) {
++    return false;
++  }
++  try {
++    *out = py::cast<int>(dict[py::str(key)]);
++    return true;
++  } catch (const py::cast_error&) {
++    return false;
++  }
++}
++
+ std::string read_string(const py::handle& object, const char* key) {
+   if (!py::isinstance<py::dict>(object)) {
+     return "";
+@@ -52,11 +68,14 @@
+ }
+ 
+ int action_int(const NativeAction& action, const char* primary, const char* fallback = nullptr) {
+-  int value = read_int(action.payload, primary, 0);
+-  if (value == 0 && fallback != nullptr) {
+-    value = read_int(action.payload, fallback, 0);
++  int value = 0;
++  if (read_int_key(action.payload, primary, &value)) {
++    return value;
+   }
+-  return value;
++  if (fallback != nullptr && read_int_key(action.payload, fallback, &value)) {
++    return value;
++  }
++  return 0;
+ }
+ 
+ int action_nested_int(const NativeAction& action, const char* object_key, const char* primary, const char* fallback = nullptr) {
+@@ -64,11 +83,39 @@
+     return 0;
+   }
+   py::handle object = action.payload[py::str(object_key)];
+-  int value = read_int(object, primary, 0);
+-  if (value == 0 && fallback != nullptr) {
+-    value = read_int(object, fallback, 0);
++  int value = 0;
++  if (read_int_key(object, primary, &value)) {
++    return value;
+   }
+-  return value;
++  if (fallback != nullptr && read_int_key(object, fallback, &value)) {
++    return value;
++  }
++  return 0;
++}
++
++bool action_destination(const NativeAction& action, int* x, int* y) {
++  if (x == nullptr || y == nullptr || !py::isinstance<py::dict>(action.payload)) {
++    return false;
++  }
++  py::dict payload = py::reinterpret_borrow<py::dict>(action.payload);
++  if (payload.contains("destination") && !payload[py::str("destination")].is_none()) {
++    py::handle destination = payload[py::str("destination")];
++    int dx = 0;
++    int dy = 0;
++    if (read_int_key(destination, "x", &dx) && read_int_key(destination, "y", &dy)) {
++      *x = dx;
++      *y = dy;
++      return true;
++    }
++  }
++  int dx = 0;
++  int dy = 0;
++  if (read_int_key(action.payload, "x", &dx) && read_int_key(action.payload, "y", &dy)) {
++    *x = dx;
++    *y = dy;
++    return true;
++  }
++  return false;
+ }
+ 
+ int chebyshev(int ax, int ay, int bx, int by) {
+@@ -177,7 +224,8 @@
+ }
+ 
+ bool can_threaten(const NativeUnit& attacker, int x, int y) {
+-  return chebyshev(attacker.x, attacker.y, x, y) <= unit_range(attacker.type);
++  const int threat_reach = unit_mobility(attacker.type) + unit_range(attacker.type);
++  return chebyshev(attacker.x, attacker.y, x, y) <= threat_reach;
+ }
+ 
+ double enemy_attack_pressure_at(const NativeGameState& state, int player_id, int x, int y) {
+@@ -187,7 +235,16 @@
+       continue;
+     }
+     const int dist = std::max(1, chebyshev(enemy.x, enemy.y, x, y));
+-    const double reach_bonus = dist <= unit_range(enemy.type) ? 1.0 : 0.35;
++    const int direct_reach = unit_range(enemy.type);
++    const int move_attack_reach = unit_mobility(enemy.type) + direct_reach;
++    double reach_bonus = 0.12;
++    if (dist <= direct_reach) {
++      reach_bonus = 1.15;
++    } else if (dist <= move_attack_reach) {
++      reach_bonus = 0.85;
++    } else if (dist <= move_attack_reach + 1) {
++      reach_bonus = 0.35;
++    }
+     pressure += reach_bonus * unit_power(enemy) / static_cast<double>(dist);
+   }
+   return pressure;
+@@ -227,10 +284,18 @@
+   return best;
+ }
+ 
+-int nearest_resource_distance(const NativeGameState& state, int x, int y) {
++bool tile_in_player_city(const NativeGameState& state, int player_id, const NativeTile& tile) {
++  if (tile.city_id <= 0) {
++    return false;
++  }
++  const NativeCity* city = city_by_id(state, tile.city_id);
++  return city != nullptr && city->tribe_id == player_id;
++}
++
++int nearest_owned_resource_distance(const NativeGameState& state, int player_id, int x, int y) {
+   int best = -1;
+   for (const NativeTile& tile : state.tiles) {
+-    if (tile.visible && !tile.resource.empty()) {
++    if (tile.visible && !tile.resource.empty() && tile_in_player_city(state, player_id, tile)) {
+       const int dist = chebyshev(x, y, tile.x, tile.y);
+       if (best < 0 || dist < best) {
+         best = dist;
+@@ -256,7 +321,7 @@
+   if (city == nullptr) {
+     return 5;
+   }
+-  return city->level + 1 - city->production;
++  return std::max(0, city->level + 1 - city->production);
+ }
+ 
+ bool has_unexplored_neighbor(const NativeGameState& state, int x, int y) {
+@@ -295,7 +360,8 @@
+ int nearest_enemy_city_distance(const NativeGameState& state, int player_id, int x, int y) {
+   int best = -1;
+   for (const NativeCity& city : state.cities) {
+-    if (city.tribe_id != player_id) {
++    const NativeTile* city_tile = tile_at(state, city.x, city.y);
++    if (city.tribe_id != player_id && city_tile != nullptr && city_tile->visible) {
+       const int dist = chebyshev(x, y, city.x, city.y);
+       if (best < 0 || dist < best) {
+         best = dist;
+@@ -310,8 +376,7 @@
+     if (enemy.tribe_id == unit.tribe_id || enemy.hidden || enemy.current_hp <= 0) {
+       continue;
+     }
+-    if (chebyshev(unit.x, unit.y, enemy.x, enemy.y) <= unit_range(enemy.type) &&
+-        unit_attack(enemy.type) > unit_defence(unit.type)) {
++    if (can_threaten(enemy, unit.x, unit.y) && unit_attack(enemy.type) > unit_defence(unit.type)) {
+       return &enemy;
+     }
+   }
+@@ -497,26 +562,47 @@
+   if (attacker == nullptr || defender == nullptr) {
+     return 0.0;
+   }
++
+   const double target_value = unit_value(*defender);
+   const double attacker_value = unit_value(*attacker);
+-  const bool lethal = attacker->current_hp >= defender->current_hp || unit_attack(attacker->type) * 2 >= defender->current_hp;
+   const bool ranged = unit_range(attacker->type) > 1;
+-  double score = 2.0 + 0.55 * target_value - 0.18 * attacker_value;
+-  if (lethal) {
+-    score += 3.0;
++  const double attack_ratio = static_cast<double>(unit_attack(attacker->type)) /
++      static_cast<double>(std::max(1, unit_defence(defender->type)));
++  const double hp_ratio = static_cast<double>(std::max(1, attacker->current_hp)) /
++      static_cast<double>(std::max(1, defender->current_hp));
++
++  // This is still an approximation; the real rules/combat forecast should replace it when available.
++  const bool likely_kill = unit_attack(attacker->type) * std::max(1, attacker->current_hp) >=
++      unit_defence(defender->type) * std::max(1, defender->current_hp);
++  const double expected_damage_value = target_value * clamp(0.30 * attack_ratio + 0.20 * hp_ratio, 0.15, 1.20);
++  const double retaliation = ranged ? 0.0 : unit_power(*defender) *
++      clamp(static_cast<double>(defender->current_hp) / std::max(1, defender->max_hp), 0.2, 1.0);
++
++  double score = 1.4 + 0.65 * expected_damage_value - 0.16 * attacker_value;
++  if (likely_kill) {
++    score += 3.2 + 0.40 * target_value;
+   }
+   if (ranged) {
+-    score += 1.1;
++    score += 0.9;
++  } else {
++    score -= 0.42 * retaliation;
++    if (!likely_kill && attacker->current_hp < defender->current_hp) {
++      score -= 1.3;
++    }
+   }
+-  const double retaliation = ranged ? 0.0 : unit_power(*defender) * clamp(static_cast<double>(defender->current_hp) / std::max(1, defender->max_hp), 0.2, 1.0);
+-  score -= 0.35 * retaliation;
++
+   const NativeTile* target_tile = tile_at(state, defender->x, defender->y);
+   if (target_tile != nullptr && target_tile->city_id > 0) {
+     const NativeCity* target_city = city_by_id(state, target_tile->city_id);
+     if (target_city != nullptr && target_city->tribe_id != player_id) {
+-      score += 1.3 + (target_city->capital ? 2.5 : 0.0);
++      score += 1.4 + (target_city->capital ? 2.6 : 0.0);
+     }
+   }
++
++  const double post_attack_danger = enemy_attack_pressure_at(state, player_id, defender->x, defender->y);
++  if (!ranged && post_attack_danger > 5.0 && !likely_kill) {
++    score -= 1.0;
++  }
+   return clamp(score, 0.0, 10.0);
+ }
+ 
+@@ -525,11 +611,10 @@
+   if (unit == nullptr) {
+     return 0.0;
+   }
+-  int dx = action_nested_int(action, "destination", "x");
+-  int dy = action_nested_int(action, "destination", "y");
+-  if (dx == 0 && dy == 0) {
+-    dx = action_int(action, "x");
+-    dy = action_int(action, "y");
++  int dx = unit->x;
++  int dy = unit->y;
++  if (!action_destination(action, &dx, &dy)) {
++    return 0.0;
+   }
+   const NativeUnit* stronger = stronger_enemy_near(state, *unit);
+   if (stronger != nullptr &&
+@@ -562,11 +647,10 @@
+   if (unit == nullptr) {
+     return 0.0;
+   }
+-  int dx = action_nested_int(action, "destination", "x");
+-  int dy = action_nested_int(action, "destination", "y");
+-  if (dx == 0 && dy == 0) {
+-    dx = action_int(action, "x");
+-    dy = action_int(action, "y");
++  int dx = unit->x;
++  int dy = unit->y;
++  if (!action_destination(action, &dx, &dy)) {
++    return 0.0;
+   }
+   double score = 0.0;
+   const int village_before = nearest_visible_village_distance(state, unit->x, unit->y);
+@@ -579,9 +663,11 @@
+   if (city_after == 0) score += 7.0;
+   else if (city_after >= 0 && (city_before < 0 || city_after < city_before)) score += 3.0 + 0.35 * (city_before - city_after);
+ 
+-  const int resource_before = nearest_resource_distance(state, unit->x, unit->y);
+-  const int resource_after = nearest_resource_distance(state, dx, dy);
+-  if (resource_after >= 0 && (resource_before < 0 || resource_after < resource_before)) score += 0.8;
++  // Standing closer to arbitrary visible resources is not itself useful in Polytopia.
++  // Only give a tiny bonus near owned resources, where the unit may be defending an economic tile.
++  const int resource_before = nearest_owned_resource_distance(state, player_id, unit->x, unit->y);
++  const int resource_after = nearest_owned_resource_distance(state, player_id, dx, dy);
++  if (resource_after >= 0 && resource_after <= 1 && (resource_before < 0 || resource_after < resource_before)) score += 0.35;
+   if (has_unexplored_neighbor(state, dx, dy)) score += 2.0;
+   if (tile_has_own_city(state, player_id, dx, dy)) score += unit->current_hp < unit->max_hp ? 1.0 : -0.5;
+ 
+@@ -687,8 +773,8 @@
+   const int player_id = state.active_player_id;
+   const std::string type = action_type(action);
+   if (type == "CAPTURE") return 10.0;
+-  if (type == "EXAMINE") return 8.0;
+-  if (type == "MAKE_VETERAN") return 9.0;
++  if (type == "EXAMINE") return 6.5;
++  if (type == "MAKE_VETERAN") return 8.5;
+   if (type == "DISBAND") return -3.5;
+   if (type == "DESTROY") return -2.2;
+   if (type == "END_TURN") return -1.8;
+@@ -815,7 +901,10 @@
+         capital_threat += std::min(7.0, threat);
+       }
+     } else {
+-      ++enemy_cities;
++      const NativeTile* city_tile = tile_at(state, city.x, city.y);
++      if (city_tile != nullptr && city_tile->visible) {
++        ++enemy_cities;
++      }
+     }
+   }
+   for (const NativeTile& tile : state.tiles) {
+@@ -915,6 +1004,10 @@
+         capital_threat += std::min(12.0, threat);
+       }
+     } else {
++      const NativeTile* city_tile = tile_at(state, city.x, city.y);
++      if (city_tile == nullptr || !city_tile->visible) {
++        continue;
++      }
+       ++enemy_cities;
+       enemy_capitals += city.capital ? 1 : 0;
+       enemy_city_quality += quality;
+@@ -934,8 +1027,8 @@
+   int roads = 0;
+   for (const NativeTile& tile : state.tiles) {
+     explored += tile.explored ? 1 : 0;
+-    visible_resources += tile.visible && !tile.resource.empty() ? 1 : 0;
+-    roads += tile.road ? 1 : 0;
++    visible_resources += tile.visible && !tile.resource.empty() && tile_in_player_city(state, player_id, tile) ? 1 : 0;
++    roads += tile.road && tile_in_player_city(state, player_id, tile) ? 1 : 0;
+     if (tile.visible && tile.terrain == "VILLAGE") {
+       ++visible_villages;
+       int my_best = -1;

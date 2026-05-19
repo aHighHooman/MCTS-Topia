@@ -1,0 +1,58 @@
+package core.actions.unitactions;
+
+import core.Types;
+import core.actions.Action;
+import core.game.GameState;
+import core.actors.units.Unit;
+
+public class Attack extends UnitAction
+{
+    private int targetId;
+
+    public Attack (int unitId)
+    {
+        super(Types.ACTION.ATTACK);
+        super.unitId = unitId;
+    }
+
+    public void setTargetId(int targetId) {this.targetId = targetId;}
+    public int getTargetId() {
+        return targetId;
+    }
+
+    @Override
+    public boolean isFeasible(final GameState gs)
+    {
+        Unit target = (Unit) gs.getActor(this.targetId);
+        Unit attacker = (Unit) gs.getActor(this.unitId);
+
+        // Check if target is not null and that it can attack
+        if(target == null || !attacker.canAttack() || attacker.getAttackValue() <= 0 ||
+                attacker.getType() == Types.UNIT.MIND_BENDER ||
+                attacker.getType() == Types.UNIT.CLOAK ||
+                attacker.getType() == Types.UNIT.DINGHY)
+            return false;
+
+        if(gs.getBoard().getDiplomacy().isTreaty(attacker.getTribeId(), target.getTribeId()))
+            return false;
+
+        return unitInRange(attacker, target, gs.getBoard());
+    }
+
+    @Override
+    public Action copy() {
+        Attack attack = new Attack(this.unitId);
+        attack.setTargetId(this.targetId);
+        return attack;
+    }
+
+    public String toString() { return "ATTACK by unit " + this.unitId + " to unit " + this.targetId;}
+
+    public boolean equals(Object o) {
+        if(!(o instanceof Attack))
+            return false;
+        Attack other = (Attack) o;
+
+        return super.equals(other) && targetId == other.targetId;
+    }
+}

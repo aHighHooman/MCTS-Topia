@@ -1,0 +1,64 @@
+{
+  "Run Mode": "PlayLG",
+  "Run Mode comment": "PlayLG / PlayFile / Replay",
+  "Game Mode": "Capitals",
+  "Game Mode comment": "Capitals matches tribes_rl.train defaults; also Might / Perfection / Domination / Glory",
+  "Map Type": "Lakes",
+  "Map Type comment": "Drylands / Lakes / Continents / Pangea / Archipelago / Water World",
+  "Map Size": "Small",
+  "Map Size comment": "Tiny / Small / Normal / Large / Huge / Massive",
+  "Glory Score Limit": 10000,
+  "Glory Score Limit comment": "5000 / 10000 / 15000 / 20000 / 25000 (Glory only)",
+  "Seed": 9999,
+  "Seed comment": "-1 picks a random seed each launch",
+  "Max Turns Capitals": 50,
+  "Max Turns Capitals comment": "Capitals/Might turn cap; code default is 50",
+  "Max Actions Per Turn": 80,
+  "Max Actions Per Turn comment": "0 disables this per-player turn action cap; code default is 80",
+  "Max Actions Per Game": 512,
+  "Max Actions Per Game comment": "0 disables this total match action cap; code default is 512",
+  "Frame Delay": 250,
+  "Frame Delay comment": "Milliseconds between GUI action updates; 0 = fastest",
+  "Follow Active Tribe": true,
+  "Verbose": false,
+  "Replay File Name": "save/1590072023986/0_0/game.json",
+  "Level File": "levels/SampleLevel2p.csv",
+  "gui_nn_selfplay_comment": "From repo root (after build): $env:PYTHONPATH=\"$PWD\\py\"; & \"$env:JAVA_HOME\\bin\\java.exe\" -cp \"out;lib/json.jar\" Play",
+  "Participants": [
+    {
+      "Type": "External",
+      "Tribe": "Xin Xi",
+      "External Command": [
+        "python",
+        "py/bots/simple_bot.py"
+      ],
+      "External Startup Timeout Ms": 60000,
+      "External Action Timeout Ms": 300000,
+      "External Shutdown Timeout Ms": 30000,
+      "External Match Timeout Ms": 0,
+      "External Log Dir": "rl/gui_watch/logs/seat0"
+    },
+    {
+      "Type": "External",
+      "Tribe": "Imperius",
+      "External Command": [
+        "python",
+        "py/bots/native_static_mcts_bot.py",
+        "--deterministic",
+        "--max-depth",
+        "0",
+        "--top-k-actions",
+        "64",
+        "--search-batch-size",
+        "64",
+        "--wall-clock-per-action-seconds",
+        "3"
+      ],
+      "External Startup Timeout Ms": 60000,
+      "External Action Timeout Ms": 300000,
+      "External Shutdown Timeout Ms": 30000,
+      "External Match Timeout Ms": 0,
+      "External Log Dir": "rl/gui_watch/logs/seat1"
+    }
+  ]
+}
