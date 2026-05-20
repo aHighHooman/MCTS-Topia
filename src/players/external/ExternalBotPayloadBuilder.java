@@ -8,16 +8,25 @@ import core.actions.cityactions.CityAction;
 import core.actions.cityactions.LevelUp;
 import core.actions.cityactions.ResourceGathering;
 import core.actions.cityactions.Spawn;
+import core.actions.tribeactions.AcceptPeace;
+import core.actions.tribeactions.AcceptTreaty;
+import core.actions.tribeactions.BuildEmbassy;
 import core.actions.tribeactions.BuildRoad;
+import core.actions.tribeactions.CancelTreaty;
+import core.actions.tribeactions.ProposePeace;
+import core.actions.tribeactions.ProposeTreaty;
 import core.actions.tribeactions.ResearchTech;
 import core.actions.tribeactions.TribeAction;
 import core.actions.unitactions.Attack;
 import core.actions.unitactions.Capture;
 import core.actions.unitactions.Convert;
+import core.actions.unitactions.Examine;
+import core.actions.unitactions.Infiltrate;
 import core.actions.unitactions.Move;
 import core.actions.unitactions.UnitAction;
 import core.actors.Building;
 import core.actors.City;
+import core.actors.Temple;
 import core.actors.Tribe;
 import core.actors.units.Unit;
 import core.game.Board;
@@ -88,9 +97,15 @@ public final class ExternalBotPayloadBuilder {
 
     public static JSONObject buildForwardModelStatePayload(GameState gs, int playerId,
                                                            ArrayList<Action> legalActions) {
+        return buildForwardModelStatePayload(gs, playerId, legalActions, null);
+    }
+
+    public static JSONObject buildForwardModelStatePayload(GameState gs, int playerId,
+                                                           ArrayList<Action> legalActions,
+                                                           ArrayList<String> actionIds) {
         JSONObject payload = new JSONObject();
         payload.put("obs", serializeObservation(gs, playerId));
-            payload.put("actions", serializeActions(legalActions, null));
+        payload.put("actions", serializeActions(legalActions, actionIds));
         payload.put("terminal", gs.isGameOver() || legalActions.isEmpty());
         payload.put("active", gs.getActiveTribeID());
         if (gs.isGameOver()) {
@@ -134,7 +149,34 @@ public final class ExternalBotPayloadBuilder {
         observation.put("board", serializeBoard(observed, playerId));
         observation.put("rank", serializeRanking(observed.getCurrentRanking()));
         observation.put("rel", serializeRelationships(observed, playerId));
+        observation.put("capitals", serializeCapitalCities(gs));
         return observation;
+    }
+
+    private static JSONArray serializeCapitalCities(GameState gs) {
+        JSONArray capitals = new JSONArray();
+        for (Tribe tribe : gs.getTribes()) {
+            int capitalId = tribe.getCapitalID();
+            if (capitalId <= 0) {
+                continue;
+            }
+            City city = (City) gs.getActor(capitalId);
+            if (city == null) {
+                continue;
+            }
+            JSONObject out = new JSONObject();
+            out.put("id", city.getActorId());
+            out.put("p", city.getTribeId());
+            out.put("x", city.getPosition().x);
+            out.put("y", city.getPosition().y);
+            out.put("lvl", city.getLevel());
+            out.put("pop", city.getPopulation());
+            out.put("need", city.getPopulation_need());
+            out.put("prod", city.getProduction());
+            out.put("cap", true);
+            capitals.put(out);
+        }
+        return capitals;
     }
 
     private static JSONArray serializeTribes(GameState gs) {
@@ -148,9 +190,27 @@ public final class ExternalBotPayloadBuilder {
             out.put("res", tribe.getWinner().name());
             out.put("cap", tribe.getCapitalID());
             out.put("tech", researchedTechIds(tribe.getTechTree()));
+            out.put("cities", serializeIntegerList(tribe.getCitiesID()));
+            out.put("extra", serializeIntegerList(tribe.getExtraUnits()));
+            out.put("conn", serializeIntegerList(tribe.getConnectedCities()));
+            out.put("met", serializeIntegerList(tribe.getTribesMet()));
+            out.put("known_caps", serializeIntegerList(tribe.getKnownCapitalTribes()));
+            out.put("lights", serializeIntegerList(tribe.getDiscoveredLighthouses()));
+            out.put("kills", tribe.getnKills());
+            out.put("pacifist", tribe.getnPacifistCount());
+            out.put("disabled", tribe.isUnitsDisabledNextTurn());
+            out.put("mon", serializeMonuments(tribe));
             tribes.put(out);
         }
         return tribes;
+    }
+
+    private static JSONObject serializeMonuments(Tribe tribe) {
+        JSONObject out = new JSONObject();
+        for (Types.BUILDING building : tribe.getMonuments().keySet()) {
+            out.put(building.name(), tribe.getMonuments().get(building).name());
+        }
+        return out;
     }
 
     private static JSONArray researchedTechIds(TechnologyTree tree) {
@@ -177,7 +237,10 @@ public final class ExternalBotPayloadBuilder {
                 out.put("prod", city.getProduction());
                 out.put("cap", city.isCapital());
                 out.put("wall", city.hasWalls());
+                out.put("bound", city.getBound());
                 out.put("pts", city.getPointsWorth());
+                out.put("inf", city.isInfiltrated());
+                out.put("units", serializeIntegerList(city.getUnitsID()));
                 out.put("b", serializeBuildings(city.getBuildings()));
                 cities.put(out);
             }
@@ -192,6 +255,13 @@ public final class ExternalBotPayloadBuilder {
             entry.put("t", building.type.name());
             entry.put("x", building.position.x);
             entry.put("y", building.position.y);
+            entry.put("city", building.cityId);
+            entry.put("owner", building.getStoredOwnerTribeId());
+            if (building instanceof Temple) {
+                Temple temple = (Temple) building;
+                entry.put("lvl", temple.getLevel());
+                entry.put("score_turns", temple.getTurnsToScore());
+            }
             out.put(entry);
         }
         return out;
@@ -213,11 +283,13 @@ public final class ExternalBotPayloadBuilder {
                 out.put("x", unit.getPosition().x);
                 out.put("y", unit.getPosition().y);
                 out.put("hp", unit.getCurrentHP());
+                out.put("hpx", unit.getCurrentHPExact());
                 out.put("mhp", unit.getMaxHP());
                 out.put("k", unit.getKills());
                 out.put("v", unit.isVeteran());
                 out.put("s", unit.getStatus().name());
                 out.put("h", unit.isHidden());
+                out.put("hts", unit.wasHiddenAtTurnStart());
                 if (unit.hasHiddenEnemyHint()) {
                     out.put("hint", true);
                 }
@@ -316,6 +388,14 @@ public final class ExternalBotPayloadBuilder {
         return rows;
     }
 
+    private static JSONArray serializeIntegerList(Iterable<Integer> values) {
+        JSONArray out = new JSONArray();
+        for (Integer value : values) {
+            out.put(value);
+        }
+        return out;
+    }
+
     private static int unitId(Board board, int x, int y) {
         Unit unit = board.getUnitAt(x, y);
         return unit == null ? 0 : unit.getActorId();
@@ -395,6 +475,13 @@ public final class ExternalBotPayloadBuilder {
             out.put("tu", ((Attack) action).getTargetId());
         } else if (action instanceof Convert) {
             out.put("tu", ((Convert) action).getTargetId());
+        } else if (action instanceof Infiltrate) {
+            out.put("tc", ((Infiltrate) action).getTargetCityId());
+        } else if (action instanceof Examine) {
+            Types.EXAMINE_BONUS bonus = ((Examine) action).getBonus();
+            if (bonus != null) {
+                out.put("bonus", bonus.name());
+            }
         } else if (action instanceof Capture) {
             Capture capture = (Capture) action;
             out.put("tc", capture.getTargetCity());
@@ -411,6 +498,18 @@ public final class ExternalBotPayloadBuilder {
             out.put("tech", ((ResearchTech) action).getTech().name());
         } else if (action instanceof BuildRoad) {
             putXY(out, ((BuildRoad) action).getPosition());
+        } else if (action instanceof BuildEmbassy) {
+            out.put("tp", ((BuildEmbassy) action).getTargetID());
+        } else if (action instanceof ProposePeace) {
+            out.put("tp", ((ProposePeace) action).getTargetID());
+        } else if (action instanceof ProposeTreaty) {
+            out.put("tp", ((ProposeTreaty) action).getTargetID());
+        } else if (action instanceof AcceptPeace) {
+            out.put("tp", ((AcceptPeace) action).getTargetID());
+        } else if (action instanceof AcceptTreaty) {
+            out.put("tp", ((AcceptTreaty) action).getTargetID());
+        } else if (action instanceof CancelTreaty) {
+            out.put("tp", ((CancelTreaty) action).getTargetID());
         }
 
         return out;

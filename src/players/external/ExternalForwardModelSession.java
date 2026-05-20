@@ -30,7 +30,7 @@ public class ExternalForwardModelSession {
 
         private JSONObject toPayload(int playerId) {
             JSONObject payload = ExternalBotPayloadBuilder.buildForwardModelStatePayload(
-                    state, playerId, actions);
+                    state, playerId, actions, actionIds);
             payload.put("state_id", stateId);
             return payload;
         }

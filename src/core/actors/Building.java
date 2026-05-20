@@ -69,4 +69,8 @@ public class Building {
     public int getOwnerTribeId(int defaultOwnerTribeId) {
         return ownerTribeId == -1 ? defaultOwnerTribeId : ownerTribeId;
     }
+
+    public int getStoredOwnerTribeId() {
+        return ownerTribeId;
+    }
 }

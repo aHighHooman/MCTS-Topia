@@ -3097,10 +3097,24 @@ public final class RegressionHarness {
         JSONObject state = response.getJSONObject("state");
         assertTrue(state.has("obs"), "Forward-model state should expose observation under obs.");
         assertTrue(state.has("actions"), "Forward-model state should include actions.");
+        assertEquals("A0", state.getJSONArray("actions").getJSONObject(0).getString("id"),
+                "Root forward-model state should preserve caller-provided action ids.");
         assertTrue(state.has("active"), "Forward-model state should use compact active key.");
         assertTrue(state.has("terminal"), "Forward-model state should use compact terminal key.");
         assertEquals(Types.MAP_TYPE.CONTINENTS.name(), state.getJSONObject("obs").getString("map"),
                 "Forward-model state should expose the current map type.");
+        JSONObject tribe = state.getJSONObject("obs").getJSONArray("tribes").getJSONObject(0);
+        assertTrue(tribe.has("cities"), "Native parity tribe payload should include city membership.");
+        assertTrue(tribe.has("extra"), "Native parity tribe payload should include extra unit ids.");
+        assertTrue(tribe.has("conn"), "Native parity tribe payload should include connected city ids.");
+        assertTrue(tribe.has("mon"), "Native parity tribe payload should include monument status.");
+        JSONObject city = state.getJSONObject("obs").getJSONArray("cities").getJSONObject(0);
+        assertTrue(city.has("bound"), "Native parity city payload should include border radius.");
+        assertTrue(city.has("units"), "Native parity city payload should include unit membership.");
+        assertTrue(city.has("inf"), "Native parity city payload should include infiltration flag.");
+        JSONObject unit = state.getJSONObject("obs").getJSONArray("units").getJSONObject(0);
+        assertTrue(unit.has("hpx"), "Native parity unit payload should include exact hit points.");
+        assertTrue(unit.has("hts"), "Native parity unit payload should include hidden-at-turn-start.");
         assertFalse(state.has("observation"), "Verbose observation key should be removed from forward-model state.");
         assertFalse(state.has("active_player_id"), "Verbose active_player_id key should be removed from forward-model state.");
         assertFalse(state.has("is_terminal"), "Verbose is_terminal key should be removed from forward-model state.");
@@ -3114,6 +3128,9 @@ public final class RegressionHarness {
                 "Forward-model step should accept the compact action index key i.");
         assertEquals(0, stepResponse.getInt("action_index"),
                 "Forward-model step should resolve compact action index i to the intended action.");
+        JSONObject childState = stepResponse.getJSONObject("state");
+        assertTrue(childState.getJSONArray("actions").getJSONObject(0).getString("id").startsWith("s"),
+                "Child forward-model states should include stable generated action ids.");
     }
 
     private static void testExternalGameOverUsesCompactSchema() {
