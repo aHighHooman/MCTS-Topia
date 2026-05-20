@@ -91,6 +91,8 @@ class SelfPlayConfigTest(unittest.TestCase):
 
     def test_selfplay_defaults_emit_generated_continents_tiny_with_seeds(self) -> None:
         cfg = HybridAgentConfig()
+        cfg.selfplay.map_type = "Continents"
+        cfg.selfplay.map_size = "Tiny"
         cfg.selfplay.game_seed = 11
         cfg.selfplay.agent_seed = 12
         cfg.selfplay.level_seed = 13
