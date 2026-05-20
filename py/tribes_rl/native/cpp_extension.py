@@ -13,7 +13,7 @@ from torch.utils.cpp_extension import load
 
 _NATIVE_MCTS_MODULE = None
 _MSVC_ENV_READY = False
-_BUILD_FLAGS_VERSION = "mcts-opt-v13-strict-parity"
+_BUILD_FLAGS_VERSION = "mcts-opt-v16-milestone3-ranking"
 
 
 def _candidate_vsdevcmd_paths() -> list[Path]:
@@ -130,6 +130,8 @@ def load_native_mcts_extension() -> Optional[object]:
             verbose=False,
         )
         stamp.write_text(flags_signature, encoding="utf-8")
-    except Exception:
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         _NATIVE_MCTS_MODULE = None
     return _NATIVE_MCTS_MODULE

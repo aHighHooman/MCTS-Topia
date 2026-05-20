@@ -78,21 +78,6 @@ int action_int(const NativeAction& action, const char* primary, const char* fall
   return 0;
 }
 
-int action_nested_int(const NativeAction& action, const char* object_key, const char* primary, const char* fallback = nullptr) {
-  if (!py::isinstance<py::dict>(action.payload) || !action.payload.contains(object_key)) {
-    return 0;
-  }
-  py::handle object = action.payload[py::str(object_key)];
-  int value = 0;
-  if (read_int_key(object, primary, &value)) {
-    return value;
-  }
-  if (fallback != nullptr && read_int_key(object, fallback, &value)) {
-    return value;
-  }
-  return 0;
-}
-
 bool action_destination(const NativeAction& action, int* x, int* y) {
   if (x == nullptr || y == nullptr || !py::isinstance<py::dict>(action.payload)) {
     return false;

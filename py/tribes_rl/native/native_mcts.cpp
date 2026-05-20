@@ -49,45 +49,6 @@ struct PendingSelection {
 class NativeMCTS {
  public:
   NativeMCTS(
-      const std::vector<std::string>& root_action_ids,
-      const std::vector<std::string>& root_action_types,
-      const std::vector<int>& root_action_unit_ids,
-      const std::vector<int>& root_action_city_ids,
-      const std::vector<double>& root_priors,
-      double root_value,
-      bool root_terminal,
-      uint64_t seed) : max_actions_(static_cast<int>(root_action_ids.size())), rng_(seed) {
-    if (root_action_ids.size() != root_action_types.size() ||
-        root_action_ids.size() != root_action_unit_ids.size() ||
-        root_action_ids.size() != root_action_city_ids.size() ||
-        root_action_ids.size() != root_priors.size()) {
-      throw std::invalid_argument("Root action metadata and priors must have the same length.");
-    }
-    actions_.reserve(root_action_ids.size());
-    for (size_t i = 0; i < root_action_ids.size(); ++i) {
-      NativeAction action;
-      action.id = root_action_ids[i];
-      action.type = root_action_types[i];
-      action.unit_id = root_action_unit_ids[i];
-      action.city_id = root_action_city_ids[i];
-      action.payload = py::dict();
-      action.payload["id"] = action.id;
-      action.payload["type"] = action.type;
-      action.payload["unit_id"] = action.unit_id;
-      action.payload["city_id"] = action.city_id;
-      actions_.push_back(action);
-    }
-    NativeGameState root_state;
-    for (int i = 0; i < static_cast<int>(actions_.size()); ++i) {
-      root_state.legal_action_indexes.push_back(i);
-      root_action_indexes_.push_back(i);
-    }
-    root_state.terminal = root_terminal || root_state.legal_action_indexes.empty();
-    states_.push_back(root_state);
-    nodes_.push_back(make_node(0, root_priors, root_value, root_state.terminal));
-  }
-
-  NativeMCTS(
       const py::dict& root_payload,
       const std::vector<int>& root_action_indexes,
       const std::vector<double>& root_priors,
@@ -916,15 +877,6 @@ class NativeMCTS {
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       py::class_<NativeMCTS>(m, "NativeMCTS")
-      .def(py::init<
-           const std::vector<std::string>&,
-           const std::vector<std::string>&,
-           const std::vector<int>&,
-           const std::vector<int>&,
-           const std::vector<double>&,
-           double,
-           bool,
-           uint64_t>())
       .def(py::init<
            const py::dict&,
            const std::vector<int>&,

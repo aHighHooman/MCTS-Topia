@@ -24,6 +24,10 @@ class NativeSearchParityError(RuntimeError):
     pass
 
 
+def _message_cache_key(message: Dict[str, Any]) -> str:
+    return json.dumps(message, sort_keys=True, separators=(",", ":"), default=str)
+
+
 def _profile_search_enabled() -> bool:
     return os.environ.get("TRIBES_RL_PROFILE_SEARCH", os.environ.get("TRIBES_RL_PROFILE", "")).strip().lower() in {
         "1",
@@ -92,10 +96,6 @@ def _action_count_mask(action_counts: List[int], max_action_count: int, device: 
         _ACTION_COUNT_MASK_CACHE.clear()
     _ACTION_COUNT_MASK_CACHE[key] = mask
     return mask
-
-
-def _message_cache_key(message: Dict[str, Any]) -> str:
-    return json.dumps(message, sort_keys=True, separators=(",", ":"))
 
 
 def _native_call(fn: Any, *args: Any, **kwargs: Any) -> Any:
@@ -208,7 +208,7 @@ def _root_priors(
     root_policy_logits: torch.Tensor | None = None,
     root_value: torch.Tensor | float | None = None,
     belief_snapshot: Any | None = None,
-) -> tuple[List[str], List[str], List[int], List[int], List[float], float, List[int]]:
+) -> tuple[List[str], List[float], float, List[int]]:
     root_actions = list(message.get("actions", []))[: model_cfg.max_actions]
     if root_policy_logits is None or root_value is None:
         root_eval = _evaluate_messages(
@@ -234,16 +234,13 @@ def _root_priors(
         ranked = sorted(indexes, key=lambda idx: root_eval.priors[idx], reverse=True)[: search_cfg.top_k_actions]
         indexes = sorted(ranked)
     action_ids = [str(root_actions[index].get("id")) for index in indexes]
-    action_types = [str(root_actions[index].get("type")) for index in indexes]
-    unit_ids = [int(root_actions[index].get("unit_id", 0) or 0) for index in indexes]
-    city_ids = [int(root_actions[index].get("city_id", 0) or 0) for index in indexes]
     priors = [root_eval.priors[index] for index in indexes]
     total = sum(max(0.0, prior) for prior in priors)
     if total > 0.0:
         priors = [max(0.0, prior) / total for prior in priors]
     elif priors:
         priors = [1.0 / len(priors)] * len(priors)
-    return action_ids, action_types, unit_ids, city_ids, priors, root_eval.value, indexes
+    return action_ids, priors, root_eval.value, indexes
 
 
 def run_native_mcts(
@@ -266,7 +263,7 @@ def run_native_mcts(
     if not root_actions:
         return SearchResult("", 0, {}, [], 0.0)
 
-    action_ids, action_types, unit_ids, city_ids, priors, root_value, root_indexes = _root_priors(
+    action_ids, priors, root_value, root_indexes = _root_priors(
         root_payload,
         evaluator,
         search_cfg,

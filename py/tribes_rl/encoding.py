@@ -468,26 +468,27 @@ def _normalize_board(board: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _normalize_unit(unit: Dict[str, Any]) -> Dict[str, Any]:
-    if "tribe_id" in unit:
-        return unit
     out = dict(unit)
     out.setdefault("tribe_id", out.get("p", -1))
     out.setdefault("city_id", out.get("c", 0))
     out.setdefault("type", out.get("t"))
     out.setdefault("current_hp", out.get("hp", 0))
+    out.setdefault("current_hp_exact", out.get("hpx", out.get("current_hp", 0)))
     out.setdefault("max_hp", out.get("mhp", 0))
     out.setdefault("kills", out.get("k", 0))
     out.setdefault("is_veteran", out.get("v", False))
     out.setdefault("status", out.get("s"))
     out.setdefault("is_hidden", out.get("h", False))
+    out.setdefault("hidden_at_turn_start", out.get("hts", False))
     out.setdefault("hidden_enemy_hint", out.get("hint", False))
+    out.setdefault("attack", out.get("atk", 0))
+    out.setdefault("defence", out.get("def", 0))
+    out.setdefault("movement", out.get("mov", 0))
     out.setdefault("range", out.get("r", 0))
     return out
 
 
 def _normalize_city(city: Dict[str, Any]) -> Dict[str, Any]:
-    if "tribe_id" in city:
-        return city
     out = dict(city)
     out.setdefault("tribe_id", out.get("p", -1))
     out.setdefault("level", out.get("lvl", 0))
@@ -496,17 +497,27 @@ def _normalize_city(city: Dict[str, Any]) -> Dict[str, Any]:
     out.setdefault("production", out.get("prod", 0))
     out.setdefault("is_capital", out.get("cap", False))
     out.setdefault("has_walls", out.get("wall", False))
+    out.setdefault("bound", out.get("bound", 0))
     out.setdefault("points_worth", out.get("pts", 0))
+    out.setdefault("infiltrated", out.get("inf", False))
+    out.setdefault("unit_ids", out.get("units", []))
     out.setdefault("buildings", [{"type": building.get("t"), **building} for building in out.get("b", []) or []])
     return out
 
 
 def _normalize_tribe(tribe: Dict[str, Any]) -> Dict[str, Any]:
-    if "researched_tech_ids" in tribe:
-        return tribe
     out = dict(tribe)
     out.setdefault("researched_tech_ids", out.get("tech", []))
     out.setdefault("capital_id", out.get("cap", 0))
+    out.setdefault("city_ids", out.get("cities", []))
+    out.setdefault("extra_unit_ids", out.get("extra", []))
+    out.setdefault("connected_city_ids", out.get("conn", []))
+    out.setdefault("met_tribe_ids", out.get("met", []))
+    out.setdefault("known_capital_tribe_ids", out.get("known_caps", []))
+    out.setdefault("discovered_lighthouses", out.get("lights", []))
+    out.setdefault("pacifist_count", out.get("pacifist", 0))
+    out.setdefault("units_disabled_next_turn", out.get("disabled", False))
+    out.setdefault("monuments", out.get("mon", {}))
     return out
 
 
@@ -522,6 +533,7 @@ def _normalize_action(action: Dict[str, Any]) -> Dict[str, Any]:
     out.setdefault("tribe_id", out.get("p", 0))
     out.setdefault("target_unit_id", out.get("tu", 0))
     out.setdefault("target_city_id", out.get("tc", 0))
+    out.setdefault("target_player_id", out.get("tp", 0))
     out.setdefault("unit_type", out.get("ut"))
     out.setdefault("building_type", out.get("bt"))
     out.setdefault("resource_type", out.get("rt"))

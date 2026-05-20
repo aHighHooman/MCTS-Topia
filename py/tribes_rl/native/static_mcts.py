@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List
-import os
 import random
 import time
 
@@ -172,7 +171,7 @@ def run_native_static_mcts(
 
     while (deadline is not None and time.perf_counter() < deadline) or (deadline is None and simulations_remaining > 0):
         frontier = batch_size if deadline is not None else min(batch_size, simulations_remaining)
-        selections: List[tuple[int, int, int, int, int, bool, _Evaluation | None]] = []
+        selections: List[tuple[int, int, int, bool, _Evaluation | None]] = []
         eval_messages: List[Dict[str, Any]] = []
         eval_index_by_key: Dict[Any, int] = {}
         evals_only_batches = getattr(tree, "select_leaf_batches_evals_only", None)
@@ -224,7 +223,6 @@ def run_native_static_mcts(
                     int(parent_node_id),
                     int(parent_action_index),
                     int(eval_index),
-                    int(eval_key),
                     leaf_is_terminal,
                     cached,
                 )
@@ -237,7 +235,7 @@ def run_native_static_mcts(
 
         completed_selection_ids: List[int] = []
         completed_leaf_values: List[float] = []
-        for selection_id, parent_node_id, parent_action_index, eval_index, eval_key, leaf_is_terminal, cached_eval in selections:
+        for selection_id, parent_node_id, parent_action_index, eval_index, leaf_is_terminal, cached_eval in selections:
             evaluation = cached_eval if cached_eval is not None else evaluations[int(eval_index)]
             _native_call(
                 tree.expand,

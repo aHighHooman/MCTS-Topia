@@ -521,13 +521,17 @@ def _run_native_mcts_walltime(
     if not root_actions:
         return native_mcts.SearchResult("", 0, {}, [], 0.0), SearchStats("walltime", time.perf_counter() - started_at)
 
-    action_ids, _action_types, _unit_ids, _city_ids, priors, root_value, root_indexes = native_mcts._root_priors(
+    root_prior_result = native_mcts._root_priors(
         root_payload,
         evaluator,
         search_cfg,
         model_cfg,
         device,
     )
+    if len(root_prior_result) == 4:
+        action_ids, priors, root_value, root_indexes = root_prior_result
+    else:
+        action_ids, _action_types, _unit_ids, _city_ids, priors, root_value, root_indexes = root_prior_result
     if not action_ids:
         return (
             native_mcts.SearchResult("", 0, {}, [0.0] * len(root_actions), root_value),
