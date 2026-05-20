@@ -1,0 +1,16 @@
+{
+  "evaluator": "static",
+  "positions": 10,
+  "selfplay_seed_start": 0,
+  "selfplay_run_mode": "PlayLG",
+  "selfplay_game_mode": "Capitals",
+  "selfplay_map_type": "Drylands",
+  "selfplay_map_size": "Tiny",
+  "checkpoint": "rl/checkpoints/latest.pt",
+  "wall_time_sec": 10.0,
+  "batch_size": 64,
+  "repeats": 1,
+  "warmup": 0,
+  "no_dirichlet": true,
+  "captured_payload_dir": "debug-logs/mcts-profile-payloads"
+}

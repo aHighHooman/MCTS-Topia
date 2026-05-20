@@ -12,11 +12,11 @@ PY_ROOT = Path(__file__).resolve().parents[1]
 if str(PY_ROOT) not in sys.path:
     sys.path.insert(0, str(PY_ROOT))
 
-from tribes_rl.config import HybridAgentConfig
-from tribes_rl.bot_agent import HybridRLBot
-from tribes_rl.java_selfplay import run_selfplay_match
-from tribes_rl.persistent_bot_server import _configure
-from tribes_rl.train import _bot_command, _match_end_reason
+from search.config import HybridAgentConfig
+from nn.bot_agent import HybridRLBot
+from training.java_selfplay import run_selfplay_match
+from training.persistent_bot_server import _configure
+from training.train import _bot_command, _match_end_reason
 
 
 class SelfPlayConfigTest(unittest.TestCase):
@@ -110,7 +110,7 @@ class SelfPlayConfigTest(unittest.TestCase):
             captured.update(json.loads(play_path.read_text(encoding="utf-8")))
             return FakeProcess()
 
-        with patch("tribes_rl.java_selfplay.subprocess.Popen", side_effect=fake_popen):
+        with patch("training.java_selfplay.subprocess.Popen", side_effect=fake_popen):
             result = run_selfplay_match(
                 cfg,
                 [["python", "bot.py"], ["python", "bot.py"]],
@@ -156,7 +156,7 @@ class SelfPlayConfigTest(unittest.TestCase):
             old_cwd = Path.cwd()
             try:
                 os.chdir(py_cwd)
-                with patch("tribes_rl.java_selfplay.subprocess.Popen", side_effect=fake_popen):
+                with patch("training.java_selfplay.subprocess.Popen", side_effect=fake_popen):
                     result = run_selfplay_match(
                         cfg,
                         [["python", "bot.py"], ["python", "bot.py"]],

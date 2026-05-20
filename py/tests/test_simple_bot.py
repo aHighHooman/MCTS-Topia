@@ -13,7 +13,7 @@ if str(BOT_ROOT) not in sys.path:
     sys.path.insert(0, str(BOT_ROOT))
 
 from simple_bot import choose_action, score_action
-from tribes_rl.encoding import normalize_message
+from nn.encoding import normalize_message
 
 
 def _compact_message(actions: list[dict]) -> dict:

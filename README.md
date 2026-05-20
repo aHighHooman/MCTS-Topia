@@ -10,6 +10,7 @@ The project started from the open-source `Tribes` codebase and has been heavily 
 - GUI and headless single-game runners
 - A headless tournament runner with deterministic seeding, retries, and Elo tracking
 - External bot process support for Python/RL agents
+- MCTS+NN profiling entrypoints under `py/profiling/`
 - Regression tests focused on current rules parity
 
 ## Current Scope
@@ -25,6 +26,11 @@ Important current limitations:
 ## Repository Layout
 
 - `src/`: Java source
+- `py/bots/`: launchable external bots
+- `py/nn/`: model, observation encoding, belief state, and NN bot agent code
+- `py/search/`: MCTS config plus native/static search implementation
+- `py/training/`: self-play, replay, checkpoint tournaments, and training loop
+- `py/profiling/`: primary MCTS+NN profilers and profiler configs
 - `play.json`: config for a single game
 - `tournament.json`: config for tournaments
 - `levels/`: CSV map files
@@ -67,8 +73,9 @@ $env:PYTHONPATH = "$PWD\py"
 Main RL entrypoints:
 
 ```powershell
-python -m tribes_rl.train --checkpoint rl/checkpoints/latest.pt
-python py/tribes_dashboard.py
+python -m training.train --checkpoint rl/checkpoints/latest.pt
+python -m profiling.mcts_search --config py/profiling/configs/mcts_search.json
+python -m profiling.selfplay_mcts_nn --config py/profiling/configs/selfplay_mcts_nn.json
 python -m pytest py/tests
 ```
 
@@ -122,51 +129,18 @@ Custom config:
 & "$env:JAVA_HOME\bin\java.exe" -cp "out;lib/json.jar" Tournament my_tournament.json
 ```
 
-## Live RL Dashboard
+## MCTS+NN Profiling
 
-The local dashboard gives you a browser UI for starting and watching RL training,
-analytics benchmarks, checkpoint tournaments, headless Java games, and an optional
-local TensorBoard process without staring at the terminal.
+The main performance tools live under `py/profiling/`:
 
 ```powershell
-python py/tribes_dashboard.py
+python -m profiling.mcts_search --config py/profiling/configs/mcts_search.json --evaluator static
+python -m profiling.mcts_search --config py/profiling/configs/mcts_search.json --evaluator nn
+python -m profiling.selfplay_mcts_nn --config py/profiling/configs/selfplay_mcts_nn.json
 ```
 
-Then open:
-
-```text
-http://127.0.0.1:8765
-```
-
-The dashboard reads the existing generated artifacts:
-
-- `rl/metrics.csv`
-- `rl/replay/`
-- `rl/checkpoints/`
-- `rl/analytics_benchmarks/`
-- `rl/tournaments/`
-
-Jobs launched from the dashboard write combined stdout/stderr logs under
-`rl/dashboard/logs/`.
-
-## RL Augmentation Benchmark
-
-Rotation+mirroring replay augmentation can be compared against standard training
-with:
-
-```powershell
-python py/benchmark_augmentation.py --device auto --max-records 512 --repeats 3 --update-rounds 3 --training-batch-size 64 --replay-batch-size 256 --epochs-per-round 1
-```
-
-By default this samples existing self-play replay from `rl/replay`.
-Results are written to `rl/augmentation_benchmarks/` as JSONL plus a
-summary CSV. Pass `--checkpoint path\to\model.pt --require-checkpoint` when you
-want the comparison to start from an existing trained model. The D4 variant uses
-materialized 8-way replay, so it actually increases the number of augmented
-training examples, and it is enabled by default. Add `--no-d4-expanded` to run
-only the standard baseline. Add `--generate-selfplay-games N` to generate a fresh
-shared self-play replay set before running the standard-vs-D4 A/B training
-comparison.
+Config keys use the same names as CLI flags, with dashes written as underscores.
+CLI arguments override config values.
 
 ## `play.json`
 

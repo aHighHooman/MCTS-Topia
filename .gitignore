@@ -14,7 +14,10 @@ __pycache__/
 .pytest_cache/
 py/venv/
 .build/
-py/tribes_rl/native/.build*/
+py/search/native/.build*/
+py/search/native/_trace*/
+py/search/native/_debug*/
+py/search/native/_build*/
 py/plot/*.png
 test/
 map/

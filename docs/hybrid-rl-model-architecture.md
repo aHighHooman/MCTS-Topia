@@ -1,6 +1,6 @@
 # Hybrid RL Model Architecture
 
-This document describes the current neural model and runtime data flow implemented in `py/tribes_rl`.
+This document describes the current neural model and runtime data flow implemented in `py/nn, py/search, and py/training`.
 
 Default configuration from `ModelConfig`:
 
@@ -294,12 +294,12 @@ loss = policy_loss_weight * policy_cross_entropy
 
 | Concern | File |
 |---|---|
-| Model layers and tensor routing | `py/tribes_rl/model.py` |
-| Explicit belief construction | `py/tribes_rl/belief.py` |
-| Observation/action encoding | `py/tribes_rl/encoding.py` |
-| Bot inference, replay recording | `py/tribes_rl/bot_agent.py` |
-| Native MCTS wrapper | `py/tribes_rl/native/mcts.py` |
-| Replay records and return targets | `py/tribes_rl/replay.py` |
-| Training loop and losses | `py/tribes_rl/train.py` |
-| Symmetry augmentation | `py/tribes_rl/augmentation.py` |
-| Hyperparameters | `py/tribes_rl/config.py` |
+| Model layers and tensor routing | `py/nn/model.py` |
+| Explicit belief construction | `py/nn/belief.py` |
+| Observation/action encoding | `py/nn/encoding.py` |
+| Bot inference, replay recording | `py/nn/bot_agent.py` |
+| Native MCTS wrapper | `py/search/native/mcts.py` |
+| Replay records and return targets | `py/training/replay.py` |
+| Training loop and losses | `py/training/train.py` |
+| Symmetry augmentation | `py/nn/augmentation.py` |
+| Hyperparameters | `py/search/config.py` |

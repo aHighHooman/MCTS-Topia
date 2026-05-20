@@ -34,7 +34,7 @@ For training, this means:
 
 ### Network design
 
-The starting model in `py/tribes_rl/model.py` uses three streams:
+The starting model in `py/nn/model.py` uses three streams:
 
 1. Spatial CNN stream
    - Encodes the visible board as a stack of channels.

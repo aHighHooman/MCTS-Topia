@@ -13,15 +13,15 @@ PY_ROOT = Path(__file__).resolve().parents[1]
 if str(PY_ROOT) not in sys.path:
     sys.path.insert(0, str(PY_ROOT))
 
-from tribes_rl.augment_replay import augment_record, materialize_augmented_replay, symmetry_specs
-from tribes_rl.augmentation import transform_message_symmetry
-from tribes_rl.belief import BELIEF_PLANE_NAMES
-from tribes_rl.config import HybridAgentConfig
-from tribes_rl.encoding import normalize_message
-from tribes_rl.model import HybridPolicyValueNet
-from tribes_rl.replay import ReplayStore, StepRecord, record_to_payload
-from tribes_rl.symmetry_consistency import evaluate_symmetry_consistency
-from tribes_rl.train import _archive_replay_shards, _training_records_for_iteration, _write_augmented_iteration_shard, collate_batch
+from training.augment_replay import augment_record, materialize_augmented_replay, symmetry_specs
+from nn.augmentation import transform_message_symmetry
+from nn.belief import BELIEF_PLANE_NAMES
+from search.config import HybridAgentConfig
+from nn.encoding import normalize_message
+from nn.model import HybridPolicyValueNet
+from training.replay import ReplayStore, StepRecord, record_to_payload
+from training.symmetry_consistency import evaluate_symmetry_consistency
+from training.train import _archive_replay_shards, _training_records_for_iteration, _write_augmented_iteration_shard, collate_batch
 
 
 def _message() -> dict:

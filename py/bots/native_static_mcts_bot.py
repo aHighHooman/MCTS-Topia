@@ -8,14 +8,14 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-PY_ROOT = Path(__file__).resolve().parents[1]
+PY_ROOT = Path(__file__).resolve().parents[2]
 if str(PY_ROOT) not in sys.path:
     sys.path.insert(0, str(PY_ROOT))
 
-from tribes_rl.config import HybridAgentConfig
-from tribes_rl.encoding import normalize_message
-from tribes_rl.native import run_native_static_mcts
-from tribes_rl.native.mcts import NativeSearchParityError
+from nn.encoding import normalize_message
+from search.config import HybridAgentConfig
+from search.native import run_native_static_mcts
+from search.native.mcts import NativeSearchParityError
 
 
 def _configure(args: argparse.Namespace) -> HybridAgentConfig:

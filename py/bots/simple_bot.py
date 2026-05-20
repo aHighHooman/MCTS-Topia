@@ -10,7 +10,7 @@ PY_ROOT = Path(__file__).resolve().parents[1]
 if str(PY_ROOT) not in sys.path:
     sys.path.insert(0, str(PY_ROOT))
 
-from tribes_rl.encoding import normalize_message
+from nn.encoding import normalize_message
 
 
 RESOURCE_TECH_SCORE = {

@@ -13,12 +13,12 @@ PY_ROOT = Path(__file__).resolve().parents[1]
 if str(PY_ROOT) not in sys.path:
     sys.path.insert(0, str(PY_ROOT))
 
-from tribes_rl.belief import BELIEF_PLANE_CHANNEL_START, BELIEF_PLANE_NAMES, BeliefTracker
-from tribes_rl.bot_agent import HybridRLBot
-from tribes_rl.config import HybridAgentConfig
-from tribes_rl.encoding import encode_observation
-from tribes_rl.model import HybridPolicyValueNet
-from tribes_rl.native.mcts import SearchResult
+from nn.belief import BELIEF_PLANE_CHANNEL_START, BELIEF_PLANE_NAMES, BeliefTracker
+from nn.bot_agent import HybridRLBot
+from search.config import HybridAgentConfig
+from nn.encoding import encode_observation
+from nn.model import HybridPolicyValueNet
+from search.native.mcts import SearchResult
 
 
 def _message() -> dict:
@@ -197,7 +197,7 @@ class BeliefBotFlowTest(unittest.TestCase):
                 captured["leaf_has_belief"] = "belief" in belief_snapshot.annotate_without_update(_message())["observation"]
                 return SearchResult("end", 0, {"end": 1.0}, [1.0], 0.0)
 
-            with patch("tribes_rl.bot_agent.run_native_mcts", side_effect=fake_mcts):
+            with patch("nn.bot_agent.run_native_mcts", side_effect=fake_mcts):
                 bot = HybridRLBot(cfg, Path("missing.pt"), Path(tmp), model=model, device=torch.device("cpu"), native_available=True, warmup=False)
                 response = bot.choose_action(_message())
 
@@ -217,7 +217,7 @@ class BeliefBotFlowTest(unittest.TestCase):
                 captured.append(wall_time_seconds)
                 return SearchResult("end", 0, {"end": 1.0}, [1.0], 0.0)
 
-            with patch("tribes_rl.bot_agent.run_native_mcts", side_effect=fake_mcts):
+            with patch("nn.bot_agent.run_native_mcts", side_effect=fake_mcts):
                 bot = HybridRLBot(cfg, Path("missing.pt"), Path(tmp), model=model, device=torch.device("cpu"), native_available=True, warmup=False)
                 bot.choose_action(_message())
                 bot.choose_action(_message())

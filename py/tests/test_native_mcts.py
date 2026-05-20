@@ -11,12 +11,12 @@ PY_ROOT = Path(__file__).resolve().parents[1]
 if str(PY_ROOT) not in sys.path:
     sys.path.insert(0, str(PY_ROOT))
 
-from tribes_rl.config import HybridAgentConfig
-from tribes_rl.encoding import encode_observation, normalize_message, TECH_TYPES
-from tribes_rl.model import HybridPolicyValueNet
-from tribes_rl.native import run_native_mcts, run_native_static_mcts
-from tribes_rl.native.cpp_extension import load_native_mcts_extension
-from tribes_rl.native.mcts import NativeSearchParityError, _apply_end_turn_visit_guard, _message_cache_key, _root_priors
+from search.config import HybridAgentConfig
+from nn.encoding import encode_observation, normalize_message, TECH_TYPES
+from nn.model import HybridPolicyValueNet
+from search.native import run_native_mcts, run_native_static_mcts
+from search.native.cpp_extension import load_native_mcts_extension
+from search.native.mcts import NativeSearchParityError, _apply_end_turn_visit_guard, _message_cache_key, _root_priors
 
 
 def _message() -> dict:
