@@ -80,7 +80,7 @@ class HybridPolicyValueNet(nn.Module):
             batch_first=True,
             activation="gelu",
         )
-        self.core = nn.TransformerEncoder(encoder_layer, num_layers=cfg.n_layers)
+        self.core = nn.TransformerEncoder(encoder_layer, num_layers=cfg.n_layers, enable_nested_tensor=False)
         self.action_attention = nn.MultiheadAttention(
             embed_dim=cfg.d_model,
             num_heads=cfg.n_heads,
