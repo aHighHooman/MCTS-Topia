@@ -13,7 +13,7 @@ from torch.utils.cpp_extension import load
 
 _NATIVE_MCTS_MODULE = None
 _MSVC_ENV_READY = False
-_BUILD_FLAGS_VERSION = "mcts-opt-v17-native-speed-flags"
+_BUILD_FLAGS_VERSION = "mcts-opt-v18-native-ltcg"
 
 
 def _candidate_vsdevcmd_paths() -> list[Path]:
@@ -87,10 +87,11 @@ def load_native_mcts_extension() -> Optional[object]:
             "/Ob3",
             "/Oi",
             "/Ot",
+            "/GL",
             "/DNDEBUG",
             "/std:c++17",
         ]
-        extra_ldflags = []
+        extra_ldflags = ["/LTCG"]
     else:
         extra_cflags = [
             "-O3",
