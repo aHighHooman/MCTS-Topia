@@ -411,12 +411,24 @@ class EncodedObservation:
     action_ids: List[str]
 
     def to(self, device: torch.device | str) -> "EncodedObservation":
+        unit_features = self.unit_features
+        unit_mask = self.unit_mask
+        city_features = self.city_features
+        city_mask = self.city_mask
+        if not unit_mask.is_cuda:
+            max_units = int(unit_mask.sum(dim=1).max().item()) if unit_mask.numel() else 0
+            unit_features = unit_features[:, :max_units]
+            unit_mask = unit_mask[:, :max_units]
+        if not city_mask.is_cuda:
+            max_cities = int(city_mask.sum(dim=1).max().item()) if city_mask.numel() else 0
+            city_features = city_features[:, :max_cities]
+            city_mask = city_mask[:, :max_cities]
         return EncodedObservation(
             self.board.to(device),
-            self.unit_features.to(device),
-            self.unit_mask.to(device),
-            self.city_features.to(device),
-            self.city_mask.to(device),
+            unit_features.to(device),
+            unit_mask.to(device),
+            city_features.to(device),
+            city_mask.to(device),
             self.action_features.to(device),
             self.action_mask.to(device),
             self.scalar_features.to(device),
