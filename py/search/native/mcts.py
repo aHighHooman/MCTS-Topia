@@ -316,7 +316,7 @@ def run_native_mcts(
     simulations_remaining = int(search_cfg.num_simulations)
     requested_batch_size = max(1, int(search_cfg.batch_size))
     device_obj = torch.device(device)
-    batch_size = max(requested_batch_size, 224) if device_obj.type == "cuda" else requested_batch_size
+    batch_size = max(requested_batch_size, 240) if device_obj.type == "cuda" else requested_batch_size
     select_sec = 0.0
     eval_sec = 0.0
     expand_sec = 0.0
