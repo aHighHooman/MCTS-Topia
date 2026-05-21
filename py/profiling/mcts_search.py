@@ -143,11 +143,21 @@ def _sync_if_needed(device: torch.device | str) -> None:
         torch.cuda.synchronize(device_obj)
 
 
-def _time_call(collector: TimingCollector, name: str, fn: Callable[[], Any], *, device: torch.device | str, items: int = 0) -> tuple[Any, float]:
-    _sync_if_needed(device)
+def _time_call(
+    collector: TimingCollector,
+    name: str,
+    fn: Callable[[], Any],
+    *,
+    device: torch.device | str,
+    items: int = 0,
+    sync_cuda: bool = True,
+) -> tuple[Any, float]:
+    if sync_cuda:
+        _sync_if_needed(device)
     started_at = time.perf_counter()
     result = fn()
-    _sync_if_needed(device)
+    if sync_cuda:
+        _sync_if_needed(device)
     elapsed = time.perf_counter() - started_at
     collector.add(name, elapsed, items=items)
     return result, elapsed
@@ -189,6 +199,7 @@ def _install_timed_evaluator(collector: TimingCollector, branching: BranchingCol
                 lambda: [belief_snapshot.annotate_without_update(message) for message in messages],
                 device=device,
                 items=len(messages),
+                sync_cuda=False,
             )
             child_sec += elapsed
 
@@ -200,6 +211,7 @@ def _install_timed_evaluator(collector: TimingCollector, branching: BranchingCol
                 lambda message=message: encode_observation(message, model_cfg),
                 device=device,
                 items=1,
+                sync_cuda=False,
             )
             child_sec += elapsed
             encoded_items.append(encoded)
@@ -213,6 +225,7 @@ def _install_timed_evaluator(collector: TimingCollector, branching: BranchingCol
                 lambda: _stack_encoded(encoded_items),
                 device=device,
                 items=len(encoded_items),
+                sync_cuda=False,
             )
             child_sec += elapsed
         batch, elapsed = _time_call(
@@ -288,6 +301,7 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
                 "native_tree.construct",
                 lambda: original_cls(*args, **kwargs),
                 device=device,
+                sync_cuda=False,
             )
 
         def add_root_dirichlet_noise(self, *args: Any, **kwargs: Any) -> Any:
@@ -296,6 +310,7 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
                 "native_tree.add_root_dirichlet_noise",
                 lambda: self._tree.add_root_dirichlet_noise(*args, **kwargs),
                 device=device,
+                sync_cuda=False,
             )
             return result
 
@@ -317,10 +332,8 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
 
         def select_leaf_batch_evals_only(self, *args: Any, **kwargs: Any) -> Any:
             global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_SELECTED_PATHS
-            _sync_if_needed(device)
             started_at = time.perf_counter()
             result = list(self._tree.select_leaf_batch_evals_only(*args, **kwargs))
-            _sync_if_needed(device)
             frontier = int(args[0]) if args else len(result)
             collector.add("native_tree.select_leaf_batch_evals_only", time.perf_counter() - started_at, items=frontier)
             batch_depth_sum, batch_max_depth = self._tree.last_batch_stats()
@@ -331,11 +344,9 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
 
         def select_leaf_batches_evals_only(self, *args: Any, **kwargs: Any) -> Any:
             global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_SELECTED_PATHS
-            _sync_if_needed(device)
             started_at = time.perf_counter()
             result, completed = self._tree.select_leaf_batches_evals_only(*args, **kwargs)
             result = list(result)
-            _sync_if_needed(device)
             collector.add("native_tree.select_leaf_batches_evals_only", time.perf_counter() - started_at, items=int(completed))
             batch_depth_sum, batch_max_depth = self._tree.last_batch_stats()
             _STATIC_TREE_DEPTH_SUM += int(batch_depth_sum)
@@ -350,6 +361,7 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
                 lambda: self._tree.expand(*args, **kwargs),
                 device=device,
                 items=1,
+                sync_cuda=False,
             )
             return result
 
@@ -359,6 +371,7 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
                 "native_tree.complete_selected_paths",
                 lambda: self._tree.complete_selected_paths(*args, **kwargs),
                 device=device,
+                sync_cuda=False,
             )
             return result
 
@@ -368,6 +381,7 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
                 "native_tree.root_visit_distribution",
                 lambda: self._tree.root_visit_distribution(*args, **kwargs),
                 device=device,
+                sync_cuda=False,
             )
             return result
 
