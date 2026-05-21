@@ -164,14 +164,25 @@ def _time_call(
 
 
 def _stack_encoded(items: list[EncodedObservation]) -> EncodedObservation:
+    max_units = max((item.unit_features.shape[1] for item in items), default=0)
+    max_cities = max((item.city_features.shape[1] for item in items), default=0)
+    max_actions = max((item.action_features.shape[1] for item in items), default=0)
+
+    def pad_slots(tensor: torch.Tensor, size: int) -> torch.Tensor:
+        if tensor.shape[1] >= size:
+            return tensor
+        pad_shape = list(tensor.shape)
+        pad_shape[1] = size - tensor.shape[1]
+        return torch.cat([tensor, tensor.new_zeros(pad_shape)], dim=1)
+
     return EncodedObservation(
         board=torch.cat([item.board for item in items], dim=0),
-        unit_features=torch.cat([item.unit_features for item in items], dim=0),
-        unit_mask=torch.cat([item.unit_mask for item in items], dim=0),
-        city_features=torch.cat([item.city_features for item in items], dim=0),
-        city_mask=torch.cat([item.city_mask for item in items], dim=0),
-        action_features=torch.cat([item.action_features for item in items], dim=0),
-        action_mask=torch.cat([item.action_mask for item in items], dim=0),
+        unit_features=torch.cat([pad_slots(item.unit_features, max_units) for item in items], dim=0),
+        unit_mask=torch.cat([pad_slots(item.unit_mask, max_units) for item in items], dim=0),
+        city_features=torch.cat([pad_slots(item.city_features, max_cities) for item in items], dim=0),
+        city_mask=torch.cat([pad_slots(item.city_mask, max_cities) for item in items], dim=0),
+        action_features=torch.cat([pad_slots(item.action_features, max_actions) for item in items], dim=0),
+        action_mask=torch.cat([pad_slots(item.action_mask, max_actions) for item in items], dim=0),
         scalar_features=torch.cat([item.scalar_features for item in items], dim=0),
         action_ids=[],
     )
@@ -208,7 +219,7 @@ def _install_timed_evaluator(collector: TimingCollector, branching: BranchingCol
             encoded, elapsed = _time_call(
                 collector,
                 "nn_eval.encode_observation",
-                lambda message=message: encode_observation(message, model_cfg),
+                lambda message=message: encode_observation(message, model_cfg, compact=True),
                 device=device,
                 items=1,
                 sync_cuda=False,

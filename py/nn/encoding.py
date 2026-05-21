@@ -911,7 +911,7 @@ def normalize_message(message: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig) -> EncodedObservation:
+def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compact: bool = False) -> EncodedObservation:
     if not _message_is_normalized(message):
         message = normalize_message(message)
     observation = message["observation"]
@@ -980,9 +980,10 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig) -> Encod
     units = _sorted_entities(observation.get("units", []))
     unit_feature_dim = int(getattr(model_cfg, "unit_feature_dim", getattr(model_cfg, "entity_feature_dim", len(UNIT_FEATURE_SCHEMA))))
     city_feature_dim = int(getattr(model_cfg, "city_feature_dim", getattr(model_cfg, "entity_feature_dim", len(CITY_FEATURE_SCHEMA))))
-    unit_features = np.zeros((model_cfg.max_units, unit_feature_dim), dtype=np.float32)
-    unit_mask = np.zeros(model_cfg.max_units, dtype=np.bool_)
-    for idx, unit in enumerate(units[: model_cfg.max_units]):
+    unit_limit = min(len(units), model_cfg.max_units) if compact else model_cfg.max_units
+    unit_features = np.zeros((unit_limit, unit_feature_dim), dtype=np.float32)
+    unit_mask = np.zeros(unit_limit, dtype=np.bool_)
+    for idx, unit in enumerate(units[:unit_limit]):
         unit_mask[idx] = True
         owner = _as_int(unit.get("tribe_id"), -1)
         base = [
@@ -1013,9 +1014,10 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig) -> Encod
         _put_feature(unit_features[idx], base + _one_hot(unit.get("type"), UNIT_TYPES))
 
     cities = _sorted_entities(observation.get("cities", []))
-    city_features = np.zeros((model_cfg.max_cities, city_feature_dim), dtype=np.float32)
-    city_mask = np.zeros(model_cfg.max_cities, dtype=np.bool_)
-    for idx, city in enumerate(cities[: model_cfg.max_cities]):
+    city_limit = min(len(cities), model_cfg.max_cities) if compact else model_cfg.max_cities
+    city_features = np.zeros((city_limit, city_feature_dim), dtype=np.float32)
+    city_mask = np.zeros(city_limit, dtype=np.bool_)
+    for idx, city in enumerate(cities[:city_limit]):
         city_mask[idx] = True
         owner = _as_int(city.get("tribe_id"), -1)
         buildings = city.get("buildings", []) or []
@@ -1045,8 +1047,11 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig) -> Encod
         _put_feature(city_features[idx], base + [min(1.0, c) for c in building_counts])
 
     actions = list(message.get("actions", []))
-    action_features = np.zeros((model_cfg.max_actions, model_cfg.action_feature_dim), dtype=np.float32)
-    action_mask = np.zeros(model_cfg.max_actions, dtype=np.bool_)
+    action_limit = min(len(actions), model_cfg.max_actions) if compact else model_cfg.max_actions
+    if compact and model_cfg.max_actions > 0:
+        action_limit = max(1, action_limit)
+    action_features = np.zeros((action_limit, model_cfg.action_feature_dim), dtype=np.float32)
+    action_mask = np.zeros(action_limit, dtype=np.bool_)
     action_ids: List[str] = []
     unit_by_id = {_as_int(unit.get("id")): unit for unit in units}
     city_by_id = {_as_int(city.get("id")): city for city in cities}
@@ -1066,7 +1071,7 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig) -> Encod
     }
     tile_action_summary_by_pos: dict[tuple[int, int], list[float]] = {}
     typed_feature_by_key: dict[tuple[Any, Any, Any, Any], list[float]] = {}
-    for idx, action in enumerate(actions[: model_cfg.max_actions]):
+    for idx, action in enumerate(actions[: min(len(actions), action_limit)]):
         action_mask[idx] = True
         action_ids.append(str(action["id"]))
         pos = _position_payload(action)
