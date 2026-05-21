@@ -13,7 +13,7 @@ from torch.utils.cpp_extension import load
 
 _NATIVE_MCTS_MODULE = None
 _MSVC_ENV_READY = False
-_BUILD_FLAGS_VERSION = "mcts-opt-v18-native-ltcg"
+_BUILD_FLAGS_VERSION = "mcts-opt-v19-native-fast-fp-avx2"
 
 
 def _candidate_vsdevcmd_paths() -> list[Path]:
@@ -87,6 +87,8 @@ def load_native_mcts_extension() -> Optional[object]:
             "/Ob3",
             "/Oi",
             "/Ot",
+            "/fp:fast",
+            "/arch:AVX2",
             "/GL",
             "/DNDEBUG",
             "/std:c++17",
