@@ -136,9 +136,9 @@ class HybridRLBot:
             cfg = self.config.model
             encoded = EncodedObservation(
                 board=torch.zeros((1, cfg.board_channels, cfg.board_size, cfg.board_size), device=self.device),
-                unit_features=torch.zeros((1, cfg.max_units, cfg.entity_feature_dim), device=self.device),
+                unit_features=torch.zeros((1, cfg.max_units, getattr(cfg, "unit_feature_dim", cfg.entity_feature_dim)), device=self.device),
                 unit_mask=torch.zeros((1, cfg.max_units), dtype=torch.bool, device=self.device),
-                city_features=torch.zeros((1, cfg.max_cities, cfg.entity_feature_dim), device=self.device),
+                city_features=torch.zeros((1, cfg.max_cities, getattr(cfg, "city_feature_dim", cfg.entity_feature_dim)), device=self.device),
                 city_mask=torch.zeros((1, cfg.max_cities), dtype=torch.bool, device=self.device),
                 action_features=torch.zeros((1, cfg.max_actions, cfg.action_feature_dim), device=self.device),
                 action_mask=torch.zeros((1, cfg.max_actions), dtype=torch.bool, device=self.device),

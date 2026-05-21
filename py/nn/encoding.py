@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List
 import numpy as np
 import torch
 
-from .belief import BELIEF_OPPONENT_SCALAR_DIM, BELIEF_PLANE_CHANNEL_START, BELIEF_PLANE_NAMES
+from .belief import BUILDING_TECH_EVIDENCE, TECH_PREREQUISITES, UNIT_TECH_EVIDENCE
 from search.config import ModelConfig
 
 
@@ -147,6 +147,255 @@ BUILDING_ONE_HOT, BUILDING_ZERO_HOT = _one_hot_table(BUILDING_TYPES)
 UNIT_ONE_HOT, UNIT_ZERO_HOT = _one_hot_table(UNIT_TYPES)
 ACTION_ONE_HOT, ACTION_ZERO_HOT = _one_hot_table(ACTION_TYPES)
 TECH_ONE_HOT, TECH_ZERO_HOT = _one_hot_table(TECH_TYPES)
+RELATIONSHIP_TO_INDEX = {name: idx for idx, name in enumerate(RELATIONSHIP_TYPES)}
+
+BOARD_SCHEMA = (
+    "valid",
+    "reserved_hidden_authoritative",
+    "explored",
+    "x",
+    "y",
+    "tile_unit_id_present",
+    "tile_city_id_present",
+    "road",
+    "reserved_8",
+    "reserved_9",
+    *(f"terrain:{name}" for name in TERRAIN_TYPES),
+    *(f"resource:{name}" for name in RESOURCE_TYPES),
+    *(f"building:{name}" for name in BUILDING_TYPES),
+    "reserved_41",
+    "reserved_42",
+    "reserved_43",
+    "reserved_44",
+    "reserved_45",
+    "reserved_46",
+    "reserved_47",
+    "reserved_48",
+    "reserved_49",
+    "reserved_50",
+    "reserved_51",
+    "reserved_52",
+    "reserved_53",
+    "reserved_54",
+    "reserved_55",
+    "reserved_56",
+    "reserved_57",
+    "reserved_58",
+    "reserved_59",
+    "reserved_60",
+    "visible",
+    "visible_unit_owner:own",
+    "visible_unit_owner:enemy",
+    "visible_unit_owner:neutral",
+    "visible_city_owner:own",
+    "visible_city_owner:enemy",
+    "visible_city_owner:neutral",
+    "visible_unit_status:fresh",
+    "visible_unit_status:spent",
+    "visible_unit_hp_fraction",
+    "visible_city_level",
+    "visible_territory_owner_signed",
+)
+BOARD_FEATURE_INDEX = {name: idx for idx, name in enumerate(BOARD_SCHEMA)}
+
+UNIT_FEATURE_SCHEMA = (
+    "id_norm",
+    "x",
+    "y",
+    "owner_signed",
+    "owner_id",
+    "current_hp",
+    "current_hp_exact",
+    "hp_fraction",
+    "max_hp",
+    "attack",
+    "defence",
+    "movement",
+    "range",
+    "cost",
+    "kills",
+    "is_veteran",
+    "is_hidden",
+    "hidden_at_turn_start",
+    "hidden_enemy_hint",
+    "status:fresh",
+    "status:moved",
+    "status:finished",
+    "status:exhausted",
+    *(f"type:{name}" for name in UNIT_TYPES),
+)
+UNIT_FEATURE_INDEX = {name: idx for idx, name in enumerate(UNIT_FEATURE_SCHEMA)}
+
+CITY_FEATURE_SCHEMA = (
+    "id_norm",
+    "x",
+    "y",
+    "owner_signed",
+    "owner_id",
+    "level",
+    "population",
+    "population_need",
+    "production",
+    "bound",
+    "points_worth",
+    "is_capital",
+    "has_walls",
+    "infiltrated",
+    "unit_count",
+    "building_count",
+    *(f"building_count:{name}" for name in BUILDING_TYPES),
+)
+CITY_FEATURE_INDEX = {name: idx for idx, name in enumerate(CITY_FEATURE_SCHEMA)}
+
+ACTION_SPATIAL_SCHEMA = (
+    "source_x",
+    "source_y",
+    "target_x",
+    "target_y",
+    "delta_x",
+    "delta_y",
+    "abs_delta_x",
+    "abs_delta_y",
+    "manhattan_delta",
+    "chebyshev_delta",
+)
+ACTION_INTENT_SCHEMA = (
+    "has_destination",
+    "has_target_pos",
+    "has_position",
+    "is_end_turn",
+    "is_aggressive",
+)
+UNIT_ACTION_SUMMARY_SCHEMA = (
+    "present",
+    *(f"type:{name}" for name in UNIT_TYPES),
+    "owner:own",
+    "owner:enemy",
+    "owner:neutral",
+    "x",
+    "y",
+    "current_hp",
+    "hp_fraction",
+    "max_hp",
+    "kills",
+    "is_veteran",
+    "is_hidden",
+    "range",
+)
+CITY_ACTION_SUMMARY_SCHEMA = (
+    "present",
+    "owner:own",
+    "owner:enemy",
+    "owner:neutral",
+    "x",
+    "y",
+    "level",
+    "population",
+    "population_need",
+    "production",
+    "is_capital",
+    "has_walls",
+)
+TILE_ACTION_SUMMARY_SCHEMA = (
+    "present",
+    "explored",
+    "road",
+    "unit_present",
+    "city_present",
+    *(f"terrain:{name}" for name in TERRAIN_TYPES),
+    *(f"resource:{name}" for name in RESOURCE_TYPES),
+    *(f"building:{name}" for name in BUILDING_TYPES),
+)
+ACTION_NATIVE_CONTEXT_SCHEMA = (
+    *(f"capture_type:{name}" for name in TERRAIN_TYPES),
+    *(f"target_relationship:{name}" for name in RELATIONSHIP_TYPES),
+    "target_player_id",
+    "target_player_is_self",
+    "pending:propose_peace",
+    "pending:accept_peace",
+    "pending:propose_treaty",
+    "pending:accept_treaty",
+    "pending:cancel_treaty",
+)
+ACTION_TYPED_SCHEMA = (
+    *(f"action_type:{name}" for name in ACTION_TYPES),
+    *(f"unit_type:{name}" for name in UNIT_TYPES),
+    *(f"building_type:{name}" for name in BUILDING_TYPES),
+    *(f"resource_type:{name}" for name in RESOURCE_TYPES),
+    *(f"tech:{name}" for name in TECH_TYPES),
+)
+ACTION_FEATURE_SCHEMA = (
+    *ACTION_SPATIAL_SCHEMA,
+    *ACTION_INTENT_SCHEMA,
+    *(f"source_unit:{name}" for name in UNIT_ACTION_SUMMARY_SCHEMA),
+    *(f"target_unit:{name}" for name in UNIT_ACTION_SUMMARY_SCHEMA),
+    *(f"source_city:{name}" for name in CITY_ACTION_SUMMARY_SCHEMA),
+    *(f"target_city:{name}" for name in CITY_ACTION_SUMMARY_SCHEMA),
+    *(f"target_tile:{name}" for name in TILE_ACTION_SUMMARY_SCHEMA),
+    *ACTION_NATIVE_CONTEXT_SCHEMA,
+    *ACTION_TYPED_SCHEMA,
+)
+ACTION_FEATURE_INDEX = {name: idx for idx, name in enumerate(ACTION_FEATURE_SCHEMA)}
+ACTION_NATIVE_CONTEXT_START = ACTION_FEATURE_INDEX["capture_type:FOG"]
+
+SCALAR_BASE_SCHEMA = (
+    "tick",
+    "player_id",
+    "active_player_id",
+    "is_active_player",
+    "own_stars",
+    "own_score",
+    "own_score_margin",
+    "own_tech_count",
+    "own_cities_compact_count",
+    "own_city_count",
+    "own_extra_unit_count",
+    "own_connected_city_count",
+    "own_met_tribe_count",
+    "own_known_capital_tribe_count",
+    "own_lighthouse_count",
+    "own_kills",
+    "own_pacifist_count",
+    "own_units_disabled_next_turn",
+    "can_end_turn",
+    "leveling_up",
+    "legal_action_count",
+    "visible_unit_count",
+    "own_visible_unit_count",
+    "enemy_visible_unit_count",
+    "visible_city_count",
+    "own_visible_city_count",
+    "enemy_visible_city_count",
+    "explored_fraction",
+    "visible_fraction",
+    "tribe_count",
+    "board_size",
+    "board_area",
+    "board_size_vs_config",
+)
+SCALAR_MY_TECH_SCHEMA = tuple(f"own_tech:{name}" for name in TECH_TYPES)
+SCALAR_MONUMENT_SCHEMA = ("monuments_available", "monuments_built", "monuments_unavailable")
+SCALAR_RELATIONSHIP_SCHEMA = tuple(f"relationship_count:{name}" for name in RELATIONSHIP_TYPES) + (
+    "pending_incoming_diplomacy",
+    "pending_outgoing_diplomacy",
+)
+SCALAR_OPPONENT_TECH_EVIDENCE_SCHEMA = tuple(f"known_opponent_tech_evidence:{name}" for name in TECH_TYPES) + (
+    "known_opponent_tech_evidence_count",
+    "known_opponent_military_tech",
+    "known_opponent_economy_tech",
+    "known_opponent_naval_tech",
+    "known_opponent_strategy_diplomacy_tech",
+)
+SCALAR_FEATURE_SCHEMA = (
+    *SCALAR_BASE_SCHEMA,
+    *SCALAR_MY_TECH_SCHEMA,
+    *SCALAR_MONUMENT_SCHEMA,
+    *SCALAR_RELATIONSHIP_SCHEMA,
+    *SCALAR_OPPONENT_TECH_EVIDENCE_SCHEMA,
+)
+SCALAR_FEATURE_INDEX = {name: idx for idx, name in enumerate(SCALAR_FEATURE_SCHEMA)}
+SCALAR_MY_TECH_START = SCALAR_FEATURE_INDEX["own_tech:CLIMBING"]
+SCALAR_OPPONENT_TECH_EVIDENCE_START = SCALAR_FEATURE_INDEX["known_opponent_tech_evidence:CLIMBING"]
 
 
 @dataclass
@@ -226,7 +475,7 @@ def _message_is_normalized(message: Dict[str, Any]) -> bool:
 
 
 def _sorted_entities(entities: Iterable[Dict[str, Any]], key: str = "id") -> list[dict[str, Any]]:
-    return sorted(entities, key=lambda item: int(item.get(key, -1) or -1))
+    return sorted(entities, key=lambda item: _as_int(item.get(key), -1))
 
 
 def _put_feature(row: np.ndarray, values: list[float]) -> None:
@@ -237,75 +486,15 @@ def _put_feature(row: np.ndarray, values: list[float]) -> None:
         row[:] = values[: row.shape[0]]
 
 
-def _matrix_to_plane(matrix: Any, size: int) -> torch.Tensor:
-    if not isinstance(matrix, list) or len(matrix) != size:
-        return torch.zeros(size, size, dtype=torch.float32)
-    rows: list[list[float]] = []
-    for row in matrix:
-        if not isinstance(row, list) or len(row) != size:
-            return torch.zeros(size, size, dtype=torch.float32)
-        values: list[float] = []
-        for value in row:
-            try:
-                values.append(float(value))
-            except (TypeError, ValueError):
-                values.append(0.0)
-        rows.append(values)
-    return torch.tensor(rows, dtype=torch.float32)
-
-
-def _belief_opponent_scalars(belief: Any) -> list[float]:
-    if not isinstance(belief, dict):
-        return [0.0] * BELIEF_OPPONENT_SCALAR_DIM
-    raw = belief.get("opponent_scalars", [])
-    if not isinstance(raw, list):
-        return [0.0] * BELIEF_OPPONENT_SCALAR_DIM
-    out: list[float] = []
-    for value in raw[:BELIEF_OPPONENT_SCALAR_DIM]:
-        try:
-            out.append(float(value))
-        except (TypeError, ValueError):
-            out.append(0.0)
-    if len(out) < BELIEF_OPPONENT_SCALAR_DIM:
-        out.extend([0.0] * (BELIEF_OPPONENT_SCALAR_DIM - len(out)))
-    return out
-
-
-def _copy_belief_planes(channels: torch.Tensor | np.ndarray, belief: Any, board_size: int) -> None:
-    if not isinstance(belief, dict):
-        return
-    planes = belief.get("planes", {})
-    if not isinstance(planes, dict):
-        return
-    for offset, name in enumerate(BELIEF_PLANE_NAMES):
-        channel = BELIEF_PLANE_CHANNEL_START + offset
-        if channel >= channels.shape[0]:
-            break
-        matrix = planes.get(name)
-        if isinstance(channels, np.ndarray):
-            if isinstance(matrix, np.ndarray):
-                if matrix.shape == (board_size, board_size):
-                    channels[channel, :, :] = matrix
-                continue
-            if not isinstance(matrix, list) or len(matrix) != board_size:
-                continue
-            try:
-                plane = np.asarray(matrix, dtype=np.float32)
-            except (TypeError, ValueError):
-                continue
-            if plane.shape == (board_size, board_size):
-                channels[channel, :, :] = plane
-        else:
-            channels[channel] = _matrix_to_plane(matrix, board_size)
-
-
 def _position_payload(action: dict[str, Any]) -> dict[str, Any]:
     return action.get("destination") or action.get("target_pos") or action.get("position") or {}
 
 
 def _as_int(value: Any, default: int = 0) -> int:
+    if value is None:
+        return default
     try:
-        return int(value or default)
+        return int(value)
     except (TypeError, ValueError):
         return default
 
@@ -328,6 +517,123 @@ def _owner_relation_flags(entity: dict[str, Any] | None, my_player_id: int) -> l
     if owner >= 0:
         return [0.0, 1.0, 0.0]
     return [0.0, 0.0, 1.0]
+
+
+def _owner_bucket(owner: int, my_player_id: int) -> int:
+    if owner == my_player_id:
+        return 0
+    if owner >= 0:
+        return 1
+    return 2
+
+
+def _relationship_name(value: Any) -> str:
+    name = str(value or "").upper()
+    return name if name in RELATIONSHIP_TO_INDEX else "UNKNOWN"
+
+
+def _relationship_between(observation: dict[str, Any], source_id: int, target_id: int) -> str:
+    rows = observation.get("rel") or observation.get("visible_relationships") or observation.get("relationships")
+    if not isinstance(rows, list) or source_id < 0 or target_id < 0 or source_id >= len(rows):
+        return "UNKNOWN"
+    row = rows[source_id]
+    if not isinstance(row, list) or target_id >= len(row):
+        return "UNKNOWN"
+    return _relationship_name(row[target_id])
+
+
+def _relationship_one_hot(observation: dict[str, Any], source_id: int, target_id: int) -> list[float]:
+    values = [0.0] * len(RELATIONSHIP_TYPES)
+    values[RELATIONSHIP_TO_INDEX[_relationship_between(observation, source_id, target_id)]] = 1.0
+    return values
+
+
+def _researched_tech_flags(tribe: dict[str, Any]) -> list[float]:
+    flags = [0.0] * len(TECH_TYPES)
+    for tech in tribe.get("researched_tech_ids", []) or []:
+        tech_idx = TECH_TO_INDEX.get(str(tech), -1)
+        if tech_idx >= 0:
+            flags[tech_idx] = 1.0
+    return flags
+
+
+def _tech_name(value: Any) -> str:
+    return str(value or "").strip().upper().replace(" ", "_")
+
+
+def _add_known_tech_evidence(flags: dict[str, set[str]], owner: int, tech: str, source: str) -> None:
+    name = _tech_name(tech)
+    if not name or owner < 0:
+        return
+    flags.setdefault(name, set()).add(source)
+    for prerequisite in TECH_PREREQUISITES.get(name, ()):
+        flags.setdefault(prerequisite, set()).add(f"prerequisite:{name}")
+
+
+def _known_opponent_tech_evidence(
+    player_id: int,
+    units: list[dict[str, Any]],
+    cities: list[dict[str, Any]],
+) -> dict[str, set[str]]:
+    evidence: dict[str, set[str]] = {}
+    for unit in units:
+        owner = _as_int(unit.get("tribe_id"), -1)
+        if owner == player_id or owner < 0:
+            continue
+        tech = UNIT_TECH_EVIDENCE.get(_tech_name(unit.get("type")))
+        if tech:
+            _add_known_tech_evidence(evidence, owner, tech, f"visible_unit:{_tech_name(unit.get('type'))}")
+    for city in cities:
+        owner = _as_int(city.get("tribe_id"), -1)
+        if owner == player_id or owner < 0:
+            continue
+        for building in city.get("buildings", []) or []:
+            if not isinstance(building, dict):
+                continue
+            tech = BUILDING_TECH_EVIDENCE.get(_tech_name(building.get("type")))
+            if tech:
+                _add_known_tech_evidence(evidence, owner, tech, f"visible_building:{_tech_name(building.get('type'))}")
+    return evidence
+
+
+def _known_opponent_tech_evidence_features(evidence: dict[str, set[str]]) -> list[float]:
+    known = set(evidence)
+    return (
+        [1.0 if tech in known else 0.0 for tech in TECH_TYPES]
+        + [
+            _norm(len(known), 64.0),
+            1.0 if known & {"ARCHERY", "STRATEGY", "SMITHERY", "CHIVALRY", "MATHEMATICS", "PHILOSOPHY"} else 0.0,
+            1.0 if known & {"MINING", "FARMING", "FORESTRY", "TRADE", "FISHING"} else 0.0,
+            1.0 if known & {"SAILING", "NAVIGATION", "AQUATISM"} else 0.0,
+            1.0 if known & {"STRATEGY", "DIPLOMACY"} else 0.0,
+        ]
+    )
+
+
+def _monument_status_counts(tribe: dict[str, Any]) -> list[float]:
+    counts = {"AVAILABLE": 0.0, "BUILT": 0.0, "UNAVAILABLE": 0.0}
+    monuments = tribe.get("monuments", {}) or {}
+    if isinstance(monuments, dict):
+        for status in monuments.values():
+            key = str(status or "").upper()
+            if key in counts:
+                counts[key] += 1.0
+    return [
+        _clamped_norm(counts["AVAILABLE"], 16.0),
+        _clamped_norm(counts["BUILT"], 16.0),
+        _clamped_norm(counts["UNAVAILABLE"], 16.0),
+    ]
+
+
+def _pending_offer_action_flags(action: dict[str, Any]) -> list[float]:
+    action_type = str(action.get("type"))
+    return [
+        1.0 if action_type == "PROPOSE_PEACE" else 0.0,
+        1.0 if action_type == "ACCEPT_PEACE" else 0.0,
+        1.0 if action_type == "PROPOSE_TREATY" else 0.0,
+        1.0 if action_type == "ACCEPT_TREATY" else 0.0,
+        1.0 if action_type == "CANCEL_TREATY" else 0.0,
+    ]
 
 
 def _hp_fraction(unit: dict[str, Any] | None) -> float:
@@ -428,7 +734,9 @@ def _normalize_board(board: Dict[str, Any]) -> Dict[str, Any]:
                 tile.setdefault("city_id", tile.get("city", 0))
                 tile.setdefault("unit_id", tile.get("unit", 0))
                 tile.setdefault("explored", bool(tile.get("visible", False)))
+                tile.setdefault("visible", bool(tile.get("explored", False)))
                 tile.setdefault("road", False)
+                tile.setdefault("territory_city_id", tile.get("territory", tile.get("territory_city", tile.get("city_id", 0))))
                 normalized_row.append(tile)
             normalized_rows.append(normalized_row)
         out["tiles"] = normalized_rows
@@ -458,7 +766,9 @@ def _normalize_board(board: Dict[str, Any]) -> Dict[str, Any]:
                     "city_id": city[y][x] if y < len(city) and x < len(city[y]) else 0,
                     "unit_id": unit[y][x] if y < len(unit) and x < len(unit[y]) else 0,
                     "explored": is_explored,
+                    "visible": is_explored,
                     "road": bool(road[y][x]) if y < len(road) and x < len(road[y]) else False,
+                    "territory_city_id": city[y][x] if y < len(city) and x < len(city[y]) else 0,
                 }
             )
         tiles.append(row)
@@ -537,6 +847,7 @@ def _normalize_action(action: Dict[str, Any]) -> Dict[str, Any]:
     out.setdefault("unit_type", out.get("ut"))
     out.setdefault("building_type", out.get("bt"))
     out.setdefault("resource_type", out.get("rt"))
+    out.setdefault("capture_type", out.get("ct"))
     if "x" in out and "y" in out:
         pos = {"x": out.get("x"), "y": out.get("y")}
         if out.get("type") == "MOVE":
@@ -617,14 +928,43 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig) -> Encod
             if building_idx >= 0:
                 channels[building_offset + building_idx, y, x] = 1.0
 
-    _copy_belief_planes(channels, observation.get("belief"), board_size)
+    unit_by_id_for_board = {_as_int(unit.get("id")): unit for unit in observation.get("units", []) or []}
+    city_by_id_for_board = {_as_int(city.get("id")): city for city in observation.get("cities", []) or []}
+    for row in board.get("tiles", []):
+        for tile in row:
+            x = int(tile.get("x", 0) or 0)
+            y = int(tile.get("y", 0) or 0)
+            if not (0 <= x < board_size and 0 <= y < board_size):
+                continue
+            channels[61, y, x] = 1.0 if tile.get("visible") else 0.0
+            unit_id = _as_int(tile.get("unit_id"))
+            unit = unit_by_id_for_board.get(unit_id)
+            if unit:
+                owner_bucket = _owner_bucket(_as_int(unit.get("tribe_id"), -1), my_player_id)
+                channels[62 + owner_bucket, y, x] = 1.0
+                channels[70, y, x] = _hp_fraction(unit)
+                status = str(unit.get("status"))
+                channels[68, y, x] = 1.0 if status in ("FRESH", "") else 0.0
+                channels[69, y, x] = 1.0 if status in ("MOVED", "FINISHED", "EXHAUSTED") else 0.0
+            city_id = _as_int(tile.get("city_id"))
+            city = city_by_id_for_board.get(city_id)
+            if city:
+                owner_bucket = _owner_bucket(_as_int(city.get("tribe_id"), -1), my_player_id)
+                channels[65 + owner_bucket, y, x] = 1.0
+                channels[71, y, x] = _clamped_norm(city.get("level", 0), 10.0)
+            territory_city_id = _as_int(tile.get("territory_city_id"), city_id)
+            territory_city = city_by_id_for_board.get(territory_city_id)
+            if territory_city:
+                channels[72, y, x] = 1.0 if _as_int(territory_city.get("tribe_id"), -1) == my_player_id else -1.0
 
     units = _sorted_entities(observation.get("units", []))
-    unit_features = np.zeros((model_cfg.max_units, model_cfg.entity_feature_dim), dtype=np.float32)
+    unit_feature_dim = int(getattr(model_cfg, "unit_feature_dim", getattr(model_cfg, "entity_feature_dim", len(UNIT_FEATURE_SCHEMA))))
+    city_feature_dim = int(getattr(model_cfg, "city_feature_dim", getattr(model_cfg, "entity_feature_dim", len(CITY_FEATURE_SCHEMA))))
+    unit_features = np.zeros((model_cfg.max_units, unit_feature_dim), dtype=np.float32)
     unit_mask = np.zeros(model_cfg.max_units, dtype=np.bool_)
     for idx, unit in enumerate(units[: model_cfg.max_units]):
         unit_mask[idx] = True
-        owner = int(unit.get("tribe_id", -1) or -1)
+        owner = _as_int(unit.get("tribe_id"), -1)
         base = [
             _norm(unit.get("id", 0), 2048.0),
             _norm(unit.get("x", 0), board_size - 1),
@@ -632,27 +972,32 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig) -> Encod
             1.0 if owner == my_player_id else -1.0,
             _norm(owner, 16.0),
             _clamped_norm(unit.get("current_hp", 0), 40.0),
+            _clamped_norm(unit.get("current_hp_exact", unit.get("current_hp", 0)), 40.0),
+            _hp_fraction(unit),
             _clamped_norm(unit.get("max_hp", 0), 40.0),
-            _clamped_norm(unit.get("atk", 0), 16.0),
-            _clamped_norm(unit.get("def", 0), 16.0),
-            _clamped_norm(unit.get("mov", 0), 8.0),
+            _clamped_norm(unit.get("attack", unit.get("atk", 0)), 16.0),
+            _clamped_norm(unit.get("defence", unit.get("def", 0)), 16.0),
+            _clamped_norm(unit.get("movement", unit.get("mov", 0)), 8.0),
             _clamped_norm(unit.get("range", 0), 8.0),
             _clamped_norm(unit.get("cost", 0), 32.0),
             _clamped_norm(unit.get("kills", 0), 16.0),
             1.0 if unit.get("is_veteran") else 0.0,
             1.0 if unit.get("is_hidden") else 0.0,
+            1.0 if unit.get("hidden_at_turn_start") else 0.0,
             1.0 if unit.get("hidden_enemy_hint") else 0.0,
             1.0 if str(unit.get("status")) == "FRESH" else 0.0,
+            1.0 if str(unit.get("status")) == "MOVED" else 0.0,
+            1.0 if str(unit.get("status")) == "FINISHED" else 0.0,
             1.0 if str(unit.get("status")) == "EXHAUSTED" else 0.0,
         ]
         _put_feature(unit_features[idx], base + _one_hot(unit.get("type"), UNIT_TYPES))
 
     cities = _sorted_entities(observation.get("cities", []))
-    city_features = np.zeros((model_cfg.max_cities, model_cfg.entity_feature_dim), dtype=np.float32)
+    city_features = np.zeros((model_cfg.max_cities, city_feature_dim), dtype=np.float32)
     city_mask = np.zeros(model_cfg.max_cities, dtype=np.bool_)
     for idx, city in enumerate(cities[: model_cfg.max_cities]):
         city_mask[idx] = True
-        owner = int(city.get("tribe_id", -1) or -1)
+        owner = _as_int(city.get("tribe_id"), -1)
         buildings = city.get("buildings", []) or []
         building_counts = [0.0] * len(BUILDING_TYPES)
         for building in buildings:
@@ -669,9 +1014,12 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig) -> Encod
             _clamped_norm(city.get("population", 0), 32.0),
             _clamped_norm(city.get("population_need", 0), 32.0),
             _clamped_norm(city.get("production", 0), 32.0),
+            _clamped_norm(city.get("bound", 0), 64.0),
             _clamped_norm(city.get("points_worth", 0), 512.0),
             1.0 if city.get("is_capital") else 0.0,
             1.0 if city.get("has_walls") else 0.0,
+            1.0 if city.get("infiltrated") else 0.0,
+            _clamped_norm(len(city.get("unit_ids", []) or []), 64.0),
             _clamped_norm(len(buildings), 16.0),
         ]
         _put_feature(city_features[idx], base + [min(1.0, c) for c in building_counts])
@@ -757,6 +1105,17 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig) -> Encod
             + city_action_summary_by_id.get(target_city_id, empty_city_summary)
             + target_tile_summary
         )
+        target_player_id = _as_int(action.get("target_player_id"), -1)
+        action_actor_id = _as_int(action.get("tribe_id"), _as_int(observation.get("active_player_id"), my_player_id))
+        native_context = (
+            _one_hot(action.get("capture_type"), TERRAIN_TYPES)
+            + _relationship_one_hot(observation, action_actor_id, target_player_id)
+            + [
+                _norm(target_player_id, 16.0),
+                1.0 if target_player_id == my_player_id else 0.0,
+            ]
+            + _pending_offer_action_flags(action)
+        )
         typed_key = (
             action.get("type"),
             action.get("unit_type"),
@@ -774,36 +1133,77 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig) -> Encod
                 + _one_hot(typed_key[4], TECH_TYPES)
             )
             typed_feature_by_key[typed_key] = typed
-        _put_feature(action_features[idx], spatial + intent + semantic + typed)
+        _put_feature(action_features[idx], spatial + intent + semantic + native_context + typed)
 
     tribes = observation.get("tribes", [])
-    my_tribe = next((tribe for tribe in tribes if int(tribe.get("id", -1) or -1) == my_player_id), {})
+    my_tribe = next((tribe for tribe in tribes if _as_int(tribe.get("id"), -1) == my_player_id), {})
     scores = [float(tribe.get("score", 0) or 0) for tribe in tribes]
     my_score = float(my_tribe.get("score", 0) or 0)
-    max_other_score = max([score for tribe, score in zip(tribes, scores) if int(tribe.get("id", -1) or -1) != my_player_id] or [0.0])
+    max_other_score = max([score for tribe, score in zip(tribes, scores) if _as_int(tribe.get("id"), -1) != my_player_id] or [0.0])
     explored_tiles = sum(1 for row in board.get("tiles", []) for tile in row if tile.get("explored"))
+    visible_tiles = sum(1 for row in board.get("tiles", []) for tile in row if tile.get("visible"))
+    own_units = [unit for unit in units if _as_int(unit.get("tribe_id"), -1) == my_player_id]
+    enemy_units = [unit for unit in units if _as_int(unit.get("tribe_id"), -1) >= 0 and _as_int(unit.get("tribe_id"), -1) != my_player_id]
+    own_cities = [city for city in cities if _as_int(city.get("tribe_id"), -1) == my_player_id]
+    enemy_cities = [city for city in cities if _as_int(city.get("tribe_id"), -1) >= 0 and _as_int(city.get("tribe_id"), -1) != my_player_id]
+    direct_relationship_counts = [0.0] * len(RELATIONSHIP_TYPES)
+    pending_incoming = 0.0
+    pending_outgoing = 0.0
+    for tribe in tribes:
+        other_id = _as_int(tribe.get("id"), -1)
+        if other_id == my_player_id or other_id < 0:
+            continue
+        direct_relationship_counts[RELATIONSHIP_TO_INDEX[_relationship_between(observation, my_player_id, other_id)]] += 1.0
+        if any(_as_int(action.get("target_player_id"), -1) == my_player_id for action in actions if str(action.get("type")).startswith("ACCEPT_")):
+            pending_incoming = 1.0
+        if any(_as_int(action.get("target_player_id"), -1) == other_id for action in actions if str(action.get("type")).startswith("PROPOSE_")):
+            pending_outgoing = 1.0
     scalar_values = [
         _norm(observation.get("tick", 0), 256.0),
         _norm(my_player_id, 16.0),
         _norm(observation.get("active_player_id", 0), 16.0),
+        1.0 if int(observation.get("active_player_id", 0) or 0) == my_player_id else 0.0,
         _norm(my_tribe.get("stars", 0), 128.0),
         _norm(my_score, 10000.0),
         _norm(my_score - max_other_score, 10000.0),
         _norm(len(my_tribe.get("researched_tech_ids", []) or []), 64.0),
         _norm(len(my_tribe.get("cities", []) or []), 64.0),
+        _norm(len(my_tribe.get("city_ids", []) or []), 64.0),
+        _norm(len(my_tribe.get("extra_unit_ids", []) or []), 256.0),
+        _norm(len(my_tribe.get("connected_city_ids", []) or []), 64.0),
+        _norm(len(my_tribe.get("met_tribe_ids", []) or []), 16.0),
+        _norm(len(my_tribe.get("known_capital_tribe_ids", []) or []), 16.0),
+        _norm(len(my_tribe.get("discovered_lighthouses", []) or []), 16.0),
+        _clamped_norm(my_tribe.get("kills", 0), 256.0),
+        _clamped_norm(my_tribe.get("pacifist_count", 0), 64.0),
+        1.0 if my_tribe.get("units_disabled_next_turn") else 0.0,
         1.0 if observation.get("can_end_turn") else 0.0,
         1.0 if observation.get("leveling_up") else 0.0,
         _norm(len(actions), model_cfg.max_actions),
         _norm(len(units), model_cfg.max_units),
+        _norm(len(own_units), model_cfg.max_units),
+        _norm(len(enemy_units), model_cfg.max_units),
         _norm(len(cities), model_cfg.max_cities),
+        _norm(len(own_cities), model_cfg.max_cities),
+        _norm(len(enemy_cities), model_cfg.max_cities),
         _norm(explored_tiles, board_size * board_size),
+        _norm(visible_tiles, board_size * board_size),
         _norm(len(tribes), 16.0),
         _norm(board_size, 30.0),
         _norm(board_size * board_size, 900.0),
         _norm(board_size, max(1.0, float(model_cfg.board_size))),
     ]
     scalar = np.zeros(model_cfg.scalar_dim, dtype=np.float32)
-    _put_feature(scalar, scalar_values + _belief_opponent_scalars(observation.get("belief")))
+    relationship_scalars = [_norm(count, 16.0) for count in direct_relationship_counts] + [pending_incoming, pending_outgoing]
+    opponent_tech_evidence = _known_opponent_tech_evidence(my_player_id, units, cities)
+    _put_feature(
+        scalar,
+        scalar_values
+        + _researched_tech_flags(my_tribe)
+        + _monument_status_counts(my_tribe)
+        + relationship_scalars
+        + _known_opponent_tech_evidence_features(opponent_tech_evidence),
+    )
 
     return EncodedObservation(
         board=torch.from_numpy(channels).unsqueeze(0),

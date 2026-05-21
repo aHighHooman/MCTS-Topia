@@ -6,16 +6,10 @@ import torch
 from torch import nn
 
 from search.config import ModelConfig
-from .belief import BELIEF_PLANE_CHANNEL_START, BELIEF_PLANE_NAMES
+from .encoding import BOARD_FEATURE_INDEX
 
 
-POPULATED_BOARD_CHANNELS = frozenset(
-    [0, 2, 3, 4, 5, 6, 7]
-    + list(range(10, 10 + 9))
-    + list(range(19, 19 + 9))
-    + list(range(28, 28 + 13))
-    + list(range(BELIEF_PLANE_CHANNEL_START, BELIEF_PLANE_CHANNEL_START + len(BELIEF_PLANE_NAMES)))
-)
+POPULATED_BOARD_CHANNELS = frozenset(BOARD_FEATURE_INDEX.values())
 
 
 @dataclass
@@ -69,8 +63,8 @@ class HybridPolicyValueNet(nn.Module):
             nn.Conv2d(cfg.cnn_channels, cfg.d_model, kernel_size=1),
             nn.GELU(),
         )
-        self.unit_proj = nn.Linear(cfg.entity_feature_dim, cfg.d_model)
-        self.city_proj = nn.Linear(cfg.entity_feature_dim, cfg.d_model)
+        self.unit_proj = nn.Linear(getattr(cfg, "unit_feature_dim", cfg.entity_feature_dim), cfg.d_model)
+        self.city_proj = nn.Linear(getattr(cfg, "city_feature_dim", cfg.entity_feature_dim), cfg.d_model)
         self.action_proj = nn.Linear(cfg.action_feature_dim, cfg.d_model)
         self.scalar_value_proj = nn.Linear(1, cfg.d_model)
         self.scalar_index_embeddings = nn.Embedding(cfg.scalar_dim, cfg.d_model)

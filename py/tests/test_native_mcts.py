@@ -12,7 +12,15 @@ if str(PY_ROOT) not in sys.path:
     sys.path.insert(0, str(PY_ROOT))
 
 from search.config import HybridAgentConfig
-from nn.encoding import encode_observation, normalize_message, TECH_TYPES
+from nn.encoding import (
+    ACTION_FEATURE_INDEX,
+    ACTION_NATIVE_CONTEXT_START,
+    SCALAR_MY_TECH_START,
+    TECH_TYPES,
+    TERRAIN_TYPES,
+    encode_observation,
+    normalize_message,
+)
 from nn.model import HybridPolicyValueNet
 from search.native import run_native_mcts, run_native_static_mcts
 from search.native.cpp_extension import load_native_mcts_extension
@@ -709,13 +717,32 @@ class NativeMCTSTest(unittest.TestCase):
         ]
 
         encoded = encode_observation(message, cfg.model)
-        tech_start = cfg.model.action_feature_dim - len(TECH_TYPES)
+        tech_start = ACTION_FEATURE_INDEX["tech:CLIMBING"]
         fish_features = encoded.action_features[0, 0, tech_start:]
         ride_features = encoded.action_features[0, 1, tech_start:]
 
         self.assertEqual(int(fish_features.sum().item()), 1)
         self.assertEqual(int(ride_features.sum().item()), 1)
         self.assertNotEqual(int(fish_features.argmax().item()), int(ride_features.argmax().item()))
+
+    def test_native_state_fields_are_encoded_for_model(self) -> None:
+        cfg = HybridAgentConfig()
+        message = _message_with_village_capture()
+        message["observation"]["rel"] = [["PEACE", "WAR"], ["WAR", "PEACE"]]
+        message["observation"]["tribes"][0]["researched_tech_ids"] = ["ROADS", "RIDING"]
+        message["actions"].append({"id": "peace", "type": "PROPOSE_PEACE", "tribe_id": 0, "target_player_id": 1})
+
+        encoded = encode_observation(message, cfg.model)
+
+        tech_slice = encoded.scalar_features[0, SCALAR_MY_TECH_START : SCALAR_MY_TECH_START + len(TECH_TYPES)]
+        self.assertEqual(float(tech_slice[TECH_TYPES.index("ROADS")]), 1.0)
+        self.assertEqual(float(tech_slice[TECH_TYPES.index("RIDING")]), 1.0)
+
+        capture_context = encoded.action_features[0, 0, ACTION_NATIVE_CONTEXT_START : ACTION_NATIVE_CONTEXT_START + len(TERRAIN_TYPES)]
+        self.assertEqual(float(capture_context[TERRAIN_TYPES.index("VILLAGE")]), 1.0)
+
+        self.assertEqual(float(encoded.action_features[0, 1, ACTION_FEATURE_INDEX["target_relationship:WAR"]]), 1.0)
+        self.assertEqual(float(encoded.action_features[0, 1, ACTION_FEATURE_INDEX["pending:propose_peace"]]), 1.0)
 
     def test_end_turn_with_visible_enemy_unit_switches_to_enemy_actions(self) -> None:
         extension = load_native_mcts_extension()

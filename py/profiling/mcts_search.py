@@ -5,11 +5,13 @@ import cProfile
 import csv
 from dataclasses import dataclass, field
 import json
+import math
 from pathlib import Path
 import pstats
 import random
 import sys
 import time
+from collections import Counter
 from typing import Any, Callable
 
 import torch
@@ -90,6 +92,51 @@ class PayloadCase:
     path: Path | None = None
 
 
+@dataclass
+class BranchingCollector:
+    root_action_counts: list[int] = field(default_factory=list)
+    eval_action_counts: list[int] = field(default_factory=list)
+    root_action_types: Counter[str] = field(default_factory=Counter)
+    eval_action_types: Counter[str] = field(default_factory=Counter)
+    root_visit_by_type: Counter[str] = field(default_factory=Counter)
+    root_visit_entropy_sum: float = 0.0
+    root_visit_samples: int = 0
+    selected_action_types: Counter[str] = field(default_factory=Counter)
+
+    def add_root(self, payload: dict[str, Any]) -> None:
+        actions = _payload_actions(payload)
+        self.root_action_counts.append(len(actions))
+        self.root_action_types.update(_action_type(action) for action in actions)
+
+    def add_eval_messages(self, messages: list[dict[str, Any]]) -> None:
+        for message in messages:
+            actions = _payload_actions(message)
+            self.eval_action_counts.append(len(actions))
+            self.eval_action_types.update(_action_type(action) for action in actions)
+
+    def add_result(self, payload: dict[str, Any], result: native_mcts.SearchResult | None) -> None:
+        if result is None:
+            return
+        action_by_id = {str(action.get("id")): action for action in _payload_actions(payload)}
+        selected = action_by_id.get(str(result.action_id))
+        if selected is not None:
+            self.selected_action_types[_action_type(selected)] += 1
+        for action_id, visit_share in result.visit_distribution.items():
+            share = max(0.0, float(visit_share))
+            if share <= 0.0:
+                continue
+            action = action_by_id.get(str(action_id))
+            self.root_visit_by_type[_action_type(action) if action is not None else "UNKNOWN"] += share
+        if result.visit_distribution:
+            entropy = -sum(
+                max(0.0, float(share)) * math.log2(max(1e-12, float(share)))
+                for share in result.visit_distribution.values()
+                if float(share) > 0.0
+            )
+            self.root_visit_entropy_sum += entropy
+            self.root_visit_samples += 1
+
+
 def _sync_if_needed(device: torch.device | str) -> None:
     device_obj = torch.device(device)
     if device_obj.type == "cuda" and torch.cuda.is_available():
@@ -120,7 +167,7 @@ def _stack_encoded(items: list[EncodedObservation]) -> EncodedObservation:
     )
 
 
-def _install_timed_evaluator(collector: TimingCollector) -> Callable[..., list[native_mcts._Evaluation]]:
+def _install_timed_evaluator(collector: TimingCollector, branching: BranchingCollector) -> Callable[..., list[native_mcts._Evaluation]]:
     original = native_mcts._evaluate_messages
 
     def timed_evaluate_messages(
@@ -132,6 +179,7 @@ def _install_timed_evaluator(collector: TimingCollector) -> Callable[..., list[n
     ) -> list[native_mcts._Evaluation]:
         if not messages:
             return []
+        branching.add_eval_messages(messages)
 
         child_sec = 0.0
         if belief_snapshot is not None:
@@ -210,7 +258,7 @@ def _install_timed_evaluator(collector: TimingCollector) -> Callable[..., list[n
     return original
 
 
-def _install_timed_static_evaluator(collector: TimingCollector) -> Callable[..., list[native_mcts._Evaluation]]:
+def _install_timed_static_evaluator(collector: TimingCollector, branching: BranchingCollector) -> Callable[..., list[native_mcts._Evaluation]]:
     original = native_static_mcts._evaluate_static_messages
 
     def timed_evaluate_static_messages(
@@ -219,6 +267,7 @@ def _install_timed_static_evaluator(collector: TimingCollector) -> Callable[...,
     ) -> list[native_mcts._Evaluation]:
         if not messages:
             return []
+        branching.add_eval_messages(messages)
         started_at = time.perf_counter()
         result = original(messages, max_actions)
         elapsed = time.perf_counter() - started_at
@@ -830,7 +879,7 @@ def _timing_rows(collector: TimingCollector, total_sec: float) -> list[dict[str,
     return rows
 
 
-def _profile_rows(profile: cProfile.Profile, *, limit: int, root: Path) -> list[dict[str, Any]]:
+def _profile_rows(profile: cProfile.Profile, *, root: Path) -> list[dict[str, Any]]:
     stats = pstats.Stats(profile)
     entries = []
     for (filename, line, func_name), stat in stats.stats.items():
@@ -859,8 +908,86 @@ def _profile_rows(profile: cProfile.Profile, *, limit: int, root: Path) -> list[
             "cum_ms": f"{row['cum_ms']:.3f}",
             "avg_self_us": f"{row['avg_self_us']:.3f}",
         }
-        for row in entries[:limit]
+        for row in entries
     ]
+
+
+def _filtered_timing_rows(rows: list[dict[str, Any]], *, min_ms: float, min_pct: float, limit: int) -> list[dict[str, Any]]:
+    filtered = [
+        row
+        for row in rows
+        if float(row["total_ms"]) >= min_ms and float(row["pct"]) >= min_pct
+    ]
+    return filtered[:limit]
+
+
+def _filtered_profile_rows(rows: list[dict[str, Any]], *, min_ms: float, total_sec: float, min_pct: float, limit: int) -> list[dict[str, Any]]:
+    total_ms = max(1e-9, total_sec * 1000.0)
+    filtered = []
+    for row in rows:
+        cum_ms = float(row["cum_ms"])
+        pct = cum_ms / total_ms * 100.0
+        if cum_ms < min_ms or pct < min_pct:
+            continue
+        filtered.append(
+            {
+                "function": row["function"],
+                "calls": row["calls"],
+                "cum_ms": row["cum_ms"],
+                "self_ms": row["self_ms"],
+                "pct": f"{pct:.1f}",
+            }
+        )
+    return filtered[:limit]
+
+
+def _hotspot_rows(
+    timing_rows: list[dict[str, Any]],
+    profile_rows: list[dict[str, Any]],
+    *,
+    total_sec: float,
+    min_ms: float,
+    min_pct: float,
+    limit: int,
+) -> list[dict[str, Any]]:
+    total_ms = max(1e-9, total_sec * 1000.0)
+    rows: list[dict[str, Any]] = []
+    for row in timing_rows:
+        total = float(row["total_ms"])
+        pct = float(row["pct"])
+        if total < min_ms or pct < min_pct:
+            continue
+        rows.append(
+            {
+                "source": "phase",
+                "name": row["name"],
+                "calls": row["calls"],
+                "items": row["items"],
+                "time_ms": f"{total:.3f}",
+                "self_ms": row["self_ms"],
+                "pct": row["pct"],
+            }
+        )
+    for row in profile_rows:
+        if str(row["function"]).startswith("py\\profiling\\mcts_search.py:") or str(row["function"]).startswith("py/profiling/mcts_search.py:"):
+            continue
+        total = float(row["cum_ms"])
+        pct = total / total_ms * 100.0
+        if total < min_ms or pct < min_pct:
+            continue
+        rows.append(
+            {
+                "source": "function",
+                "name": row["function"],
+                "calls": row["calls"],
+                "items": "",
+                "time_ms": row["cum_ms"],
+                "self_ms": row["self_ms"],
+                "pct": f"{pct:.1f}",
+            }
+        )
+    rows.sort(key=lambda row: float(row["time_ms"]), reverse=True)
+    return rows[:limit]
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -884,11 +1011,98 @@ def _add_stats(total: SearchStats, item: SearchStats) -> None:
     total.max_depth = max(int(total.max_depth), int(item.max_depth))
 
 
+def _payload_actions(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    actions = payload.get("actions", []) if isinstance(payload, dict) else []
+    return [action for action in actions if isinstance(action, dict)]
+
+
+def _action_type(action: dict[str, Any]) -> str:
+    return str(action.get("type") or action.get("t") or "UNKNOWN").upper()
+
+
+def _percentile(values: list[int], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * percentile)))
+    return float(ordered[index])
+
+
+def _branching_summary(values: list[int]) -> dict[str, str]:
+    if not values:
+        return {"samples": "0", "avg": "0.00", "p50": "0", "p90": "0", "max": "0"}
+    return {
+        "samples": str(len(values)),
+        "avg": f"{sum(values) / len(values):.2f}",
+        "p50": f"{_percentile(values, 0.50):.0f}",
+        "p90": f"{_percentile(values, 0.90):.0f}",
+        "max": str(max(values)),
+    }
+
+
+def _action_breadth_rows(branching: BranchingCollector, *, limit: int = 12) -> list[dict[str, Any]]:
+    root_total = sum(branching.root_action_types.values())
+    leaf_total = sum(branching.eval_action_types.values())
+    visit_total = max(1, branching.root_visit_samples)
+    names = set(branching.root_action_types) | set(branching.eval_action_types) | set(branching.root_visit_by_type)
+
+    def rank(name: str) -> float:
+        return (
+            float(branching.root_action_types.get(name, 0))
+            + float(branching.eval_action_types.get(name, 0))
+            + float(branching.root_visit_by_type.get(name, 0)) * 100.0
+        )
+
+    rows = []
+    for name in sorted(names, key=rank, reverse=True)[:limit]:
+        root_count = int(branching.root_action_types.get(name, 0))
+        leaf_count = int(branching.eval_action_types.get(name, 0))
+        visit_share = float(branching.root_visit_by_type.get(name, 0.0)) / float(visit_total)
+        rows.append(
+            {
+                "type": name,
+                "root_count": root_count,
+                "root_share": f"{(root_count / root_total * 100.0) if root_total else 0.0:.1f}%",
+                "leaf_count": leaf_count,
+                "leaf_share": f"{(leaf_count / leaf_total * 100.0) if leaf_total else 0.0:.1f}%",
+                "visit_share": f"{visit_share * 100.0:.1f}%",
+            }
+        )
+    return rows
+
+
+def _top_root_action_rows(
+    payload: dict[str, Any],
+    result: native_mcts.SearchResult | None,
+    *,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    if result is None:
+        return []
+    actions = _payload_actions(payload)
+    action_by_id = {str(action.get("id")): action for action in actions}
+    rows = []
+    for action_id, share in sorted(result.visit_distribution.items(), key=lambda item: float(item[1]), reverse=True)[:limit]:
+        action = action_by_id.get(str(action_id), {})
+        rows.append(
+            {
+                "action_id": action_id,
+                "type": _action_type(action),
+                "visit_share": f"{float(share) * 100.0:.1f}%",
+                "unit": action.get("unit_id", ""),
+                "city": action.get("city_id", ""),
+                "x": action.get("x", ""),
+                "y": action.get("y", ""),
+            }
+        )
+    return rows
+
+
 def _payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
     observation = payload.get("observation", {}) if isinstance(payload, dict) else {}
     board = observation.get("board", {}) if isinstance(observation, dict) else {}
     return {
-        "actions": len(payload.get("actions", []) or []) if isinstance(payload, dict) else 0,
+        "actions": len(_payload_actions(payload)),
         "board_size": board.get("size", "?"),
         "tick": observation.get("tick", "?"),
         "player_id": payload.get("player_id", "?") if isinstance(payload, dict) else "?",
@@ -1034,7 +1248,9 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=0, help="Warmup runs per captured payload; not included in reported benchmark time.")
     parser.add_argument("--top-k-actions", type=int, default=None)
     parser.add_argument("--no-dirichlet", action="store_true", help="Disable root Dirichlet noise for deterministic profiling.")
-    parser.add_argument("--function-limit", type=int, default=30)
+    parser.add_argument("--function-limit", type=int, default=15, help="Maximum hotspot rows printed to the console.")
+    parser.add_argument("--min-hotspot-ms", type=float, default=1.0, help="Hide timing/function rows below this cumulative millisecond threshold.")
+    parser.add_argument("--min-hotspot-pct", type=float, default=1.0, help="Hide timing/function rows below this percent-of-run threshold.")
     parser.add_argument("--csv", type=Path, default=None, help="Optional CSV path for custom timing rows.")
     parser.add_argument("--profile-csv", type=Path, default=None, help="Optional CSV path for cProfile rows.")
     parser.add_argument("--position-csv", type=Path, default=None, help="Optional CSV path for per-position search throughput rows.")
@@ -1082,8 +1298,9 @@ def main() -> int:
         raise RuntimeError("No payload cases were captured/loaded.")
 
     collector = TimingCollector()
-    original_evaluator = _install_timed_evaluator(collector) if args.evaluator == "nn" else None
-    original_static_evaluator = _install_timed_static_evaluator(collector) if args.evaluator == "static" else None
+    branching = BranchingCollector()
+    original_evaluator = _install_timed_evaluator(collector, branching) if args.evaluator == "nn" else None
+    original_static_evaluator = _install_timed_static_evaluator(collector, branching) if args.evaluator == "static" else None
     original_tree_cls = _install_timed_tree(extension, collector, device)
     profile = cProfile.Profile()
     per_position_rows: list[dict[str, Any]] = []
@@ -1116,13 +1333,14 @@ def main() -> int:
                         native_mcts.run_native_mcts(case.payload, model, cfg.search, cfg.model, device)
 
         collector = TimingCollector()
+        branching = BranchingCollector()
         if original_evaluator is not None:
             native_mcts._evaluate_messages = original_evaluator
         if original_static_evaluator is not None:
             native_static_mcts._evaluate_static_messages = original_static_evaluator
         extension.NativeMCTS = original_tree_cls
-        original_evaluator = _install_timed_evaluator(collector) if args.evaluator == "nn" else None
-        original_static_evaluator = _install_timed_static_evaluator(collector) if args.evaluator == "static" else None
+        original_evaluator = _install_timed_evaluator(collector, branching) if args.evaluator == "nn" else None
+        original_static_evaluator = _install_timed_static_evaluator(collector, branching) if args.evaluator == "static" else None
         _install_timed_tree(extension, collector, device)
 
         _sync_if_needed(device)
@@ -1130,6 +1348,7 @@ def main() -> int:
         profile.enable()
         for index, case in enumerate(cases, start=1):
             summary = _payload_summary(case.payload)
+            branching.add_root(case.payload)
             print(
                 f"[benchmark {index}/{len(cases)}] {case.label} "
                 f"actions={summary['actions']} board_size={summary['board_size']} tick={summary['tick']}",
@@ -1146,6 +1365,7 @@ def main() -> int:
                 repeats=max(1, int(args.repeats)),
             )
             _add_stats(total_stats, run_stats)
+            branching.add_result(case.payload, last_result)
             row = {
                 "index": index,
                 "label": case.label,
@@ -1168,15 +1388,6 @@ def main() -> int:
                 "eval_cache_hits": run_stats.eval_cache_hits,
             }
             per_position_rows.append(row)
-            print(
-                "  "
-                f"elapsed={elapsed:.2f}s simulations={run_stats.simulations} "
-                f"sim/s={row['simulations_per_sec']} "
-                f"nodes={run_stats.expanded_nodes} nodes/s={row['nodes_per_sec']} "
-                f"nodes_explored={run_stats.explored_nodes} explored/s={row['nodes_explored_per_sec']} "
-                f"avg_depth={run_stats.average_depth:.2f} max_depth={run_stats.max_depth}",
-                flush=True,
-            )
         _sync_if_needed(device)
         profile.disable()
         elapsed = time.perf_counter() - benchmark_started_at
@@ -1199,7 +1410,7 @@ def main() -> int:
         f"total_ms={elapsed * 1000.0:.3f}"
     )
     if last_result is not None:
-        print(f"Last selected action: id={last_result.action_id} index={last_result.action_index} value={last_result.value:.4f}")
+        print(f"Selected action from final position: id={last_result.action_id} index={last_result.action_index} value={last_result.value:.4f}")
 
     print("\nPer-position throughput")
     print(
@@ -1239,24 +1450,77 @@ def main() -> int:
             f"eval_cache_hits={total_stats.eval_cache_hits}"
         )
 
-    if args.position_csv is not None:
-        _write_csv(args.position_csv, per_position_rows)
-        print(f"\nWrote per-position CSV: {args.position_csv}")
+    print("\nBranching and action breadth")
+    branching_rows = [
+        {"scope": "root legal actions", **_branching_summary(branching.root_action_counts)},
+        {"scope": "evaluated leaf actions", **_branching_summary(branching.eval_action_counts)},
+    ]
+    print(_format_table(branching_rows, [("scope", "scope"), ("samples", "samples"), ("avg", "avg"), ("p50", "p50"), ("p90", "p90"), ("max", "max")]))
+    if branching.root_visit_samples:
+        print(f"Average root visit entropy: {branching.root_visit_entropy_sum / branching.root_visit_samples:.3f} bits")
 
-    print()
+    action_breadth_rows = _action_breadth_rows(branching, limit=10)
+    if action_breadth_rows:
+        print("\nAction type breadth")
+        print(
+            _format_table(
+                action_breadth_rows,
+                [
+                    ("type", "type"),
+                    ("root_count", "root"),
+                    ("root_share", "root_%"),
+                    ("leaf_count", "leaf"),
+                    ("leaf_share", "leaf_%"),
+                    ("visit_share", "root_visit_%"),
+                ],
+            )
+        )
+
+    top_action_rows = _top_root_action_rows(cases[-1].payload, last_result, limit=10)
+    if top_action_rows:
+        print("\nTop root actions in final position")
+        print(
+            _format_table(
+                top_action_rows,
+                [("action_id", "action_id"), ("type", "type"), ("visit_share", "visits"), ("unit", "unit"), ("city", "city"), ("x", "x"), ("y", "y")],
+            )
+        )
+
     rows = _timing_rows(collector, elapsed)
-    print("Custom timing breakdown")
-    print(_format_table(rows, [("name", "name"), ("calls", "calls"), ("items", "items"), ("total_ms", "total_ms"), ("self_ms", "self_ms"), ("avg_ms", "avg_ms"), ("pct", "% total")]))
     if args.csv is not None:
         _write_csv(args.csv, rows)
-        print(f"\nWrote custom timing CSV: {args.csv}")
 
-    profile_table = _profile_rows(profile, limit=args.function_limit, root=PY_ROOT.parent)
-    print("\nTop cProfile functions by cumulative time")
-    print(_format_table(profile_table, [("function", "function"), ("calls", "calls"), ("cum_ms", "cum_ms"), ("self_ms", "self_ms"), ("avg_self_us", "avg_self_us")]))
+    profile_table = _profile_rows(profile, root=PY_ROOT.parent)
     if args.profile_csv is not None:
         _write_csv(args.profile_csv, profile_table)
-        print(f"\nWrote cProfile CSV: {args.profile_csv}")
+
+    hotspot_rows = _hotspot_rows(
+        rows,
+        profile_table,
+        total_sec=elapsed,
+        min_ms=max(0.0, float(args.min_hotspot_ms)),
+        min_pct=max(0.0, float(args.min_hotspot_pct)),
+        limit=max(1, int(args.function_limit)),
+    )
+    print(
+        "\nHotspots "
+        f"(>= {float(args.min_hotspot_ms):.3g} ms and >= {float(args.min_hotspot_pct):.3g}% of run)"
+    )
+    if hotspot_rows:
+        print(_format_table(hotspot_rows, [("source", "source"), ("name", "name"), ("calls", "calls"), ("items", "items"), ("time_ms", "time_ms"), ("self_ms", "self_ms"), ("pct", "%")]))
+    else:
+        print("No phase or function rows crossed the reporting threshold.")
+
+    written = []
+    if args.position_csv is not None:
+        _write_csv(args.position_csv, per_position_rows)
+        written.append(f"positions={args.position_csv}")
+    if args.csv is not None:
+        written.append(f"timing={args.csv}")
+    if args.profile_csv is not None:
+        written.append(f"functions={args.profile_csv}")
+    if written:
+        print("\nCSV: " + " ".join(written))
     return 0
 
 

@@ -13,10 +13,20 @@ PY_ROOT = Path(__file__).resolve().parents[1]
 if str(PY_ROOT) not in sys.path:
     sys.path.insert(0, str(PY_ROOT))
 
-from nn.belief import BELIEF_PLANE_CHANNEL_START, BELIEF_PLANE_NAMES, BeliefTracker
+from nn.belief import BeliefTracker
 from nn.bot_agent import HybridRLBot
 from search.config import HybridAgentConfig
-from nn.encoding import encode_observation
+from nn.encoding import (
+    ACTION_FEATURE_SCHEMA,
+    BOARD_FEATURE_INDEX,
+    BOARD_SCHEMA,
+    CITY_FEATURE_SCHEMA,
+    SCALAR_FEATURE_INDEX,
+    SCALAR_FEATURE_SCHEMA,
+    TECH_TYPES,
+    UNIT_FEATURE_SCHEMA,
+    encode_observation,
+)
 from nn.model import HybridPolicyValueNet
 from search.native.mcts import SearchResult
 
@@ -158,30 +168,61 @@ class BeliefBuilderTest(unittest.TestCase):
 
 
 class BeliefEncoderTest(unittest.TestCase):
-    def test_belief_planes_and_scalars_encode(self) -> None:
+    def test_model_config_dimensions_match_named_schemas(self) -> None:
+        cfg = HybridAgentConfig()
+
+        self.assertEqual(cfg.model.board_channels, len(BOARD_SCHEMA))
+        self.assertEqual(cfg.model.unit_feature_dim, len(UNIT_FEATURE_SCHEMA))
+        self.assertEqual(cfg.model.city_feature_dim, len(CITY_FEATURE_SCHEMA))
+        self.assertEqual(cfg.model.action_feature_dim, len(ACTION_FEATURE_SCHEMA))
+        self.assertEqual(cfg.model.scalar_dim, len(SCALAR_FEATURE_SCHEMA))
+
+    def test_belief_uncertainty_is_not_encoded_but_visible_tech_evidence_is(self) -> None:
         cfg = HybridAgentConfig()
         annotated = BeliefTracker().annotate(_message())
 
         encoded = encode_observation(annotated, cfg.model)
 
-        self.assertEqual(tuple(encoded.scalar_features.shape), (1, 88))
-        for idx, name in enumerate(BELIEF_PLANE_NAMES):
-            channel = BELIEF_PLANE_CHANNEL_START + idx
-            expected = annotated["observation"]["belief"]["planes"][name]
-            self.assertTrue(torch.equal(encoded.board[0, channel], torch.tensor(expected, dtype=torch.float32)))
-        self.assertAlmostEqual(float(encoded.scalar_features[0, 18]), annotated["observation"]["belief"]["opponent_scalars"][0])
+        self.assertEqual(tuple(encoded.scalar_features.shape), (1, cfg.model.scalar_dim))
+        self.assertLess(max(BOARD_FEATURE_INDEX.values()), cfg.model.board_channels)
+        self.assertEqual(float(encoded.board[0, BOARD_FEATURE_INDEX["visible_unit_owner:enemy"], 2, 2]), 1.0)
 
-    def test_missing_belief_encodes_as_zeros_and_priors_do_not_overwrite(self) -> None:
+        for tech in ("RIDING", "MINING", "CLIMBING"):
+            index = SCALAR_FEATURE_INDEX[f"known_opponent_tech_evidence:{tech}"]
+            self.assertEqual(float(encoded.scalar_features[0, index]), 1.0)
+        self.assertEqual(
+            float(encoded.scalar_features[0, SCALAR_FEATURE_INDEX["known_opponent_tech_evidence:CHIVALRY"]]),
+            0.0,
+        )
+
+    def test_belief_payload_changes_do_not_change_nn_tensors(self) -> None:
         cfg = HybridAgentConfig()
-        encoded = encode_observation(_message(), cfg.model)
-        for idx in range(len(BELIEF_PLANE_NAMES)):
-            self.assertEqual(float(encoded.board[0, BELIEF_PLANE_CHANNEL_START + idx].sum()), 0.0)
-        self.assertEqual(float(encoded.scalar_features[0, 18:].sum()), 0.0)
+        annotated = BeliefTracker().annotate(_message())
+        changed = BeliefTracker().annotate(_message())
+        changed["observation"]["belief"]["opponent_scalars"] = [1.0] * 70
+        for plane in changed["observation"]["belief"]["planes"].values():
+            for row in plane:
+                for x in range(len(row)):
+                    row[x] = 1.0
 
         model = HybridPolicyValueNet(cfg.model)
-        with_priors = model._with_empty_board_priors(encoded.board.clone())
-        for idx in range(len(BELIEF_PLANE_NAMES)):
-            self.assertEqual(float(with_priors[0, BELIEF_PLANE_CHANNEL_START + idx].sum()), 0.0)
+        self.assertFalse(model.empty_board_channel_indices)
+        left = encode_observation(annotated, cfg.model)
+        right = encode_observation(changed, cfg.model)
+
+        self.assertTrue(torch.equal(left.board, right.board))
+        self.assertTrue(torch.equal(left.scalar_features, right.scalar_features))
+
+    def test_unseen_opponent_researched_tech_ids_are_not_encoded(self) -> None:
+        cfg = HybridAgentConfig()
+        message = _message()
+        message["observation"]["tribes"][1]["researched_tech_ids"] = ["CHIVALRY", "NAVIGATION"]
+
+        encoded = encode_observation(message, cfg.model)
+
+        for tech in ("CHIVALRY", "NAVIGATION"):
+            index = SCALAR_FEATURE_INDEX[f"known_opponent_tech_evidence:{tech}"]
+            self.assertEqual(float(encoded.scalar_features[0, index]), 0.0)
 
 
 class BeliefBotFlowTest(unittest.TestCase):

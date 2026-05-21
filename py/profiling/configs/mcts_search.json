@@ -1,5 +1,5 @@
 {
-  "evaluator": "static",
+  "evaluator": "nn",
   "positions": 10,
   "selfplay_seed_start": 0,
   "selfplay_run_mode": "PlayLG",

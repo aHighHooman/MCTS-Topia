@@ -6,10 +6,29 @@ from pathlib import Path
 from typing import Any
 
 
+def _resolve_config_path(path: Path) -> Path:
+    if path.exists() or path.is_absolute():
+        return path
+
+    py_root = Path(__file__).resolve().parents[1]
+    if path.parts and path.parts[0] == "py":
+        from_py_root = py_root.joinpath(*path.parts[1:])
+        if from_py_root.exists():
+            return from_py_root
+
+    from_py_root = py_root / path
+    if from_py_root.exists():
+        return from_py_root
+
+    return path
+
+
 def load_config_defaults(parser: argparse.ArgumentParser, argv: list[str] | None = None) -> argparse.Namespace:
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument("--config", type=Path, default=None, help="JSON config file with argparse option names.")
     config_args, remaining = config_parser.parse_known_args(argv)
+    if config_args.config is not None:
+        config_args.config = _resolve_config_path(config_args.config)
     parser.add_argument("--config", type=Path, default=config_args.config, help="JSON config file with argparse option names.")
     if config_args.config is None:
         return parser.parse_args(remaining)
