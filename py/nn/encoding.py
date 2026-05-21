@@ -415,6 +415,8 @@ class EncodedObservation:
         unit_mask = self.unit_mask
         city_features = self.city_features
         city_mask = self.city_mask
+        action_features = self.action_features
+        action_mask = self.action_mask
         if not unit_mask.is_cuda:
             max_units = int(unit_mask.sum(dim=1).max().item()) if unit_mask.numel() else 0
             unit_features = unit_features[:, :max_units]
@@ -423,14 +425,20 @@ class EncodedObservation:
             max_cities = int(city_mask.sum(dim=1).max().item()) if city_mask.numel() else 0
             city_features = city_features[:, :max_cities]
             city_mask = city_mask[:, :max_cities]
+        if not action_mask.is_cuda:
+            max_actions = int(action_mask.sum(dim=1).max().item()) if action_mask.numel() else 0
+            if action_features.shape[1] > 0:
+                max_actions = max(1, max_actions)
+            action_features = action_features[:, :max_actions]
+            action_mask = action_mask[:, :max_actions]
         return EncodedObservation(
             self.board.to(device),
             unit_features.to(device),
             unit_mask.to(device),
             city_features.to(device),
             city_mask.to(device),
-            self.action_features.to(device),
-            self.action_mask.to(device),
+            action_features.to(device),
+            action_mask.to(device),
             self.scalar_features.to(device),
             self.action_ids,
         )
