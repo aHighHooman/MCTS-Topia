@@ -314,7 +314,9 @@ def run_native_mcts(
     wall_time_budget = 0.0 if wall_time_seconds is None else max(0.0, float(wall_time_seconds))
     deadline = time.perf_counter() + wall_time_budget if wall_time_budget > 0.0 else None
     simulations_remaining = int(search_cfg.num_simulations)
-    batch_size = max(1, int(search_cfg.batch_size))
+    requested_batch_size = max(1, int(search_cfg.batch_size))
+    device_obj = torch.device(device)
+    batch_size = max(requested_batch_size, 64) if device_obj.type == "cuda" else requested_batch_size
     select_sec = 0.0
     eval_sec = 0.0
     expand_sec = 0.0
