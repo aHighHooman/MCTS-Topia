@@ -943,6 +943,8 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
     cities_raw = observation.get("cities", []) or []
     unit_by_id_for_board = {_as_int(unit.get("id")): unit for unit in units_raw}
     city_by_id_for_board = {_as_int(city.get("id")): city for city in cities_raw}
+    explored_tiles = 0
+    visible_tiles = 0
     for row in board.get("tiles", []):
         for tile in row:
             x = int(tile.get("x", 0) or 0)
@@ -950,7 +952,13 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
             if not (0 <= x < board_size and 0 <= y < board_size):
                 continue
             channels[0, y, x] = 1.0
-            channels[2, y, x] = 1.0 if tile.get("explored") else 0.0
+            explored = bool(tile.get("explored"))
+            visible = bool(tile.get("visible"))
+            if explored:
+                explored_tiles += 1
+                channels[2, y, x] = 1.0
+            if visible:
+                visible_tiles += 1
             channels[5, y, x] = 1.0 if int(tile.get("unit_id", 0) or 0) > 0 else 0.0
             channels[6, y, x] = 1.0 if int(tile.get("city_id", 0) or 0) > 0 else 0.0
             channels[7, y, x] = 1.0 if tile.get("road") else 0.0
@@ -963,7 +971,8 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
             building_idx = BUILDING_TO_INDEX.get(str(tile.get("building")), -1)
             if building_idx >= 0:
                 channels[building_offset + building_idx, y, x] = 1.0
-            channels[61, y, x] = 1.0 if tile.get("visible") else 0.0
+            if visible:
+                channels[61, y, x] = 1.0
             unit_id = _as_int(tile.get("unit_id"))
             unit = unit_by_id_for_board.get(unit_id)
             if unit:
@@ -990,9 +999,15 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
     unit_limit = min(len(units), model_cfg.max_units) if compact else model_cfg.max_units
     unit_features = np.zeros((unit_limit, unit_feature_dim), dtype=np.float32)
     unit_mask = np.zeros(unit_limit, dtype=np.bool_)
+    own_unit_count = 0
+    enemy_unit_count = 0
     for idx, unit in enumerate(units[:unit_limit]):
         unit_mask[idx] = True
         owner = _as_int(unit.get("tribe_id"), -1)
+        if owner == my_player_id:
+            own_unit_count += 1
+        elif owner >= 0:
+            enemy_unit_count += 1
         base = [
             _norm(unit.get("id", 0), 2048.0),
             _norm(unit.get("x", 0), board_size - 1),
@@ -1024,9 +1039,15 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
     city_limit = min(len(cities), model_cfg.max_cities) if compact else model_cfg.max_cities
     city_features = np.zeros((city_limit, city_feature_dim), dtype=np.float32)
     city_mask = np.zeros(city_limit, dtype=np.bool_)
+    own_city_count = 0
+    enemy_city_count = 0
     for idx, city in enumerate(cities[:city_limit]):
         city_mask[idx] = True
         owner = _as_int(city.get("tribe_id"), -1)
+        if owner == my_player_id:
+            own_city_count += 1
+        elif owner >= 0:
+            enemy_city_count += 1
         buildings = city.get("buildings", []) or []
         building_counts = [0.0] * len(BUILDING_TYPES)
         for building in buildings:
@@ -1079,9 +1100,17 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
     tile_action_summary_by_pos: dict[tuple[int, int], list[float]] = {}
     typed_feature_by_key: dict[tuple[Any, Any, Any, Any], list[float]] = {}
     relationship_feature_by_pair: dict[tuple[int, int], list[float]] = {}
+    pending_incoming = 0.0
+    pending_outgoing_targets: set[int] = set()
     for idx, action in enumerate(actions[: min(len(actions), action_limit)]):
         action_mask[idx] = True
         action_ids.append(str(action["id"]))
+        action_type = str(action.get("type"))
+        action_target_player_id = _as_int(action.get("target_player_id"), -1)
+        if action_type.startswith("ACCEPT_") and action_target_player_id == my_player_id:
+            pending_incoming = 1.0
+        elif action_type.startswith("PROPOSE_") and action_target_player_id >= 0:
+            pending_outgoing_targets.add(action_target_player_id)
         pos = _position_payload(action)
         # Action ids and entity ids are lookup/alignment handles only. Learned
         # action features use semantic entity/tile summaries so the network can
@@ -1128,8 +1157,8 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
             1.0 if action.get("destination") else 0.0,
             1.0 if action.get("target_pos") else 0.0,
             1.0 if action.get("position") else 0.0,
-            1.0 if str(action.get("type")) == "END_TURN" else 0.0,
-            1.0 if str(action.get("type")) in ("ATTACK", "CAPTURE", "CONVERT") else 0.0,
+            1.0 if action_type == "END_TURN" else 0.0,
+            1.0 if action_type in ("ATTACK", "CAPTURE", "CONVERT") else 0.0,
         ]
         semantic = (
             unit_action_summary_by_id.get(source_unit_id, empty_unit_summary)
@@ -1138,7 +1167,7 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
             + city_action_summary_by_id.get(target_city_id, empty_city_summary)
             + target_tile_summary
         )
-        target_player_id = _as_int(action.get("target_player_id"), -1)
+        target_player_id = action_target_player_id
         action_actor_id = _as_int(action.get("tribe_id"), _as_int(observation.get("active_player_id"), my_player_id))
         relationship_key = (action_actor_id, target_player_id)
         relationship = relationship_feature_by_pair.get(relationship_key)
@@ -1178,23 +1207,14 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
     scores = [float(tribe.get("score", 0) or 0) for tribe in tribes]
     my_score = float(my_tribe.get("score", 0) or 0)
     max_other_score = max([score for tribe, score in zip(tribes, scores) if _as_int(tribe.get("id"), -1) != my_player_id] or [0.0])
-    explored_tiles = sum(1 for row in board.get("tiles", []) for tile in row if tile.get("explored"))
-    visible_tiles = sum(1 for row in board.get("tiles", []) for tile in row if tile.get("visible"))
-    own_units = [unit for unit in units if _as_int(unit.get("tribe_id"), -1) == my_player_id]
-    enemy_units = [unit for unit in units if _as_int(unit.get("tribe_id"), -1) >= 0 and _as_int(unit.get("tribe_id"), -1) != my_player_id]
-    own_cities = [city for city in cities if _as_int(city.get("tribe_id"), -1) == my_player_id]
-    enemy_cities = [city for city in cities if _as_int(city.get("tribe_id"), -1) >= 0 and _as_int(city.get("tribe_id"), -1) != my_player_id]
     direct_relationship_counts = [0.0] * len(RELATIONSHIP_TYPES)
-    pending_incoming = 0.0
     pending_outgoing = 0.0
     for tribe in tribes:
         other_id = _as_int(tribe.get("id"), -1)
         if other_id == my_player_id or other_id < 0:
             continue
         direct_relationship_counts[RELATIONSHIP_TO_INDEX[_relationship_between(observation, my_player_id, other_id)]] += 1.0
-        if any(_as_int(action.get("target_player_id"), -1) == my_player_id for action in actions if str(action.get("type")).startswith("ACCEPT_")):
-            pending_incoming = 1.0
-        if any(_as_int(action.get("target_player_id"), -1) == other_id for action in actions if str(action.get("type")).startswith("PROPOSE_")):
+        if other_id in pending_outgoing_targets:
             pending_outgoing = 1.0
     scalar_values = [
         _norm(observation.get("tick", 0), 256.0),
@@ -1219,11 +1239,11 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
         1.0 if observation.get("leveling_up") else 0.0,
         _norm(len(actions), model_cfg.max_actions),
         _norm(len(units), model_cfg.max_units),
-        _norm(len(own_units), model_cfg.max_units),
-        _norm(len(enemy_units), model_cfg.max_units),
+        _norm(own_unit_count, model_cfg.max_units),
+        _norm(enemy_unit_count, model_cfg.max_units),
         _norm(len(cities), model_cfg.max_cities),
-        _norm(len(own_cities), model_cfg.max_cities),
-        _norm(len(enemy_cities), model_cfg.max_cities),
+        _norm(own_city_count, model_cfg.max_cities),
+        _norm(enemy_city_count, model_cfg.max_cities),
         _norm(explored_tiles, board_size * board_size),
         _norm(visible_tiles, board_size * board_size),
         _norm(len(tribes), 16.0),

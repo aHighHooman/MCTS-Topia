@@ -151,8 +151,6 @@ def _time_call(
     items: int = 0,
     sync_cuda: bool = True,
 ) -> tuple[Any, float]:
-    if sync_cuda:
-        _sync_if_needed(device)
     started_at = time.perf_counter()
     result = fn()
     if sync_cuda:
