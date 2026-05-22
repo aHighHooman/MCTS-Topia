@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List
 import json
+import math
 import os
 import random
 import sys
@@ -215,6 +216,14 @@ def _apply_end_turn_visit_guard(
     return max(non_end, key=lambda candidate: visit_distribution.get(candidate, 0.0))
 
 
+def _visit_entropy_bits(visit_distribution: Dict[str, float]) -> float:
+    return -sum(
+        max(0.0, float(share)) * math.log2(max(1e-12, float(share)))
+        for share in visit_distribution.values()
+        if float(share) > 0.0
+    )
+
+
 def _root_priors(
     message: Dict[str, Any],
     model: HybridPolicyValueNet,
@@ -298,8 +307,12 @@ def run_native_mcts(
         visit_distribution = {only_action_id: 1.0}
         visit_target = [1.0 if candidate_id == only_action_id else 0.0 for candidate_id in root_action_ids]
         _profile_search_log(
-            f"mcts_fast_path reason=single_action sims=0 batch={int(search_cfg.batch_size)} "
-            f"root_actions={len(root_actions)} searched_actions=1"
+            f"mcts sims=0 batch={int(search_cfg.batch_size)} max_depth=0 "
+            f"paths=0 eval_batches=0 eval_positions=0 eval_cache_hits=0 eval_cache_size=0 "
+            f"avg_depth=0.000 selected_max_depth=0 root_visit_entropy=0.000000 top_visit_share=1.000000 "
+            f"select_ms=0.0 eval_ms=0.0 expand_ms=0.0 total_inner_ms=0.0 "
+            f"root_actions={len(root_actions)} searched_actions=1 native_unsupported_transition=0 "
+            f"native_invalid_transition=0 native_approximate_transition=0"
         )
         return SearchResult(
             action_id=only_action_id,
@@ -336,6 +349,8 @@ def run_native_mcts(
     eval_cache_hits = 0
     eval_cache: Dict[Any, _Evaluation] = {}
     selected_paths = 0
+    depth_sum = 0
+    max_selected_depth = 0
     telemetry = _SearchTelemetry()
 
     while (deadline is not None and time.perf_counter() < deadline) or (deadline is None and simulations_remaining > 0):
@@ -353,9 +368,16 @@ def run_native_mcts(
         if evals_only_batches is not None:
             max_batches = 1 if deadline is not None else max(1, simulations_remaining // frontier)
             raw_selections, completed_frontier = _native_call(evals_only_batches, frontier, max_batches, max_depth, float(search_cfg.c_puct))
+            batch_depth_sum, batch_max_depth = _native_call(tree.last_batch_stats)
+            depth_sum += int(batch_depth_sum)
+            max_selected_depth = max(max_selected_depth, int(batch_max_depth))
         else:
             select_leaf_batch = evals_only_batch or getattr(tree, "select_leaf_batch_compact", tree.select_leaf_batch)
             raw_selections = _native_call(select_leaf_batch, frontier, max_depth, float(search_cfg.c_puct))
+            if evals_only_batch is not None:
+                batch_depth_sum, batch_max_depth = _native_call(tree.last_batch_stats)
+                depth_sum += int(batch_depth_sum)
+                max_selected_depth = max(max_selected_depth, int(batch_max_depth))
         for raw_selection in raw_selections:
             if evals_only_batch is not None:
                 if len(raw_selection) == 6:
@@ -534,10 +556,15 @@ def run_native_mcts(
     root_action_ids = [str(action.get("id")) for action in root_actions]
     action_index = root_action_ids.index(action_id) if action_id in root_action_ids else 0
     visit_target = [float(visit_distribution.get(candidate_id, 0.0)) for candidate_id in root_action_ids]
+    avg_depth = float(depth_sum) / max(1, selected_paths)
+    root_visit_entropy = _visit_entropy_bits(visit_distribution)
+    top_visit_share = max((float(share) for share in visit_distribution.values()), default=0.0)
     _profile_search_log(
         f"mcts sims={int(search_cfg.num_simulations)} batch={batch_size} max_depth={max_depth} "
         f"paths={selected_paths} eval_batches={eval_batches} eval_positions={eval_positions} "
         f"eval_cache_hits={eval_cache_hits} eval_cache_size={len(eval_cache)} "
+        f"avg_depth={avg_depth:.3f} selected_max_depth={max_selected_depth} "
+        f"root_visit_entropy={root_visit_entropy:.6f} top_visit_share={top_visit_share:.6f} "
         f"select_ms={select_sec * 1000.0:.1f} eval_ms={eval_sec * 1000.0:.1f} "
         f"expand_ms={expand_sec * 1000.0:.1f} total_inner_ms={(select_sec + eval_sec + expand_sec) * 1000.0:.1f} "
         f"root_actions={len(root_actions)} searched_actions={len(root_indexes)} {telemetry.log_fields()}"
