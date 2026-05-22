@@ -20,6 +20,8 @@ PY_ROOT = Path(__file__).resolve().parents[1]
 if str(PY_ROOT) not in sys.path:
     sys.path.insert(0, str(PY_ROOT))
 
+DEFAULT_AUTORESEARCH_CHECKPOINT = PY_ROOT / "profiling" / "mcts_search_profiling_random_init_model.pt"
+
 from nn.encoding import EncodedObservation, encode_observation
 from nn.model import HybridPolicyValueNet
 from profiling.config import load_config_defaults
@@ -403,6 +405,22 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
     return original_cls
 
 
+def _save_random_initialized_checkpoint(model: HybridPolicyValueNet, checkpoint: Path) -> None:
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = checkpoint.with_suffix(checkpoint.suffix + ".tmp")
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "metadata": {
+                "source": "profiling.mcts_search",
+                "description": "Random initialized model checkpoint used by the MCTS search profiler.",
+            },
+        },
+        tmp_path,
+    )
+    tmp_path.replace(checkpoint)
+
+
 def _load_checkpoint(model: HybridPolicyValueNet, checkpoint: Path, device: torch.device) -> bool:
     if not checkpoint.exists():
         return False
@@ -411,6 +429,33 @@ def _load_checkpoint(model: HybridPolicyValueNet, checkpoint: Path, device: torc
     model.load_state_dict(state_dict, strict=False)
     model.to(device)
     return True
+
+
+def _load_or_initialize_checkpoint(
+    model: HybridPolicyValueNet,
+    checkpoint: Path,
+    device: torch.device,
+    *,
+    allow_reinitialize: bool,
+) -> str:
+    if checkpoint.exists():
+        try:
+            _load_checkpoint(model, checkpoint, device)
+        except RuntimeError as exc:
+            if not allow_reinitialize:
+                raise
+            _save_random_initialized_checkpoint(model, checkpoint)
+            model.to(device)
+            return f"reinitialized_incompatible:{checkpoint}:{exc.__class__.__name__}"
+        return f"loaded:{checkpoint}"
+
+    if not allow_reinitialize:
+        model.to(device)
+        return f"missing_random_init:{checkpoint}"
+
+    _save_random_initialized_checkpoint(model, checkpoint)
+    model.to(device)
+    return f"initialized_missing:{checkpoint}"
 
 
 def _synthetic_payload() -> dict[str, Any]:
@@ -1264,7 +1309,7 @@ def main() -> int:
     parser.add_argument("--java-classpath", default=None, help="Optional Java classpath override for self-play capture.")
     parser.add_argument("--java-main-class", default=None, help="Optional Java main class override for self-play capture.")
 
-    parser.add_argument("--checkpoint", type=Path, default=None, help="Optional model checkpoint to load. Missing paths keep random initialization.")
+    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_AUTORESEARCH_CHECKPOINT, help="Model checkpoint used by the NN evaluator.")
     parser.add_argument("--device", default=None, help="Torch device, for example cpu or cuda. Defaults to cuda when available, otherwise cpu.")
     parser.add_argument("--simulations", type=int, default=None, help="Fixed simulations per position. If omitted, use wall-clock mode.")
     parser.add_argument("--wall-time-sec", "--walltime", type=float, default=10.0, help="Wall-clock budget per starting position. Default: 10 sec.")
@@ -1310,10 +1355,14 @@ def main() -> int:
     if args.evaluator == "nn":
         model = HybridPolicyValueNet(cfg.model).eval().to(device)
         if args.checkpoint is not None:
-            if _load_checkpoint(model, args.checkpoint, device):
-                checkpoint_status = f"loaded:{args.checkpoint}"
-            else:
-                checkpoint_status = f"missing_random_init:{args.checkpoint}"
+            checkpoint_path = Path(args.checkpoint)
+            allow_reinitialize = checkpoint_path.resolve() == DEFAULT_AUTORESEARCH_CHECKPOINT.resolve()
+            checkpoint_status = _load_or_initialize_checkpoint(
+                model,
+                checkpoint_path,
+                device,
+                allow_reinitialize=allow_reinitialize,
+            )
             model.eval()
     else:
         checkpoint_status = "static_eval"
