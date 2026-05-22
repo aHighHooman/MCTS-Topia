@@ -13,7 +13,7 @@ from torch.utils.cpp_extension import load
 
 _NATIVE_MCTS_MODULE = None
 _MSVC_ENV_READY = False
-_BUILD_FLAGS_VERSION = "mcts-opt-v19-native-fast-fp-avx2"
+_BUILD_FLAGS_VERSION = "mcts-opt-v20-fused-eval-batches"
 
 
 def _candidate_vsdevcmd_paths() -> list[Path]:

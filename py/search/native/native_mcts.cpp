@@ -509,25 +509,122 @@ class NativeMCTS {
 
   py::tuple select_leaf_batches_evals_only(int frontier, int max_batches, int max_depth, double c_puct) {
     py::list out;
-    int64_t depth_sum = 0;
-    int max_selected_depth = 0;
+    last_batch_depth_sum_ = 0;
+    last_batch_max_depth_ = 0;
     int completed_simulations = 0;
+    if (frontier <= 0) {
+      return py::make_tuple(out, completed_simulations);
+    }
     const size_t target_evaluations = static_cast<size_t>(std::max(1, frontier));
     const int batches = std::max(1, max_batches);
     for (int batch = 0; batch < batches; ++batch) {
-      py::list batch_out = select_leaf_batch_evals_only(frontier, max_depth, c_puct);
-      depth_sum += last_batch_depth_sum_;
-      max_selected_depth = std::max(max_selected_depth, last_batch_max_depth_);
-      completed_simulations += std::max(0, frontier);
-      for (py::handle item : batch_out) {
-        out.append(item);
+      for (int i = 0; i < frontier; ++i) {
+        std::vector<int> path_node_ids;
+        std::vector<int> path_action_indexes;
+        path_node_ids.reserve(8);
+        path_action_indexes.reserve(8);
+        int current_node_id = 0;
+        double leaf_value = leaf_value_for(nodes_[0], states_[nodes_[0].state_index]);
+        bool needs_expansion = false;
+        int parent_node_id = -1;
+        int parent_action_index = -1;
+        bool leaf_terminal = nodes_[0].terminal;
+        int leaf_active_player_id = states_[nodes_[0].state_index].active_player_id;
+        bool leaf_value_root_perspective = states_[nodes_[0].state_index].terminal_value_known;
+        const NativeGameState* selected_leaf_state = &states_[nodes_[0].state_index];
+        const NativeGameState* selected_pending_child_state = nullptr;
+        const bool unlimited_depth = max_depth <= 0;
+
+        for (int depth = 0; unlimited_depth || depth < max_depth; ++depth) {
+          const Node& node = nodes_[current_node_id];
+          const NativeGameState& state = states_[node.state_index];
+          leaf_terminal = node.terminal || state.terminal;
+          leaf_active_player_id = state.active_player_id;
+          selected_leaf_state = &state;
+          leaf_value_root_perspective = leaf_terminal && state.terminal_value_known;
+          if (leaf_terminal || state.legal_action_indexes.empty()) {
+            leaf_value = leaf_value_for(node, state);
+            break;
+          }
+
+          const int local_action_index = select_action_index(node, c_puct);
+          path_node_ids.push_back(current_node_id);
+          path_action_indexes.push_back(local_action_index);
+
+          const int child_node_id = node.child_node_ids[local_action_index];
+          if (child_node_id < 0) {
+            NativeGameState child_state = apply_action(state, state.legal_action_indexes[local_action_index]);
+            needs_expansion = true;
+            parent_node_id = current_node_id;
+            parent_action_index = local_action_index;
+            leaf_value = child_state.terminal ? terminal_value_for(child_state) : node.value_estimate;
+            leaf_terminal = child_state.terminal;
+            auto [pending_it, inserted] = pending_child_states_.insert_or_assign(
+                pending_child_key(parent_node_id, parent_action_index),
+                std::move(child_state));
+            (void)inserted;
+            selected_pending_child_state = &pending_it->second;
+            selected_leaf_state = selected_pending_child_state;
+            leaf_active_player_id = selected_pending_child_state->active_player_id;
+            leaf_value_root_perspective = leaf_terminal && selected_pending_child_state->terminal_value_known;
+            break;
+          }
+
+          current_node_id = child_node_id;
+          const Node& child = nodes_[current_node_id];
+          const NativeGameState& child_state = states_[child.state_index];
+          leaf_terminal = child.terminal || child_state.terminal;
+          leaf_value = leaf_value_for(child, child_state);
+          leaf_active_player_id = child_state.active_player_id;
+          selected_leaf_state = &child_state;
+          leaf_value_root_perspective = leaf_terminal && child_state.terminal_value_known;
+          if (leaf_terminal) {
+            break;
+          }
+        }
+
+        const int selected_depth = static_cast<int>(path_node_ids.size());
+        last_batch_depth_sum_ += selected_depth;
+        last_batch_max_depth_ = std::max(last_batch_max_depth_, selected_depth);
+        completed_simulations += 1;
+
+        if (!needs_expansion || leaf_terminal || selected_leaf_state == nullptr) {
+          complete_path_internal_unchecked(
+              path_node_ids,
+              path_action_indexes,
+              leaf_value,
+              leaf_active_player_id,
+              leaf_value_root_perspective);
+          continue;
+        }
+
+        reserve_path_internal_unchecked(path_node_ids, path_action_indexes);
+
+        PendingSelection pending;
+        pending.path_node_ids = std::move(path_node_ids);
+        pending.path_action_indexes = std::move(path_action_indexes);
+        pending.leaf_active_player_id = leaf_active_player_id;
+        pending.leaf_value_root_perspective = leaf_value_root_perspective;
+        pending.parent_node_id = parent_node_id;
+        pending.parent_action_index = parent_action_index;
+        const int selection_id = static_cast<int>(pending_selections_.size());
+        pending_selections_.push_back(std::move(pending));
+
+        const int64_t state_key =
+            static_cast<int64_t>(parent_node_id) * 1000000LL +
+            static_cast<int64_t>(parent_action_index);
+        out.append(py::make_tuple(
+            selection_id,
+            parent_node_id,
+            parent_action_index,
+            state_key,
+            selected_depth,
+            serialize_evaluation_payload(*selected_leaf_state, actions_)));
       }
       if (py::len(out) >= target_evaluations) {
         break;
       }
     }
-    last_batch_depth_sum_ = depth_sum;
-    last_batch_max_depth_ = max_selected_depth;
     return py::make_tuple(out, completed_simulations);
   }
 
