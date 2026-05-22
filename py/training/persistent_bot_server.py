@@ -4,7 +4,6 @@ import argparse
 import cProfile
 import json
 import os
-import pstats
 import socketserver
 import sys
 import threading
@@ -195,11 +194,11 @@ def main() -> None:
         if profiler is not None:
             profiler.disable()
             args.profile_output.parent.mkdir(parents=True, exist_ok=True)
+            function_count = len(profiler.getstats())
             profiler.dump_stats(str(args.profile_output))
-            stats = pstats.Stats(profiler)
             print(
                 f"[persistent_bot_server] wrote cProfile stats path={args.profile_output} "
-                f"functions={len(stats.stats)}",
+                f"functions={function_count}",
                 file=sys.stderr,
                 flush=True,
             )
