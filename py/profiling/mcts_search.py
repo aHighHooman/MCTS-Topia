@@ -1347,6 +1347,7 @@ def main() -> int:
     parser.add_argument("--min-hotspot-ms", type=float, default=1.0, help="Hide timing/function rows below this cumulative millisecond threshold.")
     parser.add_argument("--min-hotspot-pct", type=float, default=1.0, help="Hide timing/function rows below this percent-of-run threshold.")
     parser.add_argument("--csv", type=Path, default=None, help="Optional CSV path for custom timing rows.")
+    parser.add_argument("--function-profile", action="store_true", help="Enable cProfile function tracing. Disabled by default to avoid distorting throughput.")
     parser.add_argument("--profile-csv", type=Path, default=None, help="Optional CSV path for cProfile rows.")
     parser.add_argument("--position-csv", type=Path, default=None, help="Optional CSV path for per-position search throughput rows.")
     args = load_config_defaults(parser)
@@ -1355,7 +1356,9 @@ def main() -> int:
         args.position_csv = _default_mcts_search_output_path(args, "positions.csv")
     if args.csv is None:
         args.csv = _default_mcts_search_output_path(args, "timing.csv")
-    if args.profile_csv is None:
+    if not args.function_profile:
+        args.profile_csv = None
+    elif args.profile_csv is None:
         args.profile_csv = _default_mcts_search_output_path(args, "functions.csv")
 
     extension = load_native_mcts_extension()
@@ -1444,7 +1447,8 @@ def main() -> int:
 
         _sync_if_needed(device)
         benchmark_started_at = time.perf_counter()
-        profile.enable()
+        if args.function_profile:
+            profile.enable()
         for index, case in enumerate(cases, start=1):
             summary = _payload_summary(case.payload)
             branching.add_root(case.payload)
@@ -1486,7 +1490,8 @@ def main() -> int:
             }
             per_position_rows.append(row)
         _sync_if_needed(device)
-        profile.disable()
+        if args.function_profile:
+            profile.disable()
         elapsed = time.perf_counter() - benchmark_started_at
         total_stats.elapsed_sec = elapsed
     finally:
@@ -1583,7 +1588,7 @@ def main() -> int:
     if args.csv is not None:
         _write_csv(args.csv, rows)
 
-    profile_table = _profile_rows(profile, root=PY_ROOT.parent)
+    profile_table = _profile_rows(profile, root=PY_ROOT.parent) if args.function_profile else []
     if args.profile_csv is not None:
         _write_csv(args.profile_csv, profile_table)
 
