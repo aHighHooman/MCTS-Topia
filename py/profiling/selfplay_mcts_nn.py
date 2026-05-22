@@ -47,6 +47,7 @@ SEARCH_PATTERN = re.compile(
     r"batch=(?P<batch>\d+)\s+"
     r"max_depth=(?P<max_depth>-?\d+)\s+"
     r"(?:paths=(?P<paths>\d+)\s+)?"
+    r"(?:nodes=(?P<nodes>\d+)\s+)?"
     r"eval_batches=(?P<eval_batches>\d+)\s+"
     r"eval_positions=(?P<eval_positions>\d+)\s+"
     r"(?:eval_cache_hits=(?P<eval_cache_hits>\d+)\s+)?"
@@ -138,6 +139,7 @@ def _parse_profile(stderr: str) -> tuple[list[dict[str, Any]], list[dict[str, An
                         "batch",
                         "max_depth",
                         "paths",
+                        "nodes",
                         "eval_batches",
                         "eval_positions",
                         "eval_cache_hits",
@@ -471,6 +473,7 @@ def _game_summary(index: int, seed: int, elapsed_sec: float, returncode: int, re
     action_counts = [float(row["actions"]) for row in action_rows]
     configured_sims = [float(row["sims"]) for row in search_rows]
     paths = [float(row.get("paths", row["sims"])) for row in search_rows]
+    nodes = [float(row.get("nodes", 0)) for row in search_rows]
     eval_positions = [float(row["eval_positions"]) for row in search_rows]
     eval_batches = [float(row["eval_batches"]) for row in search_rows]
     eval_cache_hits = [float(row.get("eval_cache_hits", 0)) for row in search_rows]
@@ -485,7 +488,8 @@ def _game_summary(index: int, seed: int, elapsed_sec: float, returncode: int, re
     native_invalid = [int(row.get("native_invalid_transition", 0)) for row in search_rows]
     native_approximate = [int(row.get("native_approximate_transition", 0)) for row in search_rows]
     total_configured_simulations = int(sum(configured_sims))
-    total_simulations = int(sum(paths))
+    total_selected_paths = int(sum(paths))
+    total_simulations = int(sum(nodes))
     total_eval_positions = int(sum(eval_positions))
     total_eval_batches = int(sum(eval_batches))
     total_eval_cache_hits = int(sum(eval_cache_hits))
@@ -499,6 +503,8 @@ def _game_summary(index: int, seed: int, elapsed_sec: float, returncode: int, re
         "replay_steps": replay_steps,
         "actions_per_sec": len(action_rows) / elapsed_sec if elapsed_sec > 0.0 else 0.0,
         "replay_steps_per_sec": replay_steps / elapsed_sec if elapsed_sec > 0.0 else 0.0,
+        "selected_paths": total_selected_paths,
+        "selected_paths_per_sec": total_selected_paths / elapsed_sec if elapsed_sec > 0.0 else 0.0,
         "simulations": total_simulations,
         "simulations_per_sec": total_simulations / elapsed_sec if elapsed_sec > 0.0 else 0.0,
         "configured_simulations": total_configured_simulations,
@@ -611,7 +617,7 @@ def main() -> int:
 
     print(
         "Self-play MCTS NN profile: "
-        f"games={args.games} sims={cfg.search.num_simulations} batch={cfg.search.batch_size} "
+        f"games={args.games} selected_paths={cfg.search.num_simulations} batch={cfg.search.batch_size} "
         f"map={cfg.selfplay.map_type}/{cfg.selfplay.map_size} max_turns={cfg.selfplay.max_turns_capitals} "
         f"persistent_bot={cfg.selfplay.persistent_bot} checkpoint={args.checkpoint}",
         flush=True,
@@ -670,6 +676,7 @@ def main() -> int:
                 "  "
                 f"elapsed={_format_seconds(elapsed_sec)} returncode={result.returncode} "
                 f"actions={row['actions_profiled']} actions/s={row['actions_per_sec']:.2f} "
+                f"paths/s={row['selected_paths_per_sec']:.1f} "
                 f"sims/s={row['simulations_per_sec']:.1f} "
                 f"eval_pos/s={row['eval_positions_per_sec']:.1f} "
                 f"avg_depth={row['avg_depth']:.2f} entropy={row['root_visit_entropy_mean']:.2f} "
@@ -694,7 +701,8 @@ def main() -> int:
 
     total_elapsed = time.perf_counter() - benchmark_started_at
     total_actions = sum(int(row["actions_profiled"]) for row in game_rows)
-    total_sims = sum(int(row["simulations"]) for row in game_rows)
+    total_selected_paths = sum(int(row["selected_paths"]) for row in game_rows)
+    total_simulations = sum(int(row["simulations"]) for row in game_rows)
     total_replay_steps = sum(int(row["replay_steps"]) for row in game_rows)
     total_eval_positions = sum(int(row["eval_positions"]) for row in game_rows)
     total_eval_batches = sum(int(row["eval_batches"]) for row in game_rows)
@@ -704,7 +712,7 @@ def main() -> int:
     total_native_approximate = sum(int(row["native_approximate_transition"]) for row in game_rows)
     print(
         "\nSelf-play MCTS NN profile: "
-        f"games={len(game_rows)} mode=full_selfplay sims_per_action={cfg.search.num_simulations} "
+        f"games={len(game_rows)} mode=full_selfplay selected_paths_per_action={cfg.search.num_simulations} "
         f"batch={cfg.search.batch_size} device={device} checkpoint={args.checkpoint} "
         f"persistent_bot={cfg.selfplay.persistent_bot} "
         f"map={cfg.selfplay.map_type}/{cfg.selfplay.map_size} "
@@ -720,6 +728,7 @@ def main() -> int:
             "actions": row["actions_profiled"],
             "actions/s": f"{row['actions_per_sec']:.2f}",
             "sims/s": f"{row['simulations_per_sec']:.1f}",
+            "paths/s": f"{row['selected_paths_per_sec']:.1f}",
             "eval_pos/s": f"{row['eval_positions_per_sec']:.1f}",
             "depth": f"{row['avg_depth']:.2f}",
             "max_depth": row["max_selected_depth"],
@@ -744,6 +753,7 @@ def main() -> int:
                 ("actions", "actions"),
                 ("actions/s", "actions/s"),
                 ("sims/s", "sims/s"),
+                ("paths/s", "paths/s"),
                 ("eval_pos/s", "eval_pos/s"),
                 ("depth", "depth"),
                 ("max_depth", "max_d"),
@@ -765,8 +775,10 @@ def main() -> int:
         f"actions_per_sec={_format_rate(total_actions, total_elapsed)} "
         f"replay_steps={total_replay_steps} "
         f"replay_steps_per_sec={_format_rate(total_replay_steps, total_elapsed)} "
-        f"simulations={total_sims} "
-        f"simulations_per_sec={_format_rate(total_sims, total_elapsed)} "
+        f"simulations={total_simulations} "
+        f"simulations_per_sec={_format_rate(total_simulations, total_elapsed)} "
+        f"selected_paths={total_selected_paths} "
+        f"selected_paths_per_sec={_format_rate(total_selected_paths, total_elapsed)} "
         f"eval_positions={total_eval_positions} "
         f"eval_positions_per_sec={_format_rate(total_eval_positions, total_elapsed)} "
         f"eval_batches={total_eval_batches} "

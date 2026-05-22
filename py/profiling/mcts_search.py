@@ -33,6 +33,7 @@ from search.native.cpp_extension import load_native_mcts_extension
 _STATIC_TREE_DEPTH_SUM = 0
 _STATIC_TREE_MAX_DEPTH = 0
 _STATIC_TREE_SELECTED_PATHS = 0
+_STATIC_TREE_EXPANDED_NODE_IDS: set[int] = set()
 
 
 @dataclass
@@ -76,10 +77,6 @@ class SearchStats:
     eval_cache_size: int = 0
     depth_sum: int = 0
     max_depth: int = 0
-
-    @property
-    def explored_nodes(self) -> int:
-        return self.selected_paths
 
     @property
     def average_depth(self) -> float:
@@ -368,6 +365,7 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
             return result, int(completed)
 
         def expand(self, *args: Any, **kwargs: Any) -> Any:
+            global _STATIC_TREE_EXPANDED_NODE_IDS
             result, _elapsed = _time_call(
                 collector,
                 "native_tree.expand",
@@ -376,6 +374,10 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
                 items=1,
                 sync_cuda=False,
             )
+            try:
+                _STATIC_TREE_EXPANDED_NODE_IDS.add(int(result))
+            except (TypeError, ValueError):
+                pass
             return result
 
         def complete_selected_paths(self, *args: Any, **kwargs: Any) -> Any:
@@ -630,16 +632,18 @@ def _run_native_mcts_walltime(
     device: torch.device | str,
     wall_time_sec: float,
     belief_snapshot: Any | None = None,
+    selected_path_budget: int | None = None,
 ) -> tuple[native_mcts.SearchResult, SearchStats]:
     extension = load_native_mcts_extension()
     if extension is None:
         raise RuntimeError("Native MCTS extension is unavailable.")
 
     started_at = time.perf_counter()
-    deadline = started_at + max(0.0, float(wall_time_sec))
+    mode = "paths" if selected_path_budget is not None else "walltime"
+    deadline = None if selected_path_budget is not None else started_at + max(0.0, float(wall_time_sec))
     root_actions = list(root_payload.get("actions", []))[: model_cfg.max_actions]
     if not root_actions:
-        return native_mcts.SearchResult("", 0, {}, [], 0.0), SearchStats("walltime", time.perf_counter() - started_at)
+        return native_mcts.SearchResult("", 0, {}, [], 0.0), SearchStats(mode, time.perf_counter() - started_at)
 
     root_prior_result = native_mcts._root_priors(
         root_payload,
@@ -655,7 +659,7 @@ def _run_native_mcts_walltime(
     if not action_ids:
         return (
             native_mcts.SearchResult("", 0, {}, [0.0] * len(root_actions), root_value),
-            SearchStats("walltime", time.perf_counter() - started_at),
+            SearchStats(mode, time.perf_counter() - started_at),
         )
     if len(action_ids) == 1:
         only_action_id = action_ids[0]
@@ -669,7 +673,7 @@ def _run_native_mcts_walltime(
                 visit_target=[1.0 if candidate_id == only_action_id else 0.0 for candidate_id in root_action_ids],
                 value=float(root_value),
             ),
-            SearchStats("walltime", time.perf_counter() - started_at, simulations=0, selected_paths=0, expanded_nodes=1),
+            SearchStats(mode, time.perf_counter() - started_at, simulations=0, selected_paths=0, expanded_nodes=0),
         )
 
     seed = int(getattr(search_cfg, "seed", 0) or int(time.time_ns() & 0xFFFFFFFF))
@@ -684,25 +688,33 @@ def _run_native_mcts_walltime(
     )
     tree.add_root_dirichlet_noise(float(search_cfg.dirichlet_alpha), float(search_cfg.dirichlet_epsilon))
 
-    stats = SearchStats("walltime", 0.0, expanded_nodes=1)
+    stats = SearchStats(mode, 0.0, expanded_nodes=0)
     max_depth = -1 if int(search_cfg.max_depth) <= 0 else int(search_cfg.max_depth)
     batch_size = max(1, int(search_cfg.batch_size))
     eval_cache: dict[Any, native_mcts._Evaluation] = {}
     expanded_node_ids: set[int] = set()
     node_depths: dict[int, int] = {0: 0}
 
-    while time.perf_counter() < deadline:
+    while (
+        (deadline is not None and time.perf_counter() < deadline)
+        or (selected_path_budget is not None and stats.selected_paths < selected_path_budget)
+    ):
+        remaining_paths = None if selected_path_budget is None else max(0, selected_path_budget - stats.selected_paths)
+        if remaining_paths == 0:
+            break
+        frontier = batch_size if remaining_paths is None else min(batch_size, remaining_paths)
         selections: list[Any] = []
         eval_messages: list[dict[str, Any]] = []
         eval_index_by_key: dict[Any, int] = {}
         evals_only_batch = getattr(tree, "select_leaf_batch_evals_only", None)
         evals_only_batches = getattr(tree, "select_leaf_batches_evals_only", None)
-        completed_frontier = batch_size
+        completed_frontier = frontier
         if evals_only_batches is not None:
-            raw_selections, completed_frontier = evals_only_batches(batch_size, 128, max_depth, float(search_cfg.c_puct))
+            max_batches = 128 if remaining_paths is None else 1
+            raw_selections, completed_frontier = evals_only_batches(frontier, max_batches, max_depth, float(search_cfg.c_puct))
         else:
             select_leaf_batch = evals_only_batch or getattr(tree, "select_leaf_batch_compact", tree.select_leaf_batch)
-            raw_selections = select_leaf_batch(batch_size, max_depth, float(search_cfg.c_puct))
+            raw_selections = select_leaf_batch(frontier, max_depth, float(search_cfg.c_puct))
         for raw_selection in raw_selections:
             if evals_only_batch is not None:
                 if len(raw_selection) == 6:
@@ -817,14 +829,12 @@ def _run_native_mcts_walltime(
             stats.depth_sum += int(batch_depth_sum)
             stats.max_depth = max(stats.max_depth, int(batch_max_depth))
             stats.selected_paths += int(completed_frontier)
-            stats.simulations += int(completed_frontier)
         if not selections:
             if evals_only_batch is not None:
                 continue
             break
         if evals_only_batch is None:
             stats.selected_paths += len(selections)
-            stats.simulations += len(selections)
 
         evaluations = native_mcts._evaluate_messages(eval_messages, evaluator, model_cfg, device)
         if eval_messages:
@@ -894,6 +904,7 @@ def _run_native_mcts_walltime(
         tree.complete_selected_paths(completed_selection_ids, completed_leaf_values)
 
     stats.expanded_nodes += len(expanded_node_ids)
+    stats.simulations = stats.expanded_nodes
     stats.eval_cache_size = len(eval_cache)
     stats.elapsed_sec = time.perf_counter() - started_at
 
@@ -1230,19 +1241,21 @@ def _run_one_profile_case(
     wall_time_sec: float,
     repeats: int,
 ) -> tuple[native_mcts.SearchResult | None, SearchStats, float]:
-    global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_SELECTED_PATHS
+    global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_SELECTED_PATHS, _STATIC_TREE_EXPANDED_NODE_IDS
     last_result: native_mcts.SearchResult | None = None
     stats = SearchStats("walltime" if using_walltime else "simulations", 0.0)
     if evaluator_mode == "static":
         _STATIC_TREE_DEPTH_SUM = 0
         _STATIC_TREE_MAX_DEPTH = 0
         _STATIC_TREE_SELECTED_PATHS = 0
+        _STATIC_TREE_EXPANDED_NODE_IDS = set()
     started_at = time.perf_counter()
     for _ in range(max(1, int(repeats))):
         if evaluator_mode == "static":
             depth_sum_before = _STATIC_TREE_DEPTH_SUM
             max_depth_before = _STATIC_TREE_MAX_DEPTH
             selected_paths_before = _STATIC_TREE_SELECTED_PATHS
+            expanded_before = len(_STATIC_TREE_EXPANDED_NODE_IDS)
             last_result = native_static_mcts.run_native_static_mcts(
                 case.payload,
                 cfg.search,
@@ -1250,10 +1263,12 @@ def _run_one_profile_case(
                 wall_time_seconds=wall_time_sec if using_walltime else None,
             )
             selected_delta = max(0, _STATIC_TREE_SELECTED_PATHS - selected_paths_before)
+            expanded_delta = max(0, len(_STATIC_TREE_EXPANDED_NODE_IDS) - expanded_before)
             stats.depth_sum += max(0, _STATIC_TREE_DEPTH_SUM - depth_sum_before)
             stats.max_depth = max(stats.max_depth, _STATIC_TREE_MAX_DEPTH)
             stats.selected_paths += selected_delta
-            stats.simulations += selected_delta if using_walltime else int(cfg.search.num_simulations)
+            stats.expanded_nodes += expanded_delta
+            stats.simulations += expanded_delta
             continue
         if model is None:
             raise RuntimeError("NN evaluator mode requires a model.")
@@ -1268,9 +1283,16 @@ def _run_one_profile_case(
             )
             _add_stats(stats, run_stats)
         else:
-            last_result = native_mcts.run_native_mcts(case.payload, model, cfg.search, cfg.model, device)
-            stats.simulations += int(cfg.search.num_simulations)
-            stats.selected_paths += int(cfg.search.num_simulations)
+            last_result, run_stats = _run_native_mcts_walltime(
+                case.payload,
+                model,
+                cfg.search,
+                cfg.model,
+                device,
+                0.0,
+                selected_path_budget=int(cfg.search.num_simulations),
+            )
+            _add_stats(stats, run_stats)
     _sync_if_needed(device)
     elapsed = time.perf_counter() - started_at
     stats.elapsed_sec = elapsed
@@ -1311,7 +1333,12 @@ def main() -> int:
 
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_AUTORESEARCH_CHECKPOINT, help="Model checkpoint used by the NN evaluator.")
     parser.add_argument("--device", default=None, help="Torch device, for example cpu or cuda. Defaults to cuda when available, otherwise cpu.")
-    parser.add_argument("--simulations", type=int, default=None, help="Fixed simulations per position. If omitted, use wall-clock mode.")
+    parser.add_argument(
+        "--simulations",
+        type=int,
+        default=None,
+        help="Legacy name for fixed selected-path budget per position. If omitted, use wall-clock mode.",
+    )
     parser.add_argument("--wall-time-sec", "--walltime", type=float, default=10.0, help="Wall-clock budget per starting position. Default: 10 sec.")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--repeats", type=int, default=1, help="Repeats per position. In walltime mode, each repeat gets --wall-time-sec.")
@@ -1451,10 +1478,8 @@ def main() -> int:
                 "elapsed_sec": f"{elapsed:.3f}",
                 "simulations": run_stats.simulations,
                 "simulations_per_sec": _format_rate(run_stats.simulations, elapsed),
-                "nodes": run_stats.expanded_nodes,
-                "nodes_per_sec": _format_rate(run_stats.expanded_nodes, elapsed),
-                "nodes_explored": run_stats.explored_nodes,
-                "nodes_explored_per_sec": _format_rate(run_stats.explored_nodes, elapsed),
+                "selected_paths": run_stats.selected_paths,
+                "selected_paths_per_sec": _format_rate(run_stats.selected_paths, elapsed),
                 "avg_depth": f"{run_stats.average_depth:.2f}",
                 "max_depth": run_stats.max_depth,
                 "eval_batches": run_stats.eval_batches,
@@ -1475,8 +1500,8 @@ def main() -> int:
 
     print(
         f"MCTS profile: positions={len(cases)} repeats_per_position={max(1, int(args.repeats))} "
-        f"mode={'walltime' if using_walltime else 'simulations'} "
-        f"sims={'walltime' if using_walltime else cfg.search.num_simulations} "
+        f"mode={'walltime' if using_walltime else 'fixed_paths'} "
+        f"selected_path_budget={'walltime' if using_walltime else cfg.search.num_simulations} "
         f"wall_time_sec_per_position={args.wall_time_sec if using_walltime else 'n/a'} "
         f"batch={cfg.search.batch_size} evaluator={args.evaluator} device={device} checkpoint={checkpoint_status} "
         f"source={'synthetic' if args.synthetic else 'payload' if args.payload else args.selfplay_run_mode} "
@@ -1498,10 +1523,8 @@ def main() -> int:
                 ("elapsed_sec", "sec"),
                 ("simulations", "sims"),
                 ("simulations_per_sec", "sims/s"),
-                ("nodes", "nodes"),
-                ("nodes_per_sec", "nodes/s"),
-                ("nodes_explored", "explored"),
-                ("nodes_explored_per_sec", "explored/s"),
+                ("selected_paths", "paths"),
+                ("selected_paths_per_sec", "paths/s"),
                 ("avg_depth", "avg_depth"),
                 ("max_depth", "max_depth"),
             ],
@@ -1513,10 +1536,8 @@ def main() -> int:
             "\nAggregate search work: "
             f"simulations={total_stats.simulations} "
             f"simulations_per_sec={_format_rate(total_stats.simulations, elapsed)} "
-            f"nodes={total_stats.expanded_nodes} "
-            f"nodes_per_sec={_format_rate(total_stats.expanded_nodes, elapsed)} "
-            f"nodes_explored={total_stats.explored_nodes} "
-            f"nodes_explored_per_sec={_format_rate(total_stats.explored_nodes, elapsed)} "
+            f"selected_paths={total_stats.selected_paths} "
+            f"selected_paths_per_sec={_format_rate(total_stats.selected_paths, elapsed)} "
             f"avg_depth={total_stats.average_depth:.2f} "
             f"max_depth={total_stats.max_depth} "
             f"eval_batches={total_stats.eval_batches} "

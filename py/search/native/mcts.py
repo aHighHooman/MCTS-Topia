@@ -338,9 +338,7 @@ def run_native_mcts(
     wall_time_budget = 0.0 if wall_time_seconds is None else max(0.0, float(wall_time_seconds))
     deadline = time.perf_counter() + wall_time_budget if wall_time_budget > 0.0 else None
     simulations_remaining = int(search_cfg.num_simulations)
-    requested_batch_size = max(1, int(search_cfg.batch_size))
-    device_obj = torch.device(device)
-    batch_size = max(requested_batch_size, 256) if device_obj.type == "cuda" else requested_batch_size
+    batch_size = max(1, int(search_cfg.batch_size))
     select_sec = 0.0
     eval_sec = 0.0
     expand_sec = 0.0
@@ -349,6 +347,7 @@ def run_native_mcts(
     eval_cache_hits = 0
     eval_cache: Dict[Any, _Evaluation] = {}
     selected_paths = 0
+    expanded_node_ids: set[int] = set()
     depth_sum = 0
     max_selected_depth = 0
     telemetry = _SearchTelemetry()
@@ -366,8 +365,7 @@ def run_native_mcts(
         evals_only_batches = getattr(tree, "select_leaf_batches_evals_only", None)
         completed_frontier = frontier
         if evals_only_batches is not None:
-            max_batches = 1 if deadline is not None else max(1, simulations_remaining // frontier)
-            raw_selections, completed_frontier = _native_call(evals_only_batches, frontier, max_batches, max_depth, float(search_cfg.c_puct))
+            raw_selections, completed_frontier = _native_call(evals_only_batches, frontier, 1, max_depth, float(search_cfg.c_puct))
             batch_depth_sum, batch_max_depth = _native_call(tree.last_batch_stats)
             depth_sum += int(batch_depth_sum)
             max_selected_depth = max(max_selected_depth, int(batch_max_depth))
@@ -506,14 +504,15 @@ def run_native_mcts(
                 if needs_expansion and not leaf_terminal:
                     evaluation = cached_eval if cached_eval is not None else evaluations[int(eval_index)]
                     leaf_value = evaluation.value
-                    _native_call(
+                    child_node_id = int(_native_call(
                         tree.expand,
                         int(parent_node_id),
                         int(parent_action_index),
                         evaluation.priors,
                         float(evaluation.value),
                         False,
-                    )
+                    ))
+                    expanded_node_ids.add(child_node_id)
                 completed_selection_ids.append(int(selection_id))
                 completed_leaf_values.append(float(leaf_value))
                 continue
@@ -524,14 +523,15 @@ def run_native_mcts(
                 if evaluation is None:
                     evaluation = evaluations[int(selection["_eval_index"])]
                 leaf_value = evaluation.value
-                _native_call(
+                child_node_id = int(_native_call(
                     tree.expand,
                     int(selection["parent_node_id"]),
                     int(selection["parent_action_index"]),
                     evaluation.priors,
                     float(evaluation.value),
                     False,
-                )
+                ))
+                expanded_node_ids.add(child_node_id)
             completed_selection_ids.append(int(selection["selection_id"]))
             completed_leaf_values.append(float(leaf_value))
         _native_call(tree.complete_selected_paths, completed_selection_ids, completed_leaf_values)
@@ -557,11 +557,12 @@ def run_native_mcts(
     action_index = root_action_ids.index(action_id) if action_id in root_action_ids else 0
     visit_target = [float(visit_distribution.get(candidate_id, 0.0)) for candidate_id in root_action_ids]
     avg_depth = float(depth_sum) / max(1, selected_paths)
+    expanded_nodes = len(expanded_node_ids)
     root_visit_entropy = _visit_entropy_bits(visit_distribution)
     top_visit_share = max((float(share) for share in visit_distribution.values()), default=0.0)
     _profile_search_log(
         f"mcts sims={int(search_cfg.num_simulations)} batch={batch_size} max_depth={max_depth} "
-        f"paths={selected_paths} eval_batches={eval_batches} eval_positions={eval_positions} "
+        f"paths={selected_paths} nodes={expanded_nodes} eval_batches={eval_batches} eval_positions={eval_positions} "
         f"eval_cache_hits={eval_cache_hits} eval_cache_size={len(eval_cache)} "
         f"avg_depth={avg_depth:.3f} selected_max_depth={max_selected_depth} "
         f"root_visit_entropy={root_visit_entropy:.6f} top_visit_share={top_visit_share:.6f} "
