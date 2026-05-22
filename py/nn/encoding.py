@@ -148,6 +148,7 @@ UNIT_ONE_HOT, UNIT_ZERO_HOT = _one_hot_table(UNIT_TYPES)
 ACTION_ONE_HOT, ACTION_ZERO_HOT = _one_hot_table(ACTION_TYPES)
 TECH_ONE_HOT, TECH_ZERO_HOT = _one_hot_table(TECH_TYPES)
 RELATIONSHIP_TO_INDEX = {name: idx for idx, name in enumerate(RELATIONSHIP_TYPES)}
+_BOARD_COORD_CACHE: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
 BOARD_SCHEMA = (
     "valid",
@@ -504,6 +505,19 @@ def _put_feature(row: np.ndarray, values: list[float]) -> None:
         row[:count] = values
     else:
         row[:] = values[: row.shape[0]]
+
+
+def _board_coordinate_planes(board_size: int) -> tuple[np.ndarray, np.ndarray]:
+    cached = _BOARD_COORD_CACHE.get(board_size)
+    if cached is not None:
+        return cached
+    coord_scale = float(board_size - 1) if board_size > 1 else 1.0
+    coords = np.arange(board_size, dtype=np.float32) / coord_scale
+    x_plane = np.broadcast_to(coords.reshape(1, board_size), (board_size, board_size)).copy()
+    y_plane = np.broadcast_to(coords.reshape(board_size, 1), (board_size, board_size)).copy()
+    cached = (x_plane, y_plane)
+    _BOARD_COORD_CACHE[board_size] = cached
+    return cached
 
 
 def _position_payload(action: dict[str, Any]) -> dict[str, Any]:
@@ -923,8 +937,12 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
     terrain_offset = 10
     resource_offset = terrain_offset + len(TERRAIN_TYPES)
     building_offset = resource_offset + len(RESOURCE_TYPES)
-    board_coord_scale = float(board_size - 1) if board_size > 1 else 1.0
+    channels[3], channels[4] = _board_coordinate_planes(board_size)
 
+    units_raw = observation.get("units", []) or []
+    cities_raw = observation.get("cities", []) or []
+    unit_by_id_for_board = {_as_int(unit.get("id")): unit for unit in units_raw}
+    city_by_id_for_board = {_as_int(city.get("id")): city for city in cities_raw}
     for row in board.get("tiles", []):
         for tile in row:
             x = int(tile.get("x", 0) or 0)
@@ -933,8 +951,6 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
                 continue
             channels[0, y, x] = 1.0
             channels[2, y, x] = 1.0 if tile.get("explored") else 0.0
-            channels[3, y, x] = float(x) / board_coord_scale
-            channels[4, y, x] = float(y) / board_coord_scale
             channels[5, y, x] = 1.0 if int(tile.get("unit_id", 0) or 0) > 0 else 0.0
             channels[6, y, x] = 1.0 if int(tile.get("city_id", 0) or 0) > 0 else 0.0
             channels[7, y, x] = 1.0 if tile.get("road") else 0.0
@@ -947,15 +963,6 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
             building_idx = BUILDING_TO_INDEX.get(str(tile.get("building")), -1)
             if building_idx >= 0:
                 channels[building_offset + building_idx, y, x] = 1.0
-
-    unit_by_id_for_board = {_as_int(unit.get("id")): unit for unit in observation.get("units", []) or []}
-    city_by_id_for_board = {_as_int(city.get("id")): city for city in observation.get("cities", []) or []}
-    for row in board.get("tiles", []):
-        for tile in row:
-            x = int(tile.get("x", 0) or 0)
-            y = int(tile.get("y", 0) or 0)
-            if not (0 <= x < board_size and 0 <= y < board_size):
-                continue
             channels[61, y, x] = 1.0 if tile.get("visible") else 0.0
             unit_id = _as_int(tile.get("unit_id"))
             unit = unit_by_id_for_board.get(unit_id)
@@ -977,7 +984,7 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
             if territory_city:
                 channels[72, y, x] = 1.0 if _as_int(territory_city.get("tribe_id"), -1) == my_player_id else -1.0
 
-    units = _sorted_entities(observation.get("units", []))
+    units = _sorted_entities(units_raw)
     unit_feature_dim = int(getattr(model_cfg, "unit_feature_dim", getattr(model_cfg, "entity_feature_dim", len(UNIT_FEATURE_SCHEMA))))
     city_feature_dim = int(getattr(model_cfg, "city_feature_dim", getattr(model_cfg, "entity_feature_dim", len(CITY_FEATURE_SCHEMA))))
     unit_limit = min(len(units), model_cfg.max_units) if compact else model_cfg.max_units
@@ -1013,7 +1020,7 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
         ]
         _put_feature(unit_features[idx], base + _one_hot(unit.get("type"), UNIT_TYPES))
 
-    cities = _sorted_entities(observation.get("cities", []))
+    cities = _sorted_entities(cities_raw)
     city_limit = min(len(cities), model_cfg.max_cities) if compact else model_cfg.max_cities
     city_features = np.zeros((city_limit, city_feature_dim), dtype=np.float32)
     city_mask = np.zeros(city_limit, dtype=np.bool_)
@@ -1071,6 +1078,7 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
     }
     tile_action_summary_by_pos: dict[tuple[int, int], list[float]] = {}
     typed_feature_by_key: dict[tuple[Any, Any, Any, Any], list[float]] = {}
+    relationship_feature_by_pair: dict[tuple[int, int], list[float]] = {}
     for idx, action in enumerate(actions[: min(len(actions), action_limit)]):
         action_mask[idx] = True
         action_ids.append(str(action["id"]))
@@ -1132,9 +1140,14 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
         )
         target_player_id = _as_int(action.get("target_player_id"), -1)
         action_actor_id = _as_int(action.get("tribe_id"), _as_int(observation.get("active_player_id"), my_player_id))
+        relationship_key = (action_actor_id, target_player_id)
+        relationship = relationship_feature_by_pair.get(relationship_key)
+        if relationship is None:
+            relationship = _relationship_one_hot(observation, action_actor_id, target_player_id)
+            relationship_feature_by_pair[relationship_key] = relationship
         native_context = (
             _one_hot(action.get("capture_type"), TERRAIN_TYPES)
-            + _relationship_one_hot(observation, action_actor_id, target_player_id)
+            + relationship
             + [
                 _norm(target_player_id, 16.0),
                 1.0 if target_player_id == my_player_id else 0.0,
