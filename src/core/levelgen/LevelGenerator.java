@@ -25,6 +25,7 @@ public class LevelGenerator {
     private double initialLand;
     private double landCoefficient;
     private String[] level;
+    private Types.TRIBE[] biomeOwner;
     private Types.TRIBE[] tribes;
     private Types.MAP_TYPE mapType;
     private GenerationProfile profile;
@@ -33,6 +34,7 @@ public class LevelGenerator {
     private Random rnd;
 
     //JSON that contains all the probability values for all the tribes.
+    private static JSONObject cachedTerrainProbabilityData;
     private JSONObject data;
 
     private boolean LEVELGEN_VERBOSE = false;
@@ -49,7 +51,14 @@ public class LevelGenerator {
         init(Types.MAP_SIZE.TINY.getSideLength(), Types.MAP_TYPE.CONTINENTS, new Types.TRIBE[]{XIN_XI, OUMAJI});
 
         // Read the JSON that contains all the probability values for all the tribes.
-        this.data =  new IO().readJSON("terrainProbs.json");
+        this.data = terrainProbabilityData();
+    }
+
+    private static synchronized JSONObject terrainProbabilityData() {
+        if (cachedTerrainProbabilityData == null) {
+            cachedTerrainProbabilityData = new IO().readJSON("terrainProbs.json");
+        }
+        return cachedTerrainProbabilityData;
     }
 
     /**
@@ -83,6 +92,7 @@ public class LevelGenerator {
 
         this.mapSize = mapSize;
         this.level = new String[mapSize*mapSize];
+        this.biomeOwner = new Types.TRIBE[mapSize*mapSize];
         this.tribes = tribes;
         this.mapType = mapType;
         configureMapType(mapType);
@@ -102,6 +112,14 @@ public class LevelGenerator {
         }
         this.profile = GenerationProfile.forMapType(mapType, mapSize);
 
+        if (profile.capitalsFromVillages) {
+            generateVillageCapitalMap();
+        } else {
+            generateQuadrantCapitalMap();
+        }
+    }
+
+    private void generateVillageCapitalMap() {
         if (mapType == Types.MAP_TYPE.CONTINENTS) {
             generateContinentsLand();
         } else if (mapType == Types.MAP_TYPE.PANGEA) {
@@ -112,37 +130,21 @@ public class LevelGenerator {
         if (profile.edgeLandBridge) {
             forceEdgeLandBridge();
         }
-        if (!profile.capitalsFromVillages) {
-            forceCapitalDomainLand();
-        }
         normalizeDeepWaterCoastlines();
 
-        ArrayList<Integer> capitalCells;
         ArrayList<Integer> villageCells = new ArrayList<>();
-        if (profile.capitalsFromVillages) {
-            villageCells.addAll(placePostTerrainVillages());
-            if (mapType == Types.MAP_TYPE.CONTINENTS) {
-                ensureContinentsHaveVillageNearEachCapitalCandidate(villageCells);
-            }
-            capitalCells = selectCapitalVillages(villageCells);
-            convertVillagesToCapitals(capitalCells);
-            villageCells.addAll(placeTinyIslandVillages());
-        } else {
-            capitalCells = selectCapitalCells();
-            writeCapitals(capitalCells);
-            villageCells.addAll(placeSuburbVillages(capitalCells));
-            villageCells.addAll(placePreTerrainVillages(capitalCells, villageCells));
+        villageCells.addAll(placePostTerrainVillages());
+        if (mapType == Types.MAP_TYPE.CONTINENTS) {
+            ensureContinentsHaveVillageNearEachCapitalCandidate(villageCells);
         }
+        ArrayList<Integer> capitalCells = selectCapitalVillages(villageCells);
+        convertVillagesToCapitals(capitalCells);
+        villageCells.addAll(placeTinyIslandVillages());
 
         Types.TRIBE[] tileOwner = assignTileOwners(capitalCells);
+        this.biomeOwner = tileOwner;
         generateTerrain(tileOwner);
         normalizeDeepWaterCoastlines();
-        if (!profile.capitalsFromVillages) {
-            villageCells.addAll(placePostTerrainVillages());
-            if (mapType == Types.MAP_TYPE.LAKES) {
-                ensureLakesCapitalVillageConnections(capitalCells, villageCells);
-            }
-        }
 
         generateResources(tileOwner);
         placeCornerLighthouses();
@@ -150,7 +152,53 @@ public class LevelGenerator {
         adjustStartingResources(capitalCells);
         normalizeDeepWaterCoastlines();
         placeRuins();
-        placeStarfish();
+        if (mapType != Types.MAP_TYPE.DRYLANDS) {
+            placeStarfish();
+        }
+    }
+
+    private void generateQuadrantCapitalMap() {
+        ArrayList<Integer> capitalCells = selectQuadrantCapitalsFromDomains();
+        writeCapitals(capitalCells);
+
+        ArrayList<Integer> villageCells = new ArrayList<>();
+        villageCells.addAll(placeSuburbVillages(capitalCells));
+        villageCells.addAll(placePreTerrainVillages(capitalCells, villageCells));
+
+        generateLandFromWetness();
+        forceSettlementAdjacentLand(capitalCells, villageCells);
+        if (profile.edgeLandBridge) {
+            forceEdgeLandBridge();
+        }
+        enforceQuadrantWaterBand();
+        normalizeDeepWaterCoastlines();
+
+        Types.TRIBE[] tileOwner = assignTileOwners(capitalCells);
+        this.biomeOwner = tileOwner;
+        generateTerrain(tileOwner);
+        normalizeDeepWaterCoastlines();
+        villageCells.addAll(placePostTerrainVillages());
+        if (mapType == Types.MAP_TYPE.LAKES) {
+            ensureLakesCapitalVillageConnections(capitalCells, villageCells);
+        }
+        enforceQuadrantWaterBand();
+
+        generateResources(tileOwner);
+        placeCornerLighthouses();
+        normalizeDeepWaterCoastlines();
+        adjustStartingResources(capitalCells);
+        normalizeDeepWaterCoastlines();
+        enforceQuadrantWaterBand();
+        if (mapType != Types.MAP_TYPE.DRYLANDS) {
+            forceSettlementAdjacentLand(capitalCells, currentVillageCells());
+            normalizeDeepWaterCoastlines();
+            enforceQuadrantWaterBand();
+        }
+        normalizeDeepWaterCoastlines();
+        placeRuins();
+        if (mapType != Types.MAP_TYPE.DRYLANDS) {
+            placeStarfish();
+        }
     }
 
     private void generateLandFromWetness() {
@@ -184,10 +232,14 @@ public class LevelGenerator {
                 }
             }
             for (int cell : land) {
-                writeTile(cell, "" + PLAIN.getMapChar(), null);
+                if (!isSettlement(cell)) {
+                    writeTile(cell, "" + PLAIN.getMapChar(), null);
+                }
             }
             for (int cell : water) {
-                writeTile(cell, "" + DEEP_WATER.getMapChar(), null);
+                if (!isSettlement(cell)) {
+                    writeTile(cell, "" + DEEP_WATER.getMapChar(), null);
+                }
             }
         }
 
@@ -195,10 +247,15 @@ public class LevelGenerator {
             int islandCount = Math.max(tribes.length * 2, mapSize / 2);
             for (int i = 0; i < islandCount; i++) {
                 int center = randomInteriorCell(2);
-                writeTile(center, "" + PLAIN.getMapChar(), null);
+                if (!isSettlement(center)) {
+                    writeTile(center, "" + PLAIN.getMapChar(), null);
+                }
                 if (rnd.nextBoolean()) {
                     ArrayList<Integer> neighbours = crossNeighbors(center);
-                    writeTile(neighbours.get(randomInt(0, neighbours.size())), "" + PLAIN.getMapChar(), null);
+                    int neighbour = neighbours.get(randomInt(0, neighbours.size()));
+                    if (!isSettlement(neighbour)) {
+                        writeTile(neighbour, "" + PLAIN.getMapChar(), null);
+                    }
                 }
             }
         }
@@ -304,7 +361,10 @@ public class LevelGenerator {
                 if (placed >= 2) {
                     break;
                 }
-                if (canPlaceVillage(cell, villages, 1, 2)) {
+                boolean canPlace = mapType.usesQuadrantCapitals()
+                        ? canPlacePreTerrainVillage(cell, villages, 1, 2)
+                        : canPlaceVillage(cell, villages, 1, 2);
+                if (canPlace) {
                     writeTile(cell, "" + VILLAGE.getMapChar(), null);
                     villages.add(cell);
                     placed++;
@@ -325,7 +385,9 @@ public class LevelGenerator {
         desired = Math.max(0, desired);
         ArrayList<Integer> placed = new ArrayList<>(existingVillages);
         while (villages.size() < desired) {
-            ArrayList<Integer> candidates = villageCandidates(placed, 1, 2);
+            ArrayList<Integer> candidates = mapType.usesQuadrantCapitals()
+                    ? preTerrainVillageCandidates(placed, 1, 2)
+                    : villageCandidates(placed, 1, 2);
             if (candidates.isEmpty()) {
                 break;
             }
@@ -566,37 +628,202 @@ public class LevelGenerator {
 
     private void generateTerrain(Types.TRIBE[] tileOwner) {
         if (LEVELGEN_VERBOSE) System.out.println("Generate terrain by tribe biome.");
+        HashMap<Types.TRIBE, ArrayList<Integer>> plainCellsByOwner = new HashMap<>();
         for (int cell = 0; cell < mapSize * mapSize; cell++) {
             if (getTerrain(cell) != PLAIN.getMapChar()) {
                 continue;
             }
-            Types.TRIBE owner = tileOwner[cell];
-            double mountain = clamp(0.14 * getTribeProb("MOUNTAIN", owner), 0.0, 0.85);
-            double forest = clamp(0.38 * getTribeProb("FOREST", owner), 0.0, 1.0 - mountain);
-            double roll = rnd.nextDouble();
-            if (roll < mountain) {
-                writeTile(cell, "" + MOUNTAIN.getMapChar(), null);
-            } else if (roll < mountain + forest) {
-                writeTile(cell, "" + FOREST.getMapChar(), null);
+            Types.TRIBE owner = tileOwner[cell] == null ? LUXIDOOR : tileOwner[cell];
+            if (!plainCellsByOwner.containsKey(owner)) {
+                plainCellsByOwner.put(owner, new ArrayList<Integer>());
+            }
+            plainCellsByOwner.get(owner).add(cell);
+        }
+
+        for (Map.Entry<Types.TRIBE, ArrayList<Integer>> entry : plainCellsByOwner.entrySet()) {
+            Types.TRIBE owner = entry.getKey();
+            ArrayList<Integer> cells = entry.getValue();
+            Collections.shuffle(cells, rnd);
+
+            TerrainRates rates = terrainRates(owner);
+            int mountainCount = (int) Math.round(cells.size() * rates.mountain);
+            int forestCount = (int) Math.round(cells.size() * rates.forest);
+            if (mountainCount + forestCount > cells.size()) {
+                forestCount = Math.max(0, cells.size() - mountainCount);
+            }
+
+            int index = 0;
+            for (; index < mountainCount; index++) {
+                writeTile(cells.get(index), "" + MOUNTAIN.getMapChar(), null);
+            }
+            for (; index < mountainCount + forestCount; index++) {
+                writeTile(cells.get(index), "" + FOREST.getMapChar(), null);
             }
         }
     }
 
+    private TerrainRates terrainRates(Types.TRIBE owner) {
+        double mountain = clamp(0.14 * getTribeProb("MOUNTAIN", owner), 0.0, 0.85);
+        double nonMountain = 1.0 - mountain;
+        double baseNonMountain = 1.0 - 0.14;
+        double forest = nonMountain * (0.38 / baseNonMountain);
+        forest = clamp(forest * getTribeProb("FOREST", owner), 0.0, nonMountain);
+        return new TerrainRates(mountain, forest);
+    }
+
     private Types.TRIBE[] assignTileOwners(ArrayList<Integer> capitalCells) {
         Types.TRIBE[] owners = new Types.TRIBE[mapSize * mapSize];
-        for (int cell = 0; cell < mapSize * mapSize; cell++) {
-            int closest = 0;
-            int bestDistance = Integer.MAX_VALUE;
-            for (int i = 0; i < capitalCells.size(); i++) {
-                int distance = distance(cell, capitalCells.get(i), mapSize);
-                if (distance < bestDistance) {
-                    bestDistance = distance;
-                    closest = i;
+        if (capitalCells.isEmpty()) {
+            Arrays.fill(owners, LUXIDOOR);
+            return owners;
+        }
+
+        int seats = Math.min(capitalCells.size(), tribes.length);
+        int[] targetCounts = balancedBiomeTargets(seats);
+        int[] counts = new int[seats];
+        ArrayList<HashSet<Integer>> frontierBySeat = new ArrayList<>();
+        for (int seat = 0; seat < seats; seat++) {
+            frontierBySeat.add(new HashSet<Integer>());
+        }
+
+        ArrayList<Integer> seatOrder = new ArrayList<>();
+        for (int seat = 0; seat < seats; seat++) {
+            seatOrder.add(seat);
+        }
+        Collections.shuffle(seatOrder, rnd);
+        for (int seat : seatOrder) {
+            int capital = capitalCells.get(seat);
+            if (owners[capital] == null) {
+                owners[capital] = tribes[seat];
+                counts[seat]++;
+                addUnownedNeighboursToFrontier(capital, owners, frontierBySeat.get(seat));
+            }
+        }
+
+        int assigned = 0;
+        for (int count : counts) {
+            assigned += count;
+        }
+        while (assigned < mapSize * mapSize) {
+            ArrayList<Integer> expandableSeats = new ArrayList<>();
+            for (int seat = 0; seat < seats; seat++) {
+                pruneOwnedFrontier(frontierBySeat.get(seat), owners);
+                if (counts[seat] < targetCounts[seat] && !frontierBySeat.get(seat).isEmpty()) {
+                    expandableSeats.add(seat);
                 }
             }
-            owners[cell] = tribes[Math.min(closest, tribes.length - 1)];
+
+            if (expandableSeats.isEmpty()) {
+                Integer fallbackCell = firstUnownedCell(owners);
+                if (fallbackCell == null) {
+                    break;
+                }
+                int seat = pickLeastFilledNearestSeat(fallbackCell, capitalCells, counts, targetCounts, seats);
+                owners[fallbackCell] = tribes[seat];
+                counts[seat]++;
+                assigned++;
+                addUnownedNeighboursToFrontier(fallbackCell, owners, frontierBySeat.get(seat));
+                continue;
+            }
+
+            int seat = expandableSeats.get(randomInt(0, expandableSeats.size()));
+            ArrayList<Integer> frontier = new ArrayList<>(frontierBySeat.get(seat));
+            int cell = frontier.get(randomInt(0, frontier.size()));
+            frontierBySeat.get(seat).remove(cell);
+            if (owners[cell] != null) {
+                continue;
+            }
+            owners[cell] = tribes[seat];
+            counts[seat]++;
+            assigned++;
+            addUnownedNeighboursToFrontier(cell, owners, frontierBySeat.get(seat));
         }
+
         return owners;
+    }
+
+    private int[] balancedBiomeTargets(int seats) {
+        int total = mapSize * mapSize;
+        int[] targets = new int[seats];
+        int base = total / seats;
+        int remainder = total % seats;
+        ArrayList<Integer> order = new ArrayList<>();
+        for (int seat = 0; seat < seats; seat++) {
+            order.add(seat);
+            targets[seat] = base;
+        }
+        Collections.shuffle(order, rnd);
+        for (int i = 0; i < remainder; i++) {
+            targets[order.get(i)]++;
+        }
+        return targets;
+    }
+
+    private void addUnownedNeighboursToFrontier(int cell, Types.TRIBE[] owners, HashSet<Integer> frontier) {
+        for (int neighbour : crossNeighbors(cell)) {
+            if (owners[neighbour] == null) {
+                frontier.add(neighbour);
+            }
+        }
+    }
+
+    private void pruneOwnedFrontier(HashSet<Integer> frontier, Types.TRIBE[] owners) {
+        Iterator<Integer> iterator = frontier.iterator();
+        while (iterator.hasNext()) {
+            if (owners[iterator.next()] != null) {
+                iterator.remove();
+            }
+        }
+    }
+
+    private Integer firstUnownedCell(Types.TRIBE[] owners) {
+        int start = randomInt(0, owners.length);
+        for (int offset = 0; offset < owners.length; offset++) {
+            int cell = (start + offset) % owners.length;
+            if (owners[cell] == null) {
+                return cell;
+            }
+        }
+        return null;
+    }
+
+    private int pickLeastFilledNearestSeat(int cell, ArrayList<Integer> capitalCells, int[] counts, int[] targets, int seats) {
+        double bestFill = Double.MAX_VALUE;
+        int bestDistance = Integer.MAX_VALUE;
+        ArrayList<Integer> best = new ArrayList<>();
+        for (int seat = 0; seat < seats; seat++) {
+            double fill = counts[seat] / (double) Math.max(1, targets[seat]);
+            int distance = distance(cell, capitalCells.get(seat), mapSize);
+            if (fill < bestFill || (fill == bestFill && distance < bestDistance)) {
+                bestFill = fill;
+                bestDistance = distance;
+                best.clear();
+                best.add(seat);
+            } else if (fill == bestFill && distance == bestDistance) {
+                best.add(seat);
+            }
+        }
+        return best.get(randomInt(0, best.size()));
+    }
+
+    public Types.TRIBE getBiomeOwner(int index) {
+        if (biomeOwner == null || index < 0 || index >= biomeOwner.length) {
+            return null;
+        }
+        return biomeOwner[index];
+    }
+
+    private String tileForOutput(int index) {
+        Types.TRIBE owner = getBiomeOwner(index);
+        if (owner == null) {
+            return level[index];
+        }
+        String[] pieces = level[index].split(":", -1);
+        String resource = pieces.length > 1 && !pieces[1].equals(" ") ? pieces[1] : "";
+        if (getTerrain(index) == CITY.getMapChar() && pieces.length >= 3) {
+            return pieces[0] + ":" + pieces[1] + ":" + pieces[2] + ":" + owner.getKey();
+        }
+        return pieces[0] + ":" + resource + ":" + owner.getKey();
     }
 
     private void generateResources(Types.TRIBE[] tileOwner) {
@@ -623,7 +850,7 @@ public class LevelGenerator {
                 if (rnd.nextDouble() < ore) {
                     writeTile(cell, null, "" + ORE.getMapChar());
                 }
-            } else if (terrain == SHALLOW_WATER.getMapChar()) {
+            } else if (terrain == SHALLOW_WATER.getMapChar() && isWithinCityInfluence(cell, 2)) {
                 double fish = 0.50 * getTribeProb("FISH", owner);
                 if (rnd.nextDouble() < fish) {
                     writeTile(cell, null, "" + FISH.getMapChar());
@@ -707,6 +934,29 @@ public class LevelGenerator {
     private boolean canPlaceVillage(int cell, ArrayList<Integer> existingVillages, int edgeBuffer, int spacing) {
         char terrain = getTerrain(cell);
         if ((terrain != PLAIN.getMapChar() && terrain != FOREST.getMapChar())
+                || !getResource(cell).isEmpty()
+                || nearMapEdge(cell, edgeBuffer)
+                || nearAny(cell, existingVillages, spacing)
+                || nearAny(cell, currentCapitalCells(), spacing)) {
+            return false;
+        }
+        return true;
+    }
+
+    private ArrayList<Integer> preTerrainVillageCandidates(ArrayList<Integer> existingVillages, int edgeBuffer, int spacing) {
+        ArrayList<Integer> candidates = new ArrayList<>();
+        for (int cell = 0; cell < mapSize * mapSize; cell++) {
+            if (canPlacePreTerrainVillage(cell, existingVillages, edgeBuffer, spacing)) {
+                candidates.add(cell);
+            }
+        }
+        Collections.shuffle(candidates, rnd);
+        return candidates;
+    }
+
+    private boolean canPlacePreTerrainVillage(int cell, ArrayList<Integer> existingVillages, int edgeBuffer, int spacing) {
+        char terrain = getTerrain(cell);
+        if ((terrain != DEEP_WATER.getMapChar() && terrain != PLAIN.getMapChar() && terrain != FOREST.getMapChar())
                 || !getResource(cell).isEmpty()
                 || nearMapEdge(cell, edgeBuffer)
                 || nearAny(cell, existingVillages, spacing)
@@ -958,28 +1208,164 @@ public class LevelGenerator {
         }
     }
 
-    private void forceCapitalDomainLand() {
-        int rows = tribes.length <= 4 ? 2 : tribes.length <= 9 ? 3 : 4;
-        int cols = rows;
-        for (int i = 0; i < tribes.length; i++) {
-            int regionRow = i / cols;
-            int regionCol = i % cols;
-            int usableRows = Math.max(1, mapSize - 4);
-            int usableCols = Math.max(1, mapSize - 4);
-            int minRow = 2 + regionRow * Math.max(1, usableRows / rows);
-            int maxRow = regionRow == rows - 1 ? mapSize - 3 : 2 + (regionRow + 1) * Math.max(1, usableRows / rows) - 1;
-            int minCol = 2 + regionCol * Math.max(1, usableCols / cols);
-            int maxCol = regionCol == cols - 1 ? mapSize - 3 : 2 + (regionCol + 1) * Math.max(1, usableCols / cols) - 1;
-            int row = Math.max(2, Math.min(mapSize - 3, (minRow + maxRow) / 2));
-            int col = Math.max(2, Math.min(mapSize - 3, (minCol + maxCol) / 2));
-            int center = row * mapSize + col;
-            writeTile(center, "" + PLAIN.getMapChar(), null);
-            for (int neighbour : circle(center, 1)) {
-                if (!nearMapEdge(neighbour, 1)) {
-                    writeTile(neighbour, "" + PLAIN.getMapChar(), null);
+    private void forceSettlementAdjacentLand(ArrayList<Integer> capitalCells, ArrayList<Integer> villageCells) {
+        ArrayList<Integer> settlements = new ArrayList<>(capitalCells);
+        settlements.addAll(villageCells);
+        for (int settlement : settlements) {
+            if (mapType == Types.MAP_TYPE.WATER_WORLD) {
+                ArrayList<Integer> candidates = new ArrayList<>();
+                for (int neighbour : crossNeighbors(settlement)) {
+                    if (!isSettlement(neighbour)) {
+                        candidates.add(neighbour);
+                    }
+                }
+                if (!candidates.isEmpty()) {
+                    writeTile(candidates.get(randomInt(0, candidates.size())), "" + PLAIN.getMapChar(), null);
+                }
+                continue;
+            }
+            for (int nearby : circle(settlement, 1)) {
+                if (!isSettlement(nearby) && isWaterTerrain(getTerrain(nearby))) {
+                    writeTile(nearby, "" + PLAIN.getMapChar(), null);
                 }
             }
         }
+    }
+
+    private void enforceQuadrantWaterBand() {
+        double[] band = quadrantWaterBand();
+        if (band == null) {
+            return;
+        }
+        int tiles = mapSize * mapSize;
+        int minWater = (int) Math.ceil(tiles * band[0]);
+        int maxWater = (int) Math.floor(tiles * band[1]);
+        int water = countWaterTiles();
+        if (water < minWater) {
+            ArrayList<Integer> candidates = mutableLandCells();
+            Collections.shuffle(candidates, rnd);
+            for (int cell : candidates) {
+                if (water >= minWater) {
+                    break;
+                }
+                writeTile(cell, "" + DEEP_WATER.getMapChar(), null);
+                water++;
+            }
+        } else if (water > maxWater) {
+            ArrayList<Integer> candidates = mutableWaterCells();
+            Collections.shuffle(candidates, rnd);
+            for (int cell : candidates) {
+                if (water <= maxWater) {
+                    break;
+                }
+                writeTile(cell, "" + PLAIN.getMapChar(), null);
+                water--;
+            }
+        }
+    }
+
+    private double[] quadrantWaterBand() {
+        switch (mapType) {
+            case DRYLANDS:
+                return new double[]{0.0, 0.0};
+            case LAKES:
+                return new double[]{0.25, 0.30};
+            case ARCHIPELAGO:
+                return new double[]{0.60, 0.80};
+            case WATER_WORLD:
+                return new double[]{0.90, 1.00};
+            default:
+                return null;
+        }
+    }
+
+    private int countWaterTiles() {
+        int water = 0;
+        for (int cell = 0; cell < mapSize * mapSize; cell++) {
+            if (isWaterTerrain(getTerrain(cell))) {
+                water++;
+            }
+        }
+        return water;
+    }
+
+    private ArrayList<Integer> mutableLandCells() {
+        ArrayList<Integer> cells = new ArrayList<>();
+        for (int cell = 0; cell < mapSize * mapSize; cell++) {
+            int row = cell / mapSize;
+            int col = cell % mapSize;
+            if (!isSettlement(cell)
+                    && !isWaterTerrain(getTerrain(cell))
+                    && (!profile.edgeLandBridge || !isVillageEdgeRestrictedTile(row, col))
+                    && !isCriticalSettlementAdjacentLand(cell)) {
+                cells.add(cell);
+            }
+        }
+        return cells;
+    }
+
+    private ArrayList<Integer> mutableWaterCells() {
+        ArrayList<Integer> cells = new ArrayList<>();
+        for (int cell = 0; cell < mapSize * mapSize; cell++) {
+            if (!isSettlement(cell) && getResource(cell).isEmpty() && isWaterTerrain(getTerrain(cell))) {
+                cells.add(cell);
+            }
+        }
+        return cells;
+    }
+
+    private boolean isSettlement(int cell) {
+        char terrain = getTerrain(cell);
+        return terrain == CITY.getMapChar() || terrain == VILLAGE.getMapChar();
+    }
+
+    private boolean isCriticalSettlementAdjacentLand(int cell) {
+        for (int settlement : crossNeighbors(cell)) {
+            if (!isSettlement(settlement)) {
+                continue;
+            }
+            int adjacentLand = 0;
+            for (int neighbour : crossNeighbors(settlement)) {
+                if (!isWaterTerrain(getTerrain(neighbour))) {
+                    adjacentLand++;
+                }
+            }
+            if (adjacentLand <= 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int quadrantDomainRows() {
+        return tribes.length <= 4 ? 2 : tribes.length <= 9 ? 3 : 4;
+    }
+
+    private int quadrantDomainCols() {
+        return quadrantDomainRows();
+    }
+
+    private ArrayList<Integer> quadrantDomainCells(int domain, ArrayList<Integer> existingCapitals) {
+        int rows = quadrantDomainRows();
+        int cols = quadrantDomainCols();
+        int regionRow = domain / cols;
+        int regionCol = domain % cols;
+        int usableRows = Math.max(1, mapSize - 4);
+        int usableCols = Math.max(1, mapSize - 4);
+        int minRow = 2 + regionRow * usableRows / rows;
+        int maxRow = regionRow == rows - 1 ? mapSize - 2 : 2 + (regionRow + 1) * usableRows / rows;
+        int minCol = 2 + regionCol * usableCols / cols;
+        int maxCol = regionCol == cols - 1 ? mapSize - 2 : 2 + (regionCol + 1) * usableCols / cols;
+        ArrayList<Integer> cells = new ArrayList<>();
+        for (int row = minRow; row < maxRow; row++) {
+            for (int col = minCol; col < maxCol; col++) {
+                int cell = row * mapSize + col;
+                if (!existingCapitals.contains(cell)) {
+                    cells.add(cell);
+                }
+            }
+        }
+        return cells;
     }
 
     private double clamp(double value, double min, double max) {
@@ -1029,98 +1415,168 @@ public class LevelGenerator {
         this.landCoefficient = (0.5 + relief) / 9;
     }
 
-    private ArrayList<Integer> selectCapitalCells() {
-        ArrayList<Integer> candidates = new ArrayList<>();
-        for (int row = 2; row < mapSize - 2; row++) {
-            for (int column = 2; column < mapSize - 2; column++) {
-                int cell = row * mapSize + column;
-                if (getTerrain(cell) == PLAIN.getMapChar()) {
-                    candidates.add(cell);
-                }
+    private ArrayList<Integer> selectQuadrantCapitalsFromDomains() {
+        int domainCount = quadrantDomainRows() * quadrantDomainCols();
+        int trials = Math.max(250, domainCount * tribes.length * 20);
+        CapitalLayout best = null;
+        for (int trial = 0; trial < trials; trial++) {
+            CapitalLayout layout = randomCapitalLayout(domainCount);
+            if (layout != null && (best == null || layout.score > best.score)) {
+                best = layout;
             }
         }
-        while (candidates.size() < tribes.length) {
-            int cell = randomInteriorCell(2);
-            if (!candidates.contains(cell)) {
-                writeTile(cell, "" + PLAIN.getMapChar(), null);
-                candidates.add(cell);
-            }
+        if (best != null) {
+            return best.capitals;
         }
-
-        if (mapType.usesQuadrantCapitals()) {
-            return selectQuadrantCapitals(candidates);
-        }
-        return selectDistanceCapitals(candidates, mapType.prefersCoastalCapitals());
+        return fallbackQuadrantCapitals(domainCount);
     }
 
-    private ArrayList<Integer> selectQuadrantCapitals(ArrayList<Integer> candidates) {
-        ArrayList<Integer> capitals = new ArrayList<>();
-        ArrayList<Integer> available = new ArrayList<>(candidates);
-        int rows;
-        int cols;
-        if (tribes.length <= 4) {
-            rows = 2;
-            cols = 2;
-        } else if (tribes.length <= 9) {
-            rows = 3;
-            cols = 3;
-        } else {
-            rows = 4;
-            cols = 4;
-        }
-
+    private CapitalLayout randomCapitalLayout(int domainCount) {
         ArrayList<Integer> domains = new ArrayList<>();
-        for (int domain = 0; domain < rows * cols; domain++) {
+        for (int domain = 0; domain < domainCount; domain++) {
             domains.add(domain);
         }
         Collections.shuffle(domains, rnd);
+        ArrayList<Integer> capitals = new ArrayList<>();
+        ArrayList<Integer> chosenDomains = new ArrayList<>();
+        for (int seat = 0; seat < tribes.length; seat++) {
+            if (domains.isEmpty()) {
+                return null;
+            }
+            int domain = domains.remove(0);
+            ArrayList<Integer> candidates = quadrantDomainCells(domain, capitals);
+            if (candidates.isEmpty()) {
+                return null;
+            }
+            capitals.add(weightedRandomCapital(candidates, capitals));
+            chosenDomains.add(domain);
+        }
+        return new CapitalLayout(capitals, scoreCapitalLayout(capitals, chosenDomains));
+    }
 
+    private ArrayList<Integer> fallbackQuadrantCapitals(int domainCount) {
+        ArrayList<Integer> capitals = new ArrayList<>();
+        ArrayList<Integer> domains = new ArrayList<>();
+        for (int domain = 0; domain < domainCount; domain++) {
+            domains.add(domain);
+        }
+        Collections.shuffle(domains, rnd);
         for (int i = 0; i < tribes.length; i++) {
-            int domain = domains.get(i % domains.size());
-            int regionRow = domain / cols;
-            int regionCol = domain % cols;
-            int usableRows = Math.max(1, mapSize - 4);
-            int usableCols = Math.max(1, mapSize - 4);
-            int minRow = 2 + regionRow * Math.max(1, usableRows / rows);
-            int maxRow = regionRow == rows - 1 ? mapSize - 2 : 2 + (regionRow + 1) * Math.max(1, usableRows / rows);
-            int minCol = 2 + regionCol * Math.max(1, usableCols / cols);
-            int maxCol = regionCol == cols - 1 ? mapSize - 2 : 2 + (regionCol + 1) * Math.max(1, usableCols / cols);
-
-            ArrayList<Integer> regionCandidates = new ArrayList<>();
-            for (Integer candidate : available) {
-                int row = candidate / mapSize;
-                int col = candidate % mapSize;
-                if (row >= minRow && row < maxRow && col >= minCol && col < maxCol) {
-                    regionCandidates.add(candidate);
-                }
-            }
-            if (regionCandidates.isEmpty()) {
-                regionCandidates.addAll(available);
-            }
-            if (regionCandidates.isEmpty()) {
-                int fallback = randomInteriorCell(2);
-                writeTile(fallback, "" + PLAIN.getMapChar(), null);
-                regionCandidates.add(fallback);
-                available.add(fallback);
-            }
-
-            int chosen = pickBestCapital(regionCandidates, capitals, mapType.prefersCoastalCapitals());
-            capitals.add(chosen);
-            available.remove(Integer.valueOf(chosen));
+            int domain = domains.isEmpty() ? randomInt(0, domainCount) : domains.remove(0);
+            ArrayList<Integer> cells = quadrantDomainCells(domain, capitals);
+            capitals.add(cells.isEmpty() ? randomInteriorCell(2) : pickBestCapital(cells, capitals, false));
         }
         return capitals;
     }
 
-    private ArrayList<Integer> selectDistanceCapitals(ArrayList<Integer> candidates, boolean preferCoastal) {
-        ArrayList<Integer> capitalCells = new ArrayList<>();
-        ArrayList<Integer> available = new ArrayList<>(candidates);
-
-        for (int i = 0; i < tribes.length; i++) {
-            int chosen = pickBestCapital(available, capitalCells, preferCoastal);
-            capitalCells.add(chosen);
-            available.remove(Integer.valueOf(chosen));
+    private int weightedRandomCapital(ArrayList<Integer> candidates, ArrayList<Integer> existingCapitals) {
+        double total = 0.0;
+        double[] weights = new double[candidates.size()];
+        for (int i = 0; i < candidates.size(); i++) {
+            weights[i] = capitalSoftWeight(candidates.get(i), existingCapitals);
+            total += weights[i];
         }
-        return capitalCells;
+        double roll = rnd.nextDouble() * total;
+        for (int i = 0; i < candidates.size(); i++) {
+            roll -= weights[i];
+            if (roll <= 0.0) {
+                return candidates.get(i);
+            }
+        }
+        return candidates.get(candidates.size() - 1);
+    }
+
+    private double scoreCapitalLayout(ArrayList<Integer> capitals, ArrayList<Integer> domains) {
+        int minDistance = mapSize;
+        int distanceTotal = 0;
+        int pairs = 0;
+        for (int i = 0; i < capitals.size(); i++) {
+            for (int j = i + 1; j < capitals.size(); j++) {
+                int distance = distance(capitals.get(i), capitals.get(j), mapSize);
+                minDistance = Math.min(minDistance, distance);
+                distanceTotal += distance;
+                pairs++;
+            }
+        }
+        if (pairs == 0) {
+            minDistance = mapSize;
+        }
+
+        int edgeTotal = 0;
+        int edgeMin = mapSize;
+        int localSpaceTotal = 0;
+        for (int capital : capitals) {
+            int row = capital / mapSize;
+            int col = capital % mapSize;
+            int edgeDistance = Math.min(Math.min(row, mapSize - 1 - row), Math.min(col, mapSize - 1 - col));
+            edgeTotal += edgeDistance;
+            edgeMin = Math.min(edgeMin, edgeDistance);
+            localSpaceTotal += countDomainCellsNear(capital, 2);
+        }
+
+        int domainSpread = domainSpreadScore(domains);
+        int spacingPenalty = Math.max(0, minimumCapitalDistance() - minDistance) * 10000;
+        return minDistance * 1000
+                + distanceTotal * 10
+                + edgeMin * 80
+                + edgeTotal * 8
+                + localSpaceTotal * 6
+                + domainSpread * 25
+                - spacingPenalty;
+    }
+
+    private int countDomainCellsNear(int center, int radius) {
+        int count = 0;
+        for (int cell : disk(center, radius)) {
+            if (!nearMapEdge(cell, 1)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private int domainSpreadScore(ArrayList<Integer> domains) {
+        int score = 0;
+        int cols = quadrantDomainCols();
+        for (int i = 0; i < domains.size(); i++) {
+            int rowA = domains.get(i) / cols;
+            int colA = domains.get(i) % cols;
+            for (int j = i + 1; j < domains.size(); j++) {
+                int rowB = domains.get(j) / cols;
+                int colB = domains.get(j) % cols;
+                score += Math.max(Math.abs(rowA - rowB), Math.abs(colA - colB));
+            }
+        }
+        return score;
+    }
+
+    private int minimumCapitalDistance() {
+        return Math.max(4, mapSize / 4);
+    }
+
+    private ArrayList<Integer> filterByMinimumCapitalDistance(ArrayList<Integer> candidates,
+                                                               ArrayList<Integer> existingCapitals) {
+        int minimumCapitalDistance = minimumCapitalDistance();
+        ArrayList<Integer> filtered = new ArrayList<>();
+        for (Integer candidate : candidates) {
+            if (!nearAny(candidate, existingCapitals, minimumCapitalDistance - 1)) {
+                filtered.add(candidate);
+            }
+        }
+        return filtered;
+    }
+
+    private double capitalSoftWeight(int cell, ArrayList<Integer> existingCapitals) {
+        int row = cell / mapSize;
+        int col = cell % mapSize;
+        int edgeDistance = Math.min(Math.min(row, mapSize - 1 - row), Math.min(col, mapSize - 1 - col));
+        int capitalDistance = mapSize;
+        for (int capital : existingCapitals) {
+            capitalDistance = Math.min(capitalDistance, distance(cell, capital, mapSize));
+        }
+        double edgeWeight = 1.0 + Math.max(0, edgeDistance - 1) * 0.35;
+        double distanceWeight = existingCapitals.isEmpty() ? 1.0 : Math.max(1.0, capitalDistance);
+        return edgeWeight * distanceWeight;
     }
 
     private int pickBestCapital(ArrayList<Integer> candidates, ArrayList<Integer> existingCapitals, boolean preferCoastal) {
@@ -1156,13 +1612,7 @@ public class LevelGenerator {
     }
 
     private int pickBestVillageCapital(ArrayList<Integer> candidates, ArrayList<Integer> existingCapitals, boolean preferCoastal) {
-        int minimumCapitalDistance = Math.max(4, mapSize / 4);
-        ArrayList<Integer> filtered = new ArrayList<>();
-        for (Integer candidate : candidates) {
-            if (!nearAny(candidate, existingCapitals, minimumCapitalDistance - 1)) {
-                filtered.add(candidate);
-            }
-        }
+        ArrayList<Integer> filtered = filterByMinimumCapitalDistance(candidates, existingCapitals);
         if (!filtered.isEmpty()) {
             candidates = filtered;
         }
@@ -1219,16 +1669,31 @@ public class LevelGenerator {
      */
     public void postGenerate(char resource, char terrain, int quantity, int capital) {
         int resources = checkResources(resource, capital);
-        while (resources < quantity) {
-            int pos = randomInt(0, 8);
-            ArrayList<Integer> territory = circle(capital, 1);
-            writeTile(territory.get(pos), ""+terrain, ""+resource);
-            for (int neighbour : crossNeighbors(territory.get(pos))) {
+        int attempts = 0;
+        while (resources < quantity && attempts < mapSize * mapSize) {
+            ArrayList<Integer> candidates = new ArrayList<>();
+            for (int tile : circle(capital, 1)) {
+                char currentTerrain = getTerrain(tile);
+                String currentResource = getResource(tile);
+                if (currentTerrain != CITY.getMapChar()
+                        && currentTerrain != VILLAGE.getMapChar()
+                        && (!isWaterTerrain(currentTerrain) || terrain == SHALLOW_WATER.getMapChar())
+                        && (currentResource.isEmpty() || currentResource.charAt(0) != resource)) {
+                    candidates.add(tile);
+                }
+            }
+            if (candidates.isEmpty()) {
+                return;
+            }
+            int target = candidates.get(randomInt(0, candidates.size()));
+            writeTile(target, ""+terrain, ""+resource);
+            for (int neighbour : crossNeighbors(target)) {
                 if (getTerrain(neighbour) == DEEP_WATER.getMapChar() && getResource(neighbour).isEmpty()) {
                     writeTile(neighbour, ""+SHALLOW_WATER.getMapChar(), null);
                 }
             }
             resources = checkResources(resource, capital);
+            attempts++;
         }
     }
     /**
@@ -1327,7 +1792,7 @@ public class LevelGenerator {
         }
 
         Collections.shuffle(waterCandidates, rnd);
-        int targetStarfish = waterCandidates.size() / 25;
+        int targetStarfish = countWaterTiles() / 25;
         int placedStarfish = 0;
 
         for (int candidate : waterCandidates) {
@@ -1428,9 +1893,9 @@ public class LevelGenerator {
      */
     public String getResource(int index)
     {
-        String[] pieces = level[index].split(":");
+        String[] pieces = level[index].split(":", -1);
         if(pieces.length > 1)
-            if(pieces[1].charAt(0) == ' ')
+            if(pieces[1].isEmpty() || pieces[1].charAt(0) == ' ')
                 return "";
             else return pieces[1];
         else return "";
@@ -1605,6 +2070,26 @@ public class LevelGenerator {
         }
     }
 
+    private static final class TerrainRates {
+        private final double mountain;
+        private final double forest;
+
+        private TerrainRates(double mountain, double forest) {
+            this.mountain = mountain;
+            this.forest = forest;
+        }
+    }
+
+    private static final class CapitalLayout {
+        private final ArrayList<Integer> capitals;
+        private final double score;
+
+        private CapitalLayout(ArrayList<Integer> capitals, double score) {
+            this.capitals = capitals;
+            this.score = score;
+        }
+    }
+
     /**
      * Saves the generated level into a .csv format readable by the Tribes framework.
      * @param filename path to save the level.
@@ -1612,17 +2097,17 @@ public class LevelGenerator {
     public void toCSV(String filename) {
         try {
             FileWriter writer = new FileWriter(filename);
-            writer.append(level[0]);
+            writer.append(tileForOutput(0));
             writer.append(',');
             for(int i = 1; i < mapSize*mapSize; i++) {
                 if(i % mapSize == 0) {
                     writer.append('\n');
-                    writer.append(level[i]);
+                    writer.append(tileForOutput(i));
                     writer.append(',');
                 } else if(i % mapSize == mapSize - 1) {
-                    writer.append(level[i]);
+                    writer.append(tileForOutput(i));
                 }else {
-                    writer.append(level[i]);
+                    writer.append(tileForOutput(i));
                     writer.append(',');
                 }
             }
@@ -1638,17 +2123,17 @@ public class LevelGenerator {
      */
     public void print() {
         StringBuffer writer = new StringBuffer();
-        writer.append(level[0]);
+        writer.append(tileForOutput(0));
         writer.append(',');
         for (int i = 1; i < mapSize * mapSize; i++) {
             if (i % mapSize == 0) {
                 writer.append('\n');
-                writer.append(level[i]);
+                writer.append(tileForOutput(i));
                 writer.append(',');
             } else if (i % mapSize == mapSize - 1) {
-                writer.append(level[i]);
+                writer.append(tileForOutput(i));
             } else {
-                writer.append(level[i]);
+                writer.append(tileForOutput(i));
                 writer.append(',');
             }
         }
@@ -1664,16 +2149,16 @@ public class LevelGenerator {
         int lineCounter = 0;
 
         StringBuffer line = new StringBuffer();
-        line.append(level[0]);
+        line.append(tileForOutput(0));
         line.append(',');
         for (int i = 1; i < mapSize * mapSize; i++) {
             if (i % mapSize == mapSize - 1) {
-                line.append(level[i]);
+                line.append(tileForOutput(i));
                 allLines[lineCounter] = line.toString();
                 lineCounter++;
                 line = new StringBuffer();
             } else {
-                line.append(level[i]);
+                line.append(tileForOutput(i));
                 line.append(',');
             }
         }
