@@ -1,16 +1,20 @@
 {
   "evaluator": "nn",
-  "positions": 10,
+  "positions": 16,
   "selfplay_seed_start": 0,
   "selfplay_run_mode": "PlayLG",
   "selfplay_game_mode": "Capitals",
   "selfplay_map_type": "Drylands",
   "selfplay_map_size": "Tiny",
   "checkpoint": "py/profiling/mcts_search_profiling_random_init_model.pt",
-  "wall_time_sec": 10.0,
+  "simulations": 512,
+  "wall_time_sec": 0,
   "batch_size": 64,
   "repeats": 1,
   "warmup": 0,
+  "top_k_actions": 64,
+  "device": "cuda",
   "no_dirichlet": true,
-  "captured_payload_dir": "debug-logs/mcts-profile-payloads"
+  "captured_payload_dir": "debug-logs/mcts-profile-payloads",
+  "reuse_captured_payloads": true
 }
