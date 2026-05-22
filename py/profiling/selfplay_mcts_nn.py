@@ -49,12 +49,21 @@ SEARCH_PATTERN = re.compile(
     r"(?:paths=(?P<paths>\d+)\s+)?"
     r"eval_batches=(?P<eval_batches>\d+)\s+"
     r"eval_positions=(?P<eval_positions>\d+)\s+"
-    r"(?:eval_cache_hits=\d+\s+)?"
-    r"(?:eval_cache_size=\d+\s+)?"
+    r"(?:eval_cache_hits=(?P<eval_cache_hits>\d+)\s+)?"
+    r"(?:eval_cache_size=(?P<eval_cache_size>\d+)\s+)?"
+    r"(?:avg_depth=(?P<avg_depth>[-+0-9.]+)\s+)?"
+    r"(?:selected_max_depth=(?P<selected_max_depth>\d+)\s+)?"
+    r"(?:root_visit_entropy=(?P<root_visit_entropy>[-+0-9.]+)\s+)?"
+    r"(?:top_visit_share=(?P<top_visit_share>[-+0-9.]+)\s+)?"
     r"select_ms=(?P<select_ms>[-+0-9.]+)\s+"
     r"eval_ms=(?P<eval_ms>[-+0-9.]+)\s+"
     r"expand_ms=(?P<expand_ms>[-+0-9.]+)\s+"
     r"total_inner_ms=(?P<total_inner_ms>[-+0-9.]+)"
+    r"(?:\s+root_actions=(?P<root_actions>\d+))?"
+    r"(?:\s+searched_actions=(?P<searched_actions>\d+))?"
+    r"(?:\s+native_unsupported_transition=(?P<native_unsupported_transition>\d+))?"
+    r"(?:\s+native_invalid_transition=(?P<native_invalid_transition>\d+))?"
+    r"(?:\s+native_approximate_transition=(?P<native_approximate_transition>\d+))?"
 )
 WARMUP_PATTERN = re.compile(r"\[mcts_nn\.warmup\]\s+warmup_ms=(?P<warmup_ms>[-+0-9.]+)")
 FALLBACK_PATTERN = re.compile(r"(invalid[-_ ]action|fallback)", re.IGNORECASE)
@@ -77,6 +86,12 @@ def _format_seconds(seconds: float) -> str:
         return f"{seconds:.2f}s"
     minutes, rem = divmod(seconds, 60.0)
     return f"{int(minutes)}m{rem:04.1f}s"
+
+
+def _format_rate(numerator: float, elapsed_sec: float) -> str:
+    if elapsed_sec <= 0.0:
+        return "0.0"
+    return f"{numerator / elapsed_sec:.1f}"
 
 
 def _percentile(values: list[float], pct: float) -> float:
@@ -118,7 +133,22 @@ def _parse_profile(stderr: str) -> tuple[list[dict[str, Any]], list[dict[str, An
                 if value is None:
                     row[key] = 0
                 else:
-                    row[key] = int(value) if key in {"sims", "batch", "max_depth", "paths", "eval_batches", "eval_positions"} else float(value)
+                    row[key] = int(value) if key in {
+                        "sims",
+                        "batch",
+                        "max_depth",
+                        "paths",
+                        "eval_batches",
+                        "eval_positions",
+                        "eval_cache_hits",
+                        "eval_cache_size",
+                        "selected_max_depth",
+                        "root_actions",
+                        "searched_actions",
+                        "native_unsupported_transition",
+                        "native_invalid_transition",
+                        "native_approximate_transition",
+                    } else float(value)
             search_rows.append(row)
             continue
         match = WARMUP_PATTERN.search(line)
@@ -194,6 +224,86 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def _phase_timing_rows(action_rows: list[dict[str, Any]], search_rows: list[dict[str, Any]], total_sec: float) -> list[dict[str, Any]]:
+    phases = [
+        ("choose_action.encode", [float(row["encode_ms"]) for row in action_rows], len(action_rows)),
+        ("choose_action.policy_forward", [float(row["policy_ms"]) for row in action_rows], len(action_rows)),
+        ("choose_action.mcts_search", [float(row["search_ms"]) for row in action_rows], len(action_rows)),
+        ("choose_action.total", [float(row["total_ms"]) for row in action_rows], len(action_rows)),
+        ("mcts.select", [float(row["select_ms"]) for row in search_rows], sum(int(row.get("paths", row["sims"])) for row in search_rows)),
+        ("mcts.evaluate", [float(row["eval_ms"]) for row in search_rows], sum(int(row["eval_positions"]) for row in search_rows)),
+        ("mcts.expand", [float(row["expand_ms"]) for row in search_rows], sum(int(row.get("paths", row["sims"])) for row in search_rows)),
+        ("mcts.inner_total", [float(row["total_inner_ms"]) for row in search_rows], sum(int(row.get("paths", row["sims"])) for row in search_rows)),
+    ]
+    total_ms = max(1e-9, total_sec * 1000.0)
+    rows = []
+    for name, values, items in phases:
+        cumulative_ms = sum(values)
+        calls = len(values)
+        rows.append(
+            {
+                "name": name,
+                "calls": calls,
+                "items": items,
+                "total_ms": f"{cumulative_ms:.3f}",
+                "self_ms": f"{cumulative_ms:.3f}",
+                "avg_ms": f"{cumulative_ms / max(1, calls):.3f}",
+                "pct": f"{cumulative_ms / total_ms * 100.0:.1f}",
+            }
+        )
+    return rows
+
+
+def _hotspot_rows(
+    timing_rows: list[dict[str, Any]],
+    profile_rows: list[dict[str, Any]],
+    *,
+    total_sec: float,
+    min_ms: float,
+    min_pct: float,
+    limit: int,
+) -> list[dict[str, Any]]:
+    total_ms = max(1e-9, total_sec * 1000.0)
+    rows: list[dict[str, Any]] = []
+    for row in timing_rows:
+        phase_ms = float(row["total_ms"])
+        pct = float(row["pct"])
+        if phase_ms < min_ms or pct < min_pct:
+            continue
+        rows.append(
+            {
+                "source": "phase",
+                "name": row["name"],
+                "calls": row["calls"],
+                "items": row["items"],
+                "time_ms": row["total_ms"],
+                "self_ms": row["self_ms"],
+                "pct": row["pct"],
+            }
+        )
+    for row in profile_rows:
+        name = str(row["function"])
+        if name.startswith("py\\profiling\\selfplay_mcts_nn.py:") or name.startswith("py/profiling/selfplay_mcts_nn.py:"):
+            continue
+        function_ms = float(row["cum_ms"])
+        pct = function_ms / total_ms * 100.0
+        if function_ms < min_ms or pct < min_pct:
+            continue
+        rows.append(
+            {
+                "source": "function",
+                "name": name,
+                "calls": row["calls"],
+                "items": "",
+                "time_ms": row["cum_ms"],
+                "self_ms": row["self_ms"],
+                "pct": f"{pct:.1f}",
+            }
+        )
+    rows.sort(key=lambda row: float(row["time_ms"]), reverse=True)
+    return rows[:limit]
 
 
 def _profile_rows(profile_path: Path, *, root: Path, limit: int | None = None) -> list[dict[str, Any]]:
@@ -362,8 +472,23 @@ def _game_summary(index: int, seed: int, elapsed_sec: float, returncode: int, re
     configured_sims = [float(row["sims"]) for row in search_rows]
     paths = [float(row.get("paths", row["sims"])) for row in search_rows]
     eval_positions = [float(row["eval_positions"]) for row in search_rows]
+    eval_batches = [float(row["eval_batches"]) for row in search_rows]
+    eval_cache_hits = [float(row.get("eval_cache_hits", 0)) for row in search_rows]
+    eval_cache_sizes = [float(row.get("eval_cache_size", 0)) for row in search_rows]
+    avg_depths = [float(row.get("avg_depth", 0.0)) for row in search_rows if float(row.get("paths", row["sims"])) > 0.0]
+    max_depths = [int(row.get("selected_max_depth", 0)) for row in search_rows]
+    root_entropies = [float(row.get("root_visit_entropy", 0.0)) for row in search_rows]
+    top_visit_shares = [float(row.get("top_visit_share", 0.0)) for row in search_rows]
+    root_actions = [float(row.get("root_actions", 0)) for row in search_rows]
+    searched_actions = [float(row.get("searched_actions", 0)) for row in search_rows]
+    native_unsupported = [int(row.get("native_unsupported_transition", 0)) for row in search_rows]
+    native_invalid = [int(row.get("native_invalid_transition", 0)) for row in search_rows]
+    native_approximate = [int(row.get("native_approximate_transition", 0)) for row in search_rows]
     total_configured_simulations = int(sum(configured_sims))
     total_simulations = int(sum(paths))
+    total_eval_positions = int(sum(eval_positions))
+    total_eval_batches = int(sum(eval_batches))
+    total_eval_cache_hits = int(sum(eval_cache_hits))
     fallback_count = len([line for line in stderr.splitlines() if FALLBACK_PATTERN.search(line)])
     return {
         "game": index,
@@ -385,8 +510,22 @@ def _game_summary(index: int, seed: int, elapsed_sec: float, returncode: int, re
         "total_p95_ms": _summarize(total_ms)["p95"],
         "total_max_ms": _summarize(total_ms)["max"],
         "search_profile_rows": len(search_rows),
-        "eval_positions": int(sum(eval_positions)),
+        "eval_positions": total_eval_positions,
         "eval_positions_per_sec": sum(eval_positions) / elapsed_sec if elapsed_sec > 0.0 else 0.0,
+        "eval_batches": total_eval_batches,
+        "avg_eval_batch": total_eval_positions / max(1, total_eval_batches),
+        "eval_cache_hits": total_eval_cache_hits,
+        "eval_cache_hit_rate": total_eval_cache_hits / max(1, total_eval_cache_hits + total_eval_positions),
+        "eval_cache_size_max": int(max(eval_cache_sizes, default=0.0)),
+        "avg_depth": statistics.fmean(avg_depths) if avg_depths else 0.0,
+        "max_selected_depth": max(max_depths, default=0),
+        "root_visit_entropy_mean": statistics.fmean(root_entropies) if root_entropies else 0.0,
+        "top_visit_share_mean": statistics.fmean(top_visit_shares) if top_visit_shares else 0.0,
+        "root_actions_mean": statistics.fmean(root_actions) if root_actions else 0.0,
+        "searched_actions_mean": statistics.fmean(searched_actions) if searched_actions else 0.0,
+        "native_unsupported_transition": sum(native_unsupported),
+        "native_invalid_transition": sum(native_invalid),
+        "native_approximate_transition": sum(native_approximate),
         "warmup_ms": statistics.fmean(warmup_ms) if warmup_ms else 0.0,
         "fallback_count": fallback_count,
     }
@@ -398,7 +537,7 @@ def main() -> int:
     )
     parser.add_argument("--games", type=int, default=1)
     parser.add_argument("--seed-base", type=int, default=12345)
-    parser.add_argument("--checkpoint", type=Path, default=Path("rl/checkpoints/latest.pt"))
+    parser.add_argument("--checkpoint", type=Path, default=Path("py/profiling/profiling_model.pt"))
     parser.add_argument("--device", default=None, help="Device metadata passed to the self-play wrapper. Defaults to cuda if available, otherwise cpu.")
     parser.add_argument("--output-dir", type=Path, default=Path("debug-logs/selfplay-mcts-nn-profile"))
     parser.add_argument("--workdir", type=Path, default=None)
@@ -437,6 +576,8 @@ def main() -> int:
     parser.add_argument("--function-csv", type=Path, default=None)
     parser.add_argument("--profile-stats", type=Path, default=None, help="Raw cProfile .prof output for the persistent bot process.")
     parser.add_argument("--function-limit", type=int, default=40)
+    parser.add_argument("--min-hotspot-ms", type=float, default=1.0, help="Hide timing/function rows below this cumulative millisecond threshold.")
+    parser.add_argument("--min-hotspot-pct", type=float, default=1.0, help="Hide timing/function rows below this percent-of-run threshold.")
     parser.add_argument("--jsonl", type=Path, default=None)
     args = load_config_defaults(parser)
     if args.wall_clock_per_action_seconds is None:
@@ -531,6 +672,7 @@ def main() -> int:
                 f"actions={row['actions_profiled']} actions/s={row['actions_per_sec']:.2f} "
                 f"sims/s={row['simulations_per_sec']:.1f} "
                 f"eval_pos/s={row['eval_positions_per_sec']:.1f} "
+                f"avg_depth={row['avg_depth']:.2f} entropy={row['root_visit_entropy_mean']:.2f} "
                 f"avg_ms encode={row['encode_mean_ms']:.1f} policy={row['policy_mean_ms']:.1f} "
                 f"search={row['search_mean_ms']:.1f} total={row['total_mean_ms']:.1f} "
                 f"p95_total={row['total_p95_ms']:.1f}",
@@ -554,12 +696,19 @@ def main() -> int:
     total_actions = sum(int(row["actions_profiled"]) for row in game_rows)
     total_sims = sum(int(row["simulations"]) for row in game_rows)
     total_replay_steps = sum(int(row["replay_steps"]) for row in game_rows)
+    total_eval_positions = sum(int(row["eval_positions"]) for row in game_rows)
+    total_eval_batches = sum(int(row["eval_batches"]) for row in game_rows)
+    total_eval_cache_hits = sum(int(row["eval_cache_hits"]) for row in game_rows)
+    total_native_unsupported = sum(int(row["native_unsupported_transition"]) for row in game_rows)
+    total_native_invalid = sum(int(row["native_invalid_transition"]) for row in game_rows)
+    total_native_approximate = sum(int(row["native_approximate_transition"]) for row in game_rows)
     print(
-        "\nAggregate: "
-        f"games={len(game_rows)} elapsed={_format_seconds(total_elapsed)} "
-        f"actions={total_actions} actions/s={(total_actions / total_elapsed) if total_elapsed > 0 else 0.0:.2f} "
-        f"replay_steps={total_replay_steps} "
-        f"simulations={total_sims} sims/s={(total_sims / total_elapsed) if total_elapsed > 0 else 0.0:.1f}"
+        "\nSelf-play MCTS NN profile: "
+        f"games={len(game_rows)} mode=full_selfplay sims_per_action={cfg.search.num_simulations} "
+        f"batch={cfg.search.batch_size} device={device} checkpoint={args.checkpoint} "
+        f"persistent_bot={cfg.selfplay.persistent_bot} "
+        f"map={cfg.selfplay.map_type}/{cfg.selfplay.map_size} "
+        f"max_turns={cfg.selfplay.max_turns_capitals} total_ms={total_elapsed * 1000.0:.3f}"
     )
 
     print("\nPer-game throughput")
@@ -572,6 +721,10 @@ def main() -> int:
             "actions/s": f"{row['actions_per_sec']:.2f}",
             "sims/s": f"{row['simulations_per_sec']:.1f}",
             "eval_pos/s": f"{row['eval_positions_per_sec']:.1f}",
+            "depth": f"{row['avg_depth']:.2f}",
+            "max_depth": row["max_selected_depth"],
+            "entropy": f"{row['root_visit_entropy_mean']:.2f}",
+            "top_visit": f"{row['top_visit_share_mean'] * 100.0:.1f}%",
             "encode_ms": f"{row['encode_mean_ms']:.1f}",
             "policy_ms": f"{row['policy_mean_ms']:.1f}",
             "search_ms": f"{row['search_mean_ms']:.1f}",
@@ -592,6 +745,10 @@ def main() -> int:
                 ("actions/s", "actions/s"),
                 ("sims/s", "sims/s"),
                 ("eval_pos/s", "eval_pos/s"),
+                ("depth", "depth"),
+                ("max_depth", "max_d"),
+                ("entropy", "entropy"),
+                ("top_visit", "top_visit"),
                 ("encode_ms", "enc_ms"),
                 ("policy_ms", "nn_ms"),
                 ("search_ms", "mcts_ms"),
@@ -602,7 +759,89 @@ def main() -> int:
         )
     )
 
-    timing_rows = []
+    print(
+        "\nAggregate self-play work: "
+        f"actions={total_actions} "
+        f"actions_per_sec={_format_rate(total_actions, total_elapsed)} "
+        f"replay_steps={total_replay_steps} "
+        f"replay_steps_per_sec={_format_rate(total_replay_steps, total_elapsed)} "
+        f"simulations={total_sims} "
+        f"simulations_per_sec={_format_rate(total_sims, total_elapsed)} "
+        f"eval_positions={total_eval_positions} "
+        f"eval_positions_per_sec={_format_rate(total_eval_positions, total_elapsed)} "
+        f"eval_batches={total_eval_batches} "
+        f"avg_eval_batch={total_eval_positions / max(1, total_eval_batches):.2f} "
+        f"eval_cache_hits={total_eval_cache_hits} "
+        f"eval_cache_hit_rate={total_eval_cache_hits / max(1, total_eval_cache_hits + total_eval_positions):.4f} "
+        f"native_unsupported_transition={total_native_unsupported} "
+        f"native_invalid_transition={total_native_invalid} "
+        f"native_approximate_transition={total_native_approximate}"
+    )
+
+    if all_search_rows:
+        depth_values = [float(row.get("avg_depth", 0.0)) for row in all_search_rows if int(row.get("paths", row.get("sims", 0))) > 0]
+        root_entropy_values = [float(row.get("root_visit_entropy", 0.0)) for row in all_search_rows]
+        top_visit_values = [float(row.get("top_visit_share", 0.0)) for row in all_search_rows]
+        root_action_values = [float(row.get("root_actions", 0)) for row in all_search_rows]
+        searched_action_values = [float(row.get("searched_actions", 0)) for row in all_search_rows]
+        eval_batch_values = [
+            float(row.get("eval_positions", 0)) / max(1.0, float(row.get("eval_batches", 0)))
+            for row in all_search_rows
+        ]
+        search_shape_rows = [
+            {
+                "name": "selected_depth",
+                "samples": len(depth_values),
+                "mean": f"{_summarize(depth_values)['mean']:.3f}",
+                "median": f"{_summarize(depth_values)['median']:.3f}",
+                "p95": f"{_summarize(depth_values)['p95']:.3f}",
+                "max": max((int(row.get("selected_max_depth", 0)) for row in all_search_rows), default=0),
+            },
+            {
+                "name": "root_visit_entropy",
+                "samples": len(root_entropy_values),
+                "mean": f"{_summarize(root_entropy_values)['mean']:.3f}",
+                "median": f"{_summarize(root_entropy_values)['median']:.3f}",
+                "p95": f"{_summarize(root_entropy_values)['p95']:.3f}",
+                "max": f"{max(root_entropy_values, default=0.0):.3f}",
+            },
+            {
+                "name": "top_visit_share",
+                "samples": len(top_visit_values),
+                "mean": f"{_summarize(top_visit_values)['mean']:.3f}",
+                "median": f"{_summarize(top_visit_values)['median']:.3f}",
+                "p95": f"{_summarize(top_visit_values)['p95']:.3f}",
+                "max": f"{max(top_visit_values, default=0.0):.3f}",
+            },
+            {
+                "name": "root_actions",
+                "samples": len(root_action_values),
+                "mean": f"{_summarize(root_action_values)['mean']:.3f}",
+                "median": f"{_summarize(root_action_values)['median']:.3f}",
+                "p95": f"{_summarize(root_action_values)['p95']:.3f}",
+                "max": f"{max(root_action_values, default=0.0):.0f}",
+            },
+            {
+                "name": "searched_actions",
+                "samples": len(searched_action_values),
+                "mean": f"{_summarize(searched_action_values)['mean']:.3f}",
+                "median": f"{_summarize(searched_action_values)['median']:.3f}",
+                "p95": f"{_summarize(searched_action_values)['p95']:.3f}",
+                "max": f"{max(searched_action_values, default=0.0):.0f}",
+            },
+            {
+                "name": "eval_batch_size",
+                "samples": len(eval_batch_values),
+                "mean": f"{_summarize(eval_batch_values)['mean']:.3f}",
+                "median": f"{_summarize(eval_batch_values)['median']:.3f}",
+                "p95": f"{_summarize(eval_batch_values)['p95']:.3f}",
+                "max": f"{max(eval_batch_values, default=0.0):.3f}",
+            },
+        ]
+        print("\nSearch shape")
+        print(_format_table(search_shape_rows, [("name", "name"), ("samples", "samples"), ("mean", "mean"), ("median", "median"), ("p95", "p95"), ("max", "max")]))
+
+    action_timing_rows = []
     for key, label in [
         ("encode_ms", "encode"),
         ("policy_ms", "policy_forward"),
@@ -611,7 +850,7 @@ def main() -> int:
     ]:
         values = [float(row[key]) for row in all_action_rows]
         summary = _summarize(values)
-        timing_rows.append(
+        action_timing_rows.append(
             {
                 "name": label,
                 "calls": int(summary["count"]),
@@ -623,40 +862,32 @@ def main() -> int:
             }
         )
     print("\nAction timing breakdown")
-    print(_format_table(timing_rows, [("name", "name"), ("calls", "calls"), ("mean_ms", "mean_ms"), ("median_ms", "median_ms"), ("p95_ms", "p95_ms"), ("max_ms", "max_ms"), ("pct_action_time", "% action")]))
+    print(_format_table(action_timing_rows, [("name", "name"), ("calls", "calls"), ("mean_ms", "mean_ms"), ("median_ms", "median_ms"), ("p95_ms", "p95_ms"), ("max_ms", "max_ms"), ("pct_action_time", "% action")]))
 
     all_function_rows = _profile_rows(bot_profile_path, root=workdir)
+    phase_rows = _phase_timing_rows(all_action_rows, all_search_rows, total_elapsed)
+    hotspot_rows = _hotspot_rows(
+        phase_rows,
+        all_function_rows,
+        total_sec=total_elapsed,
+        min_ms=max(0.0, float(args.min_hotspot_ms)),
+        min_pct=max(0.0, float(args.min_hotspot_pct)),
+        limit=max(1, int(args.function_limit)),
+    )
+    print(
+        "\nHotspots "
+        f"(>= {float(args.min_hotspot_ms):.3g} ms and >= {float(args.min_hotspot_pct):.3g}% of run)"
+    )
+    if hotspot_rows:
+        print(_format_table(hotspot_rows, [("source", "source"), ("name", "name"), ("calls", "calls"), ("items", "items"), ("time_ms", "time_ms"), ("self_ms", "self_ms"), ("pct", "%")]))
+    else:
+        print("No phase or function rows crossed the reporting threshold.")
+
     function_rows = all_function_rows[: max(1, int(args.function_limit))]
     project_function_rows = [
         row for row in all_function_rows
         if str(row.get("function", "")).startswith("py\\") or str(row.get("function", "")).startswith("py/")
     ][: max(1, int(args.function_limit))]
-    print("\nTop persistent-bot functions by cumulative time")
-    print(
-        _format_table(
-            function_rows,
-            [
-                ("function", "function"),
-                ("calls", "calls"),
-                ("cum_ms", "cum_ms"),
-                ("self_ms", "self_ms"),
-                ("avg_self_us", "avg_self_us"),
-            ],
-        )
-    )
-    print("\nTop project functions by cumulative time")
-    print(
-        _format_table(
-            project_function_rows,
-            [
-                ("function", "function"),
-                ("calls", "calls"),
-                ("cum_ms", "cum_ms"),
-                ("self_ms", "self_ms"),
-                ("avg_self_us", "avg_self_us"),
-            ],
-        )
-    )
 
     args.game_csv = args.game_csv or args.output_dir / "selfplay_games.csv"
     args.action_csv = args.action_csv or args.output_dir / "action_timings.csv"
@@ -675,20 +906,24 @@ def main() -> int:
                 "elapsed_sec": total_elapsed,
                 "config": _jsonable(cfg),
                 "games": game_rows,
-                "timing_summary": timing_rows,
+                "timing_summary": action_timing_rows,
+                "phase_timing_summary": phase_rows,
                 "function_profile_top": function_rows,
                 "project_function_profile_top": project_function_rows,
                 "profile_stats": str(bot_profile_path),
-                "cprofile_total_calls": sum(stat[1] for stat in profile.getstats()),
+                "cprofile_total_calls": sum(int(getattr(stat, "callcount", 0)) for stat in profile.getstats()),
             }
         ],
     )
-    print(f"\nWrote game CSV: {args.game_csv}")
-    print(f"Wrote action CSV: {args.action_csv}")
-    print(f"Wrote search CSV: {args.search_csv}")
-    print(f"Wrote function CSV: {args.function_csv}")
-    print(f"Wrote raw cProfile stats: {bot_profile_path}")
-    print(f"Wrote JSONL: {args.jsonl}")
+    print(
+        "\nCSV: "
+        f"games={args.game_csv} "
+        f"actions={args.action_csv} "
+        f"search={args.search_csv} "
+        f"functions={args.function_csv} "
+        f"profile={bot_profile_path} "
+        f"jsonl={args.jsonl}"
+    )
     return 0
 
 
