@@ -12,6 +12,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <unordered_map>
 #include <vector>
 
@@ -517,6 +518,8 @@ class NativeMCTS {
     }
     const size_t target_evaluations = static_cast<size_t>(std::max(1, frontier));
     const int batches = std::max(1, max_batches);
+    std::unordered_set<int64_t> emitted_eval_keys;
+    emitted_eval_keys.reserve(target_evaluations);
     for (int batch = 0; batch < batches; ++batch) {
       for (int i = 0; i < frontier; ++i) {
         std::vector<int> path_node_ids;
@@ -613,13 +616,17 @@ class NativeMCTS {
         const int64_t state_key =
             static_cast<int64_t>(parent_node_id) * 1000000LL +
             static_cast<int64_t>(parent_action_index);
+        const bool first_payload_for_key = emitted_eval_keys.insert(state_key).second;
+        py::object leaf_payload = first_payload_for_key
+            ? py::object(serialize_evaluation_payload(*selected_leaf_state, actions_))
+            : py::object(py::none());
         out.append(py::make_tuple(
             selection_id,
             parent_node_id,
             parent_action_index,
             state_key,
             selected_depth,
-            serialize_evaluation_payload(*selected_leaf_state, actions_)));
+            leaf_payload));
       }
       if (py::len(out) >= target_evaluations) {
         break;
