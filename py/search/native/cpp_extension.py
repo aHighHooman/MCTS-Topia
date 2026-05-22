@@ -13,7 +13,7 @@ from torch.utils.cpp_extension import load
 
 _NATIVE_MCTS_MODULE = None
 _MSVC_ENV_READY = False
-_BUILD_FLAGS_VERSION = "mcts-opt-v21-dedup-leaf-payloads"
+_BUILD_FLAGS_VERSION = "mcts-opt-v22-group-duplicate-selections"
 
 
 def _candidate_vsdevcmd_paths() -> list[Path]:

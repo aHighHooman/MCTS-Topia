@@ -45,6 +45,7 @@ struct PendingSelection {
   bool leaf_value_root_perspective = false;
   int parent_node_id = -1;
   int parent_action_index = -1;
+  int repeat_count = 1;
 };
 
 class NativeMCTS {
@@ -518,8 +519,8 @@ class NativeMCTS {
     }
     const size_t target_evaluations = static_cast<size_t>(std::max(1, frontier));
     const int batches = std::max(1, max_batches);
-    std::unordered_set<int64_t> emitted_eval_keys;
-    emitted_eval_keys.reserve(target_evaluations);
+    std::unordered_map<int64_t, int> primary_selection_by_eval_key;
+    primary_selection_by_eval_key.reserve(target_evaluations);
     for (int batch = 0; batch < batches; ++batch) {
       for (int i = 0; i < frontier; ++i) {
         std::vector<int> path_node_ids;
@@ -537,6 +538,7 @@ class NativeMCTS {
         const NativeGameState* selected_leaf_state = &states_[nodes_[0].state_index];
         const NativeGameState* selected_pending_child_state = nullptr;
         const bool unlimited_depth = max_depth <= 0;
+        bool grouped_duplicate = false;
 
         for (int depth = 0; unlimited_depth || depth < max_depth; ++depth) {
           const Node& node = nodes_[current_node_id];
@@ -556,10 +558,25 @@ class NativeMCTS {
 
           const int child_node_id = node.child_node_ids[local_action_index];
           if (child_node_id < 0) {
-            NativeGameState child_state = apply_action(state, state.legal_action_indexes[local_action_index]);
             needs_expansion = true;
             parent_node_id = current_node_id;
             parent_action_index = local_action_index;
+            const int64_t duplicate_state_key =
+                static_cast<int64_t>(parent_node_id) * 1000000LL +
+                static_cast<int64_t>(parent_action_index);
+            auto primary_it = primary_selection_by_eval_key.find(duplicate_state_key);
+            if (primary_it != primary_selection_by_eval_key.end()) {
+              const int selected_depth = static_cast<int>(path_node_ids.size());
+              last_batch_depth_sum_ += selected_depth;
+              last_batch_max_depth_ = std::max(last_batch_max_depth_, selected_depth);
+              completed_simulations += 1;
+              reserve_path_internal_unchecked(path_node_ids, path_action_indexes);
+              pending_selections_[primary_it->second].repeat_count += 1;
+              grouped_duplicate = true;
+              break;
+            }
+
+            NativeGameState child_state = apply_action(state, state.legal_action_indexes[local_action_index]);
             leaf_value = child_state.terminal ? terminal_value_for(child_state) : node.value_estimate;
             leaf_terminal = child_state.terminal;
             auto [pending_it, inserted] = pending_child_states_.insert_or_assign(
@@ -584,6 +601,10 @@ class NativeMCTS {
           if (leaf_terminal) {
             break;
           }
+        }
+
+        if (grouped_duplicate) {
+          continue;
         }
 
         const int selected_depth = static_cast<int>(path_node_ids.size());
@@ -616,17 +637,14 @@ class NativeMCTS {
         const int64_t state_key =
             static_cast<int64_t>(parent_node_id) * 1000000LL +
             static_cast<int64_t>(parent_action_index);
-        const bool first_payload_for_key = emitted_eval_keys.insert(state_key).second;
-        py::object leaf_payload = first_payload_for_key
-            ? py::object(serialize_evaluation_payload(*selected_leaf_state, actions_))
-            : py::object(py::none());
+        primary_selection_by_eval_key.emplace(state_key, selection_id);
         out.append(py::make_tuple(
             selection_id,
             parent_node_id,
             parent_action_index,
             state_key,
             selected_depth,
-            leaf_payload));
+            serialize_evaluation_payload(*selected_leaf_state, actions_)));
       }
       if (py::len(out) >= target_evaluations) {
         break;
@@ -647,12 +665,14 @@ class NativeMCTS {
         throw std::out_of_range("Selection id out of range.");
       }
       const PendingSelection& pending = pending_selections_[selection_id];
-      complete_reserved_path_internal_unchecked(
-          pending.path_node_ids,
-          pending.path_action_indexes,
-          leaf_values[i],
-          pending.leaf_active_player_id,
-          pending.leaf_value_root_perspective);
+      for (int repeat = 0; repeat < std::max(1, pending.repeat_count); ++repeat) {
+        complete_reserved_path_internal_unchecked(
+            pending.path_node_ids,
+            pending.path_action_indexes,
+            leaf_values[i],
+            pending.leaf_active_player_id,
+            pending.leaf_value_root_perspective);
+      }
       if (pending.parent_node_id >= 0 && pending.parent_action_index >= 0) {
         pending_child_states_.erase(pending_child_key(pending.parent_node_id, pending.parent_action_index));
       }
