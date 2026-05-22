@@ -90,5 +90,6 @@ python -m profiling.selfplay_mcts_nn --config py/profiling/configs/selfplay_mcts
 - External bot action ids are request-scoped. Do not persist them across requests.
 - Observation and forward-model states are player-specific hidden-information copies, not omniscient game state.
 - Do not preserve backward compatibility when updating bots, tree searches, or tests.
+- Requested functionality should become the default behavior; only add explicit flags or toggles when asked.
 - When changing encoded features, keep `ModelConfig` dimensions, `encoding.py`, model input assumptions, and related tests in sync.
 - When changing native transitions, compare against Java behavior and prefer adding focused parity coverage in `py/tests/test_native_mcts.py` or the parity runner.
