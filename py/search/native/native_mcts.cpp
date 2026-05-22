@@ -9,10 +9,10 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
-#include <map>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace py = pybind11;
@@ -135,7 +135,7 @@ class NativeMCTS {
         leaf_terminal = child_state.terminal;
         leaf_action_indexes = child_state.legal_action_indexes;
         auto [pending_it, inserted] = pending_child_states_.insert_or_assign(
-            {parent_node_id, parent_action_index},
+            pending_child_key(parent_node_id, parent_action_index),
             std::move(child_state));
         (void)inserted;
         selected_pending_child_state = &pending_it->second;
@@ -175,7 +175,7 @@ class NativeMCTS {
     if (needs_expansion) {
       const NativeGameState& child_state = selected_pending_child_state != nullptr
           ? *selected_pending_child_state
-          : pending_child_states_[{parent_node_id, parent_action_index}];
+          : pending_child_states_[pending_child_key(parent_node_id, parent_action_index)];
       out["leaf_active_player_id"] = child_state.active_player_id;
       out["leaf_payload"] = serialize_evaluation_payload(child_state, actions_);
     } else if (leaf_state_index >= 0) {
@@ -235,7 +235,7 @@ class NativeMCTS {
           leaf_value = child_state.terminal ? terminal_value_for(child_state) : node.value_estimate;
           leaf_terminal = child_state.terminal;
           auto [pending_it, inserted] = pending_child_states_.insert_or_assign(
-              {parent_node_id, parent_action_index},
+              pending_child_key(parent_node_id, parent_action_index),
               std::move(child_state));
           (void)inserted;
           selected_pending_child_state = &pending_it->second;
@@ -336,7 +336,7 @@ class NativeMCTS {
           leaf_value = child_state.terminal ? terminal_value_for(child_state) : node.value_estimate;
           leaf_terminal = child_state.terminal;
           auto [pending_it, inserted] = pending_child_states_.insert_or_assign(
-              {parent_node_id, parent_action_index},
+              pending_child_key(parent_node_id, parent_action_index),
               std::move(child_state));
           (void)inserted;
           selected_pending_child_state = &pending_it->second;
@@ -440,7 +440,7 @@ class NativeMCTS {
           leaf_value = child_state.terminal ? terminal_value_for(child_state) : node.value_estimate;
           leaf_terminal = child_state.terminal;
           auto [pending_it, inserted] = pending_child_states_.insert_or_assign(
-              {parent_node_id, parent_action_index},
+              pending_child_key(parent_node_id, parent_action_index),
               std::move(child_state));
           (void)inserted;
           selected_pending_child_state = &pending_it->second;
@@ -550,7 +550,7 @@ class NativeMCTS {
           pending.leaf_active_player_id,
           pending.leaf_value_root_perspective);
       if (pending.parent_node_id >= 0 && pending.parent_action_index >= 0) {
-        pending_child_states_.erase({pending.parent_node_id, pending.parent_action_index});
+        pending_child_states_.erase(pending_child_key(pending.parent_node_id, pending.parent_action_index));
       }
       pending_selections_[selection_id] = PendingSelection();
     }
@@ -570,7 +570,7 @@ class NativeMCTS {
       return nodes_[parent_node_id].child_node_ids[parent_action_index];
     }
     NativeGameState child_state;
-    const auto pending_key = std::make_pair(parent_node_id, parent_action_index);
+    const int64_t pending_key = pending_child_key(parent_node_id, parent_action_index);
     auto pending_it = pending_child_states_.find(pending_key);
     if (pending_it != pending_child_states_.end()) {
       child_state = std::move(pending_it->second);
@@ -795,12 +795,17 @@ class NativeMCTS {
   std::vector<int> root_action_indexes_;
   std::vector<NativeGameState> states_;
   std::vector<Node> nodes_;
-  std::map<std::pair<int, int>, NativeGameState> pending_child_states_;
+  std::unordered_map<int64_t, NativeGameState> pending_child_states_;
   std::vector<PendingSelection> pending_selections_;
   int64_t last_batch_depth_sum_ = 0;
   int last_batch_max_depth_ = 0;
   int max_actions_ = 0;
   mutable std::mt19937_64 rng_;
+
+  static int64_t pending_child_key(int parent_node_id, int parent_action_index) {
+    return (static_cast<int64_t>(parent_node_id) << 32) |
+        static_cast<uint32_t>(parent_action_index);
+  }
 
   static double terminal_value_for(const NativeGameState& state) {
     return state.terminal_value_known ? state.terminal_value : 0.0;

@@ -16,6 +16,11 @@ from nn.encoding import EncodedObservation, encode_observation, normalize_messag
 from nn.model import HybridPolicyValueNet
 from .cpp_extension import load_native_mcts_extension
 
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
+
 
 class NativeSearchUnavailable(RuntimeError):
     pass
@@ -113,14 +118,25 @@ def _native_call(fn: Any, *args: Any, **kwargs: Any) -> Any:
 
 
 def _stack_encoded(items: List[EncodedObservation]) -> EncodedObservation:
+    max_units = max((item.unit_features.shape[1] for item in items), default=0)
+    max_cities = max((item.city_features.shape[1] for item in items), default=0)
+    max_actions = max((item.action_features.shape[1] for item in items), default=0)
+
+    def pad_slots(tensor: torch.Tensor, size: int) -> torch.Tensor:
+        if tensor.shape[1] >= size:
+            return tensor
+        pad_shape = list(tensor.shape)
+        pad_shape[1] = size - tensor.shape[1]
+        return torch.cat([tensor, tensor.new_zeros(pad_shape)], dim=1)
+
     return EncodedObservation(
         board=torch.cat([item.board for item in items], dim=0),
-        unit_features=torch.cat([item.unit_features for item in items], dim=0),
-        unit_mask=torch.cat([item.unit_mask for item in items], dim=0),
-        city_features=torch.cat([item.city_features for item in items], dim=0),
-        city_mask=torch.cat([item.city_mask for item in items], dim=0),
-        action_features=torch.cat([item.action_features for item in items], dim=0),
-        action_mask=torch.cat([item.action_mask for item in items], dim=0),
+        unit_features=torch.cat([pad_slots(item.unit_features, max_units) for item in items], dim=0),
+        unit_mask=torch.cat([pad_slots(item.unit_mask, max_units) for item in items], dim=0),
+        city_features=torch.cat([pad_slots(item.city_features, max_cities) for item in items], dim=0),
+        city_mask=torch.cat([pad_slots(item.city_mask, max_cities) for item in items], dim=0),
+        action_features=torch.cat([pad_slots(item.action_features, max_actions) for item in items], dim=0),
+        action_mask=torch.cat([pad_slots(item.action_mask, max_actions) for item in items], dim=0),
         scalar_features=torch.cat([item.scalar_features for item in items], dim=0),
         action_ids=[],
     )
@@ -137,7 +153,7 @@ def _evaluate_messages(
         return []
     if belief_snapshot is not None:
         messages = [belief_snapshot.annotate_without_update(message) for message in messages]
-    encoded_items = [encode_observation(message, model_cfg) for message in messages]
+    encoded_items = [encode_observation(message, model_cfg, compact=True) for message in messages]
     batch = encoded_items[0] if len(encoded_items) == 1 else _stack_encoded(encoded_items)
     batch = batch.to(device)
     with torch.inference_mode():
@@ -322,7 +338,9 @@ def run_native_mcts(
     wall_time_budget = 0.0 if wall_time_seconds is None else max(0.0, float(wall_time_seconds))
     deadline = time.perf_counter() + wall_time_budget if wall_time_budget > 0.0 else None
     simulations_remaining = int(search_cfg.num_simulations)
-    batch_size = max(1, int(search_cfg.batch_size))
+    requested_batch_size = max(1, int(search_cfg.batch_size))
+    device_obj = torch.device(device)
+    batch_size = max(requested_batch_size, 256) if device_obj.type == "cuda" else requested_batch_size
     select_sec = 0.0
     eval_sec = 0.0
     expand_sec = 0.0

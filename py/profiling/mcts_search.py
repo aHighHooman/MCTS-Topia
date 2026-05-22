@@ -20,6 +20,8 @@ PY_ROOT = Path(__file__).resolve().parents[1]
 if str(PY_ROOT) not in sys.path:
     sys.path.insert(0, str(PY_ROOT))
 
+DEFAULT_AUTORESEARCH_CHECKPOINT = PY_ROOT / "profiling" / "mcts_search_profiling_random_init_model.pt"
+
 from nn.encoding import EncodedObservation, encode_observation
 from nn.model import HybridPolicyValueNet
 from profiling.config import load_config_defaults
@@ -143,25 +145,46 @@ def _sync_if_needed(device: torch.device | str) -> None:
         torch.cuda.synchronize(device_obj)
 
 
-def _time_call(collector: TimingCollector, name: str, fn: Callable[[], Any], *, device: torch.device | str, items: int = 0) -> tuple[Any, float]:
-    _sync_if_needed(device)
+def _time_call(
+    collector: TimingCollector,
+    name: str,
+    fn: Callable[[], Any],
+    *,
+    device: torch.device | str,
+    items: int = 0,
+    sync_cuda: bool = True,
+) -> tuple[Any, float]:
+    if sync_cuda:
+        _sync_if_needed(device)
     started_at = time.perf_counter()
     result = fn()
-    _sync_if_needed(device)
+    if sync_cuda:
+        _sync_if_needed(device)
     elapsed = time.perf_counter() - started_at
     collector.add(name, elapsed, items=items)
     return result, elapsed
 
 
 def _stack_encoded(items: list[EncodedObservation]) -> EncodedObservation:
+    max_units = max((item.unit_features.shape[1] for item in items), default=0)
+    max_cities = max((item.city_features.shape[1] for item in items), default=0)
+    max_actions = max((item.action_features.shape[1] for item in items), default=0)
+
+    def pad_slots(tensor: torch.Tensor, size: int) -> torch.Tensor:
+        if tensor.shape[1] >= size:
+            return tensor
+        pad_shape = list(tensor.shape)
+        pad_shape[1] = size - tensor.shape[1]
+        return torch.cat([tensor, tensor.new_zeros(pad_shape)], dim=1)
+
     return EncodedObservation(
         board=torch.cat([item.board for item in items], dim=0),
-        unit_features=torch.cat([item.unit_features for item in items], dim=0),
-        unit_mask=torch.cat([item.unit_mask for item in items], dim=0),
-        city_features=torch.cat([item.city_features for item in items], dim=0),
-        city_mask=torch.cat([item.city_mask for item in items], dim=0),
-        action_features=torch.cat([item.action_features for item in items], dim=0),
-        action_mask=torch.cat([item.action_mask for item in items], dim=0),
+        unit_features=torch.cat([pad_slots(item.unit_features, max_units) for item in items], dim=0),
+        unit_mask=torch.cat([pad_slots(item.unit_mask, max_units) for item in items], dim=0),
+        city_features=torch.cat([pad_slots(item.city_features, max_cities) for item in items], dim=0),
+        city_mask=torch.cat([pad_slots(item.city_mask, max_cities) for item in items], dim=0),
+        action_features=torch.cat([pad_slots(item.action_features, max_actions) for item in items], dim=0),
+        action_mask=torch.cat([pad_slots(item.action_mask, max_actions) for item in items], dim=0),
         scalar_features=torch.cat([item.scalar_features for item in items], dim=0),
         action_ids=[],
     )
@@ -189,6 +212,7 @@ def _install_timed_evaluator(collector: TimingCollector, branching: BranchingCol
                 lambda: [belief_snapshot.annotate_without_update(message) for message in messages],
                 device=device,
                 items=len(messages),
+                sync_cuda=False,
             )
             child_sec += elapsed
 
@@ -197,9 +221,10 @@ def _install_timed_evaluator(collector: TimingCollector, branching: BranchingCol
             encoded, elapsed = _time_call(
                 collector,
                 "nn_eval.encode_observation",
-                lambda message=message: encode_observation(message, model_cfg),
+                lambda message=message: encode_observation(message, model_cfg, compact=True),
                 device=device,
                 items=1,
+                sync_cuda=False,
             )
             child_sec += elapsed
             encoded_items.append(encoded)
@@ -213,6 +238,7 @@ def _install_timed_evaluator(collector: TimingCollector, branching: BranchingCol
                 lambda: _stack_encoded(encoded_items),
                 device=device,
                 items=len(encoded_items),
+                sync_cuda=False,
             )
             child_sec += elapsed
         batch, elapsed = _time_call(
@@ -288,6 +314,7 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
                 "native_tree.construct",
                 lambda: original_cls(*args, **kwargs),
                 device=device,
+                sync_cuda=False,
             )
 
         def add_root_dirichlet_noise(self, *args: Any, **kwargs: Any) -> Any:
@@ -296,6 +323,7 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
                 "native_tree.add_root_dirichlet_noise",
                 lambda: self._tree.add_root_dirichlet_noise(*args, **kwargs),
                 device=device,
+                sync_cuda=False,
             )
             return result
 
@@ -317,10 +345,8 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
 
         def select_leaf_batch_evals_only(self, *args: Any, **kwargs: Any) -> Any:
             global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_SELECTED_PATHS
-            _sync_if_needed(device)
             started_at = time.perf_counter()
             result = list(self._tree.select_leaf_batch_evals_only(*args, **kwargs))
-            _sync_if_needed(device)
             frontier = int(args[0]) if args else len(result)
             collector.add("native_tree.select_leaf_batch_evals_only", time.perf_counter() - started_at, items=frontier)
             batch_depth_sum, batch_max_depth = self._tree.last_batch_stats()
@@ -331,11 +357,9 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
 
         def select_leaf_batches_evals_only(self, *args: Any, **kwargs: Any) -> Any:
             global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_SELECTED_PATHS
-            _sync_if_needed(device)
             started_at = time.perf_counter()
             result, completed = self._tree.select_leaf_batches_evals_only(*args, **kwargs)
             result = list(result)
-            _sync_if_needed(device)
             collector.add("native_tree.select_leaf_batches_evals_only", time.perf_counter() - started_at, items=int(completed))
             batch_depth_sum, batch_max_depth = self._tree.last_batch_stats()
             _STATIC_TREE_DEPTH_SUM += int(batch_depth_sum)
@@ -350,6 +374,7 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
                 lambda: self._tree.expand(*args, **kwargs),
                 device=device,
                 items=1,
+                sync_cuda=False,
             )
             return result
 
@@ -359,6 +384,7 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
                 "native_tree.complete_selected_paths",
                 lambda: self._tree.complete_selected_paths(*args, **kwargs),
                 device=device,
+                sync_cuda=False,
             )
             return result
 
@@ -368,6 +394,7 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
                 "native_tree.root_visit_distribution",
                 lambda: self._tree.root_visit_distribution(*args, **kwargs),
                 device=device,
+                sync_cuda=False,
             )
             return result
 
@@ -378,6 +405,22 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
     return original_cls
 
 
+def _save_random_initialized_checkpoint(model: HybridPolicyValueNet, checkpoint: Path) -> None:
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = checkpoint.with_suffix(checkpoint.suffix + ".tmp")
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "metadata": {
+                "source": "profiling.mcts_search",
+                "description": "Random initialized model checkpoint used by the MCTS search profiler.",
+            },
+        },
+        tmp_path,
+    )
+    tmp_path.replace(checkpoint)
+
+
 def _load_checkpoint(model: HybridPolicyValueNet, checkpoint: Path, device: torch.device) -> bool:
     if not checkpoint.exists():
         return False
@@ -386,6 +429,33 @@ def _load_checkpoint(model: HybridPolicyValueNet, checkpoint: Path, device: torc
     model.load_state_dict(state_dict, strict=False)
     model.to(device)
     return True
+
+
+def _load_or_initialize_checkpoint(
+    model: HybridPolicyValueNet,
+    checkpoint: Path,
+    device: torch.device,
+    *,
+    allow_reinitialize: bool,
+) -> str:
+    if checkpoint.exists():
+        try:
+            _load_checkpoint(model, checkpoint, device)
+        except RuntimeError as exc:
+            if not allow_reinitialize:
+                raise
+            _save_random_initialized_checkpoint(model, checkpoint)
+            model.to(device)
+            return f"reinitialized_incompatible:{checkpoint}:{exc.__class__.__name__}"
+        return f"loaded:{checkpoint}"
+
+    if not allow_reinitialize:
+        model.to(device)
+        return f"missing_random_init:{checkpoint}"
+
+    _save_random_initialized_checkpoint(model, checkpoint)
+    model.to(device)
+    return f"initialized_missing:{checkpoint}"
 
 
 def _synthetic_payload() -> dict[str, Any]:
@@ -1239,7 +1309,7 @@ def main() -> int:
     parser.add_argument("--java-classpath", default=None, help="Optional Java classpath override for self-play capture.")
     parser.add_argument("--java-main-class", default=None, help="Optional Java main class override for self-play capture.")
 
-    parser.add_argument("--checkpoint", type=Path, default=None, help="Optional model checkpoint to load. Missing paths keep random initialization.")
+    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_AUTORESEARCH_CHECKPOINT, help="Model checkpoint used by the NN evaluator.")
     parser.add_argument("--device", default=None, help="Torch device, for example cpu or cuda. Defaults to cuda when available, otherwise cpu.")
     parser.add_argument("--simulations", type=int, default=None, help="Fixed simulations per position. If omitted, use wall-clock mode.")
     parser.add_argument("--wall-time-sec", "--walltime", type=float, default=10.0, help="Wall-clock budget per starting position. Default: 10 sec.")
@@ -1285,10 +1355,14 @@ def main() -> int:
     if args.evaluator == "nn":
         model = HybridPolicyValueNet(cfg.model).eval().to(device)
         if args.checkpoint is not None:
-            if _load_checkpoint(model, args.checkpoint, device):
-                checkpoint_status = f"loaded:{args.checkpoint}"
-            else:
-                checkpoint_status = f"missing_random_init:{args.checkpoint}"
+            checkpoint_path = Path(args.checkpoint)
+            allow_reinitialize = checkpoint_path.resolve() == DEFAULT_AUTORESEARCH_CHECKPOINT.resolve()
+            checkpoint_status = _load_or_initialize_checkpoint(
+                model,
+                checkpoint_path,
+                device,
+                allow_reinitialize=allow_reinitialize,
+            )
             model.eval()
     else:
         checkpoint_status = "static_eval"

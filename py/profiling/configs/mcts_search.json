@@ -6,7 +6,7 @@
   "selfplay_game_mode": "Capitals",
   "selfplay_map_type": "Drylands",
   "selfplay_map_size": "Tiny",
-  "checkpoint": "rl/checkpoints/latest.pt",
+  "checkpoint": "py/profiling/mcts_search_profiling_random_init_model.pt",
   "wall_time_sec": 10.0,
   "batch_size": 64,
   "repeats": 1,
