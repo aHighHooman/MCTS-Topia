@@ -630,15 +630,15 @@ def _run_native_mcts_walltime(
     device: torch.device | str,
     wall_time_sec: float,
     belief_snapshot: Any | None = None,
-    selected_path_budget: int | None = None,
+    node_budget: int | None = None,
 ) -> tuple[native_mcts.SearchResult, SearchStats]:
     extension = load_native_mcts_extension()
     if extension is None:
         raise RuntimeError("Native MCTS extension is unavailable.")
 
     started_at = time.perf_counter()
-    mode = "paths" if selected_path_budget is not None else "walltime"
-    deadline = None if selected_path_budget is not None else started_at + max(0.0, float(wall_time_sec))
+    mode = "nodes" if node_budget is not None else "walltime"
+    deadline = None if node_budget is not None else started_at + max(0.0, float(wall_time_sec))
     root_actions = list(root_payload.get("actions", []))[: model_cfg.max_actions]
     if not root_actions:
         return native_mcts.SearchResult("", 0, {}, [], 0.0), SearchStats(mode, time.perf_counter() - started_at)
@@ -695,12 +695,12 @@ def _run_native_mcts_walltime(
 
     while (
         (deadline is not None and time.perf_counter() < deadline)
-        or (selected_path_budget is not None and stats.selected_paths < selected_path_budget)
+        or (node_budget is not None and len(expanded_node_ids) < node_budget)
     ):
-        remaining_paths = None if selected_path_budget is None else max(0, selected_path_budget - stats.selected_paths)
-        if remaining_paths == 0:
+        remaining_nodes = None if node_budget is None else max(0, node_budget - len(expanded_node_ids))
+        if remaining_nodes == 0:
             break
-        frontier = batch_size if remaining_paths is None else min(batch_size, remaining_paths)
+        frontier = batch_size if remaining_nodes is None else min(batch_size, remaining_nodes)
         selections: list[Any] = []
         eval_messages: list[dict[str, Any]] = []
         eval_index_by_key: dict[Any, int] = {}
@@ -708,7 +708,7 @@ def _run_native_mcts_walltime(
         evals_only_batches = getattr(tree, "select_leaf_batches_evals_only", None)
         completed_frontier = frontier
         if evals_only_batches is not None:
-            max_batches = 128 if remaining_paths is None else 1
+            max_batches = 128 if remaining_nodes is None else 1
             raw_selections, completed_frontier = evals_only_batches(frontier, max_batches, max_depth, float(search_cfg.c_puct))
         else:
             select_leaf_batch = evals_only_batch or getattr(tree, "select_leaf_batch_compact", tree.select_leaf_batch)
@@ -843,6 +843,7 @@ def _run_native_mcts_walltime(
 
         completed_selection_ids: list[int] = []
         completed_leaf_values: list[float] = []
+        expanded_before_batch = len(expanded_node_ids)
         for selection in selections:
             if isinstance(selection, tuple):
                 (
@@ -900,6 +901,8 @@ def _run_native_mcts_walltime(
             completed_selection_ids.append(int(selection["selection_id"]))
             completed_leaf_values.append(float(leaf_value))
         tree.complete_selected_paths(completed_selection_ids, completed_leaf_values)
+        if node_budget is not None and len(expanded_node_ids) == expanded_before_batch:
+            break
 
     stats.expanded_nodes += len(expanded_node_ids)
     stats.simulations = stats.expanded_nodes
@@ -1288,7 +1291,7 @@ def _run_one_profile_case(
                 cfg.model,
                 device,
                 0.0,
-                selected_path_budget=int(cfg.search.num_simulations),
+                node_budget=int(cfg.search.num_simulations),
             )
             _add_stats(stats, run_stats)
     _sync_if_needed(device)
@@ -1335,7 +1338,7 @@ def main() -> int:
         "--simulations",
         type=int,
         default=None,
-        help="Legacy name for fixed selected-path budget per position. If omitted, use wall-clock mode.",
+        help="Fixed node-addition budget per position. If omitted, use wall-clock mode.",
     )
     parser.add_argument("--wall-time-sec", "--walltime", type=float, default=10.0, help="Wall-clock budget per starting position. Default: 10 sec.")
     parser.add_argument("--batch-size", type=int, default=64)
@@ -1503,8 +1506,8 @@ def main() -> int:
 
     print(
         f"MCTS profile: positions={len(cases)} repeats_per_position={max(1, int(args.repeats))} "
-        f"mode={'walltime' if using_walltime else 'fixed_paths'} "
-        f"selected_path_budget={'walltime' if using_walltime else cfg.search.num_simulations} "
+        f"mode={'walltime' if using_walltime else 'fixed_nodes'} "
+        f"node_budget={'walltime' if using_walltime else cfg.search.num_simulations} "
         f"wall_time_sec_per_position={args.wall_time_sec if using_walltime else 'n/a'} "
         f"batch={cfg.search.batch_size} evaluator={args.evaluator} device={device} checkpoint={checkpoint_status} "
         f"source={'synthetic' if args.synthetic else 'payload' if args.payload else args.selfplay_run_mode} "

@@ -69,18 +69,47 @@
   "Participants": [
     {
       "Type": "External",
-      "Tribe": "Xin Xi",
-      "External Command": ["python", "py/bots/strong_external_bot_v2.py"]
+      "Tribe": "Imperius",
+      "External Command": [
+        "python",
+        "py/bots/native_static_mcts_bot.py",
+        "--deterministic",
+        "--max-depth",
+        "0",
+        "--top-k-actions",
+        "128",
+        "--search-batch-size",
+        "64",
+        "--wall-clock-per-action-seconds",
+        "2"
+      ],
+      "External Startup Timeout Ms": 60000,
+      "External Action Timeout Ms": 300000,
+      "External Shutdown Timeout Ms": 30000,
+      "External Match Timeout Ms": 0,
+      "External Log Dir": "rl/gui_watch/logs/seat1"
     },
     {
       "Type": "External",
       "Tribe": "Imperius",
-      "External Command": ["python", "py/bots/simple_bot.py"]
-    },
-    {
-      "Type": "External",
-      "Tribe": "Bardur",
-      "External Command": ["python", "py/bots/random_bot.py"]
+      "External Command": [
+        "python",
+        "py/bots/native_static_mcts_bot.py",
+        "--deterministic",
+        "--max-depth",
+        "0",
+        "--top-k-actions",
+        "128",
+        "--search-batch-size",
+        "64",
+        "--wall-clock-per-action-seconds",
+        "2"
+      ],
+      "External Startup Timeout Ms": 60000,
+      "External Action Timeout Ms": 300000,
+      "External Shutdown Timeout Ms": 30000,
+      "External Match Timeout Ms": 0,
+      "External Log Dir": "rl/gui_watch/logs/seat1"
     }
   ]
 }

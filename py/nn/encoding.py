@@ -94,6 +94,10 @@ ACTION_TYPES = [
     "UPGRADE_SCOUT",
     "UPGRADE_BOMBER",
 ]
+ACTION_TYPE_ALIASES = {
+    "GATHER": "RESOURCE_GATHERING",
+    "RESEARCH": "RESEARCH_TECH",
+}
 TECH_TYPES = [
     "CLIMBING",
     "FISHING",
@@ -866,12 +870,14 @@ def _normalize_tribe(tribe: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _normalize_action(action: Dict[str, Any]) -> Dict[str, Any]:
-    if "type" in action:
-        return action
     out = dict(action)
     index = int(out.get("i", 0) or 0)
     out.setdefault("id", f"A{index}")
     out.setdefault("type", out.get("t"))
+    if out.get("type") in ACTION_TYPE_ALIASES:
+        out["type"] = ACTION_TYPE_ALIASES[str(out["type"])]
+    if out.get("t") in ACTION_TYPE_ALIASES:
+        out["t"] = out["type"]
     out.setdefault("unit_id", out.get("u", 0))
     out.setdefault("city_id", out.get("c", 0))
     out.setdefault("tribe_id", out.get("p", 0))
