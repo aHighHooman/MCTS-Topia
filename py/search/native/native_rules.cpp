@@ -1454,6 +1454,81 @@ std::string attacked_status_after(const NativeUnit& unit) {
   return "FINISHED";
 }
 
+
+bool heal_others_target_exists(const NativeGameState& state, const NativeUnit& healer) {
+  if (healer.type != "MIND_BENDER" || !unit_can_attack(healer)) {
+    return false;
+  }
+  const int radius = healer.range;
+  for (int x = healer.x - radius; x <= healer.x + radius; ++x) {
+    for (int y = healer.y - radius; y <= healer.y + radius; ++y) {
+      if ((x == healer.x && y == healer.y) || x < 0 || y < 0 ||
+          x >= state.board_size || y >= state.board_size) {
+        continue;
+      }
+      const NativeTile* tile = tile_at(const_cast<NativeGameState&>(state), x, y);
+      if (tile == nullptr || tile->unit_id <= 0) {
+        continue;
+      }
+      const NativeUnit* target = unit_by_id(const_cast<NativeGameState&>(state), tile->unit_id);
+      if (target != nullptr && target->tribe_id == healer.tribe_id &&
+          target->current_hp < target->max_hp) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool apply_heal_others(NativeGameState& next, const NativeAction& action) {
+  const int unit_id = action_int(action, "unit_id", "u", 0);
+  NativeUnit* healer = unit_by_id(next, unit_id);
+  if (healer == nullptr || healer->type != "MIND_BENDER" || !unit_can_attack(*healer)) {
+    return false;
+  }
+
+  constexpr int kMindBenderHeal = 4;
+  const int radius = healer->range;
+  bool healed_any = false;
+
+  for (int x = healer->x - radius; x <= healer->x + radius; ++x) {
+    for (int y = healer->y - radius; y <= healer->y + radius; ++y) {
+      if ((x == healer->x && y == healer->y) || x < 0 || y < 0 ||
+          x >= next.board_size || y >= next.board_size) {
+        continue;
+      }
+      NativeTile* tile = tile_at(next, x, y);
+      if (tile == nullptr || tile->unit_id <= 0) {
+        continue;
+      }
+      NativeUnit* target = unit_by_id(next, tile->unit_id);
+      if (target == nullptr || target->tribe_id != healer->tribe_id ||
+          target->current_hp >= target->max_hp) {
+        continue;
+      }
+      target->current_hp_exact = std::min<double>(
+          static_cast<double>(target->max_hp),
+          target->current_hp_exact + static_cast<double>(kMindBenderHeal));
+      target->current_hp = static_cast<int>(target->current_hp_exact);
+      set_unit_payload_field(next, target->id, "current_hp", "hp", py::int_(target->current_hp));
+      set_unit_payload_field(next, target->id, "current_hp_exact", "hpx", py::float_(target->current_hp_exact));
+      healed_any = true;
+    }
+  }
+
+  if (!healed_any) {
+    return false;
+  }
+
+  healer = unit_by_id(next, unit_id);
+  if (healer == nullptr) {
+    return false;
+  }
+  healer->status = attacked_status_after(*healer);
+  set_unit_payload_field(next, healer->id, "status", "s", py::str(healer->status));
+  return true;
+}
+
 void sync_all_tiles_to_payload(NativeGameState& state) {
   for (const NativeTile& tile : state.tiles) {
     sync_tile_to_payload(state, tile);
@@ -1715,6 +1790,18 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
         append_generated_action(state, actions, max_actions, std::move(convert));
       }
     }
+  }
+
+  if (unit.type == "MIND_BENDER" && heal_others_target_exists(state, unit)) {
+    NativeAction heal;
+    heal.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
+        ":u" + std::to_string(unit.id) + ":heal_others";
+    heal.type = "HEAL_OTHERS";
+    heal.unit_id = unit.id;
+    heal.payload = py::dict();
+    heal.payload["tribe_id"] = state.active_player_id;
+    heal.payload["p"] = state.active_player_id;
+    append_generated_action(state, actions, max_actions, std::move(heal));
   }
 
   if (unit_is_fresh(unit) && has_tech(*tribe, "FREE_SPIRIT")) {
@@ -3937,6 +4024,8 @@ NativeGameState apply_action_strict(
     applied_ok = apply_attack(next, applied);
   } else if (type == "CONVERT") {
     applied_ok = apply_convert(next, applied);
+  } else if (type == "HEAL_OTHERS") {
+    applied_ok = apply_heal_others(next, applied);
   } else if (type == "EXAMINE") {
     applied_ok = apply_examine(next, applied);
   } else if (type == "RECOVER") {
