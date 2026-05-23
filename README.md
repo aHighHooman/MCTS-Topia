@@ -179,7 +179,7 @@ Example shape:
     {
       "Type": "External",
       "Tribe": "Xin Xi",
-      "External Command": ["python", "py/bots/strong_external_bot_v2.py"]
+      "External Command": ["python", "py/bots/native_static_mcts_bot.py"]
     },
     {
       "Type": "External",

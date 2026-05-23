@@ -150,35 +150,38 @@ def _load_checkpoint(model: HybridPolicyValueNet, checkpoint_path: Path, optimiz
 
 
 def _append_metrics(path: Path, row: Dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    row_keys = list(row.keys())
-    if not path.exists() or path.stat().st_size == 0:
-        with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=row_keys)
-            writer.writeheader()
-            writer.writerow(row)
-        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row_keys = list(row.keys())
+        if not path.exists() or path.stat().st_size == 0:
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=row_keys)
+                writer.writeheader()
+                writer.writerow(row)
+            return
 
-    with path.open("r", newline="", encoding="utf-8", errors="replace") as handle:
-        reader = csv.DictReader(handle, restkey="_extra")
-        existing_rows = list(reader)
-        fieldnames = list(reader.fieldnames or [])
+        with path.open("r", newline="", encoding="utf-8", errors="replace") as handle:
+            reader = csv.DictReader(handle, restkey="_extra")
+            existing_rows = list(reader)
+            fieldnames = list(reader.fieldnames or [])
 
-    missing_keys = [key for key in row_keys if key not in fieldnames]
-    if missing_keys:
-        fieldnames.extend(missing_keys)
-        for existing in existing_rows:
-            existing.pop("_extra", None)
-        with path.open("w", newline="", encoding="utf-8") as handle:
+        missing_keys = [key for key in row_keys if key not in fieldnames]
+        if missing_keys:
+            fieldnames.extend(missing_keys)
+            for existing in existing_rows:
+                existing.pop("_extra", None)
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows(existing_rows)
+                writer.writerow(row)
+            return
+
+        with path.open("a", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
-            writer.writerows(existing_rows)
             writer.writerow(row)
-        return
-
-    with path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writerow(row)
+    except Exception as exc:
+        print(f"[metrics] warning: failed to append to metrics CSV {path}: {exc}", flush=True)
 
 
 def _append_selfplay_game_metrics(path: Path, row: Dict[str, object]) -> None:
@@ -254,8 +257,17 @@ def _summarize_records(records: List[StepRecord]) -> Dict[str, object]:
 
 def _summarize_replay_shards(replay_store: ReplayStore, shard_paths: List[Path]) -> Dict[str, object]:
     records: list[StepRecord] = []
-    wins = losses = draws = 0
-    adjudicated_games = adjudication_wins = adjudication_draws = adjudication_failed = 0
+    seen_games = set()
+    adjudicated_games_set = set()
+    adjudication_failed_set = set()
+
+    decisive = 0
+    draws = 0
+    adjudicated_games = 0
+    adjudication_decisive = 0
+    adjudication_draws = 0
+    adjudication_failed = 0
+
     for shard in shard_paths:
         try:
             _, shard_records = replay_store._load_shard(shard)
@@ -264,31 +276,49 @@ def _summarize_replay_shards(replay_store: ReplayStore, shard_paths: List[Path])
         records.extend(shard_records)
         if not shard_records:
             continue
-        player_id = int(shard_records[0].player_id)
         outcome = shard_records[-1].outcome or {}
-        if bool(outcome.get("adjudicated")):
-            adjudicated_games += 1
-            if bool(outcome.get("adjudication_failed")):
-                adjudication_failed += 1
         winner_id = outcome.get("winner_id")
-        if winner_id is None:
-            draws += 1
-            if bool(outcome.get("adjudicated")):
-                adjudication_draws += 1
-        elif int(winner_id) == player_id:
-            wins += 1
-            if bool(outcome.get("adjudicated")):
-                adjudication_wins += 1
+        final_scores = outcome.get("final_scores")
+
+        if isinstance(final_scores, list):
+            scores_key = tuple(sorted(
+                (int(item.get("id", 0)), int(item.get("score", 0)))
+                for item in final_scores if isinstance(item, dict)
+            ))
         else:
-            losses += 1
+            scores_key = (shard.name,)
+
+        game_key = (scores_key, winner_id)
+
+        if game_key not in seen_games:
+            seen_games.add(game_key)
+            if winner_id is None:
+                draws += 1
+            else:
+                decisive += 1
+
+        if bool(outcome.get("adjudicated")):
+            if game_key not in adjudicated_games_set:
+                adjudicated_games_set.add(game_key)
+                adjudicated_games += 1
+                if winner_id is None:
+                    adjudication_draws += 1
+                else:
+                    adjudication_decisive += 1
+            if bool(outcome.get("adjudication_failed")):
+                if game_key not in adjudication_failed_set:
+                    adjudication_failed_set.add(game_key)
+                    adjudication_failed += 1
+
     summary = _summarize_records(records)
-    summary["wins"] = wins
-    summary["losses"] = losses
+    summary["decisive"] = decisive
     summary["draws"] = draws
     summary["adjudicated_games"] = adjudicated_games
-    summary["adjudication_wins"] = adjudication_wins
+    summary["adjudication_decisive"] = adjudication_decisive
     summary["adjudication_draws"] = adjudication_draws
     summary["adjudication_failed"] = adjudication_failed
+    summary.pop("wins", None)
+    summary.pop("losses", None)
     return summary
 
 
@@ -629,11 +659,10 @@ def _selfplay_game_row(
         "static_policy_weight": float(summary.get("static_policy_weight", 0.0) or 0.0),
         "static_value_weight": float(summary.get("static_value_weight", 0.0) or 0.0),
         "profile_actions": profile_actions,
-        "wins": int(summary.get("wins", 0) or 0) if exact_summary else "",
-        "losses": int(summary.get("losses", 0) or 0) if exact_summary else "",
+        "decisive": int(summary.get("decisive", 0) or 0) if exact_summary else "",
         "draws": int(summary.get("draws", 0) or 0) if exact_summary else "",
         "adjudicated_games": int(summary.get("adjudicated_games", 0) or 0) if exact_summary else "",
-        "adjudication_wins": int(summary.get("adjudication_wins", 0) or 0) if exact_summary else "",
+        "adjudication_decisive": int(summary.get("adjudication_decisive", 0) or 0) if exact_summary else "",
         "adjudication_draws": int(summary.get("adjudication_draws", 0) or 0) if exact_summary else "",
         "adjudication_failed": int(summary.get("adjudication_failed", 0) or 0) if exact_summary else "",
         "shards": shard_count,
@@ -1023,8 +1052,8 @@ def train(cfg: HybridAgentConfig, *, device: torch.device, iterations: int | Non
             flush=True,
         )
         iteration_action_counts: Counter[str] = Counter()
-        iteration_wins = iteration_losses = iteration_draws = 0
-        iteration_adjudicated = iteration_adjudication_wins = iteration_adjudication_draws = iteration_adjudication_failed = 0
+        iteration_decisive = iteration_draws = 0
+        iteration_adjudicated = iteration_adjudication_decisive = iteration_adjudication_draws = iteration_adjudication_failed = 0
         iteration_adjudication_sec = 0.0
         iteration_profile_actions = 0.0
         before_iteration_shards = set(replay_store.shards())
@@ -1080,11 +1109,10 @@ def train(cfg: HybridAgentConfig, *, device: torch.device, iterations: int | Non
             profile_summary = _profile_summary(result.stderr)
             iteration_profile_actions += float(profile_summary.get("profile_actions", 0.0))
             iteration_action_counts.update(game_summary.get("actions", {}))
-            iteration_wins += int(game_summary["wins"])
-            iteration_losses += int(game_summary["losses"])
+            iteration_decisive += int(game_summary["decisive"])
             iteration_draws += int(game_summary["draws"])
             iteration_adjudicated += int(game_summary.get("adjudicated_games", 0) or 0)
-            iteration_adjudication_wins += int(game_summary.get("adjudication_wins", 0) or 0)
+            iteration_adjudication_decisive += int(game_summary.get("adjudication_decisive", 0) or 0)
             iteration_adjudication_draws += int(game_summary.get("adjudication_draws", 0) or 0)
             iteration_adjudication_failed += int(game_summary.get("adjudication_failed", 0) or 0)
             iteration_adjudication_sec += _adjudication_seconds(result.stdout)
@@ -1109,14 +1137,14 @@ def train(cfg: HybridAgentConfig, *, device: torch.device, iterations: int | Non
             ag = int(game_summary.get("adjudicated_games", 0) or 0)
             if ag:
                 adj_note = (
-                    f" adjudication(shards={ag} failed={int(game_summary.get('adjudication_failed', 0) or 0)} "
-                    f"adj_wins={int(game_summary.get('adjudication_wins', 0) or 0)})"
+                    f" adjudication(games={ag} failed={int(game_summary.get('adjudication_failed', 0) or 0)} "
+                    f"adj_decisive={int(game_summary.get('adjudication_decisive', 0) or 0)})"
                 )
             print(
                 f"[game {game_idx + 1}/{games}] done time={_format_seconds(elapsed)} "
                 f"steps={game_summary['steps']} shards=+{len(game_result['new_shards'])} "
                 f"ended={_match_end_reason(result.stdout, result.stderr)} "
-                f"outcomes W/L/D={game_summary['wins']}/{game_summary['losses']}/{game_summary['draws']}"
+                f"outcomes decisive/draw={game_summary['decisive']}/{game_summary['draws']}"
                 f"{adj_note} "
                 f"actions {_format_action_counts(game_summary)}"
                 f"{_format_profile(profile_summary)}",
@@ -1169,7 +1197,7 @@ def train(cfg: HybridAgentConfig, *, device: torch.device, iterations: int | Non
             f"fresh_train_records={len(current_train_records)} old_train_records={old_replay_records} "
             f"total_train_records={len(training_records)} "
             f"iteration_actions {_format_action_counts({'actions': dict(iteration_action_counts)})} "
-            f"outcomes W/L/D={iteration_wins}/{iteration_losses}/{iteration_draws}",
+            f"outcomes decisive/draw={iteration_decisive}/{iteration_draws}",
             flush=True,
         )
         training_started_at = time.monotonic()
@@ -1202,11 +1230,10 @@ def train(cfg: HybridAgentConfig, *, device: torch.device, iterations: int | Non
             "replay_steps": replay_store.step_count(),
             "replay_shards": count_replay_shards(cfg.replay.replay_dir),
             "games_completed": len(game_results),
-            "wins": iteration_wins,
-            "losses": iteration_losses,
+            "decisive": iteration_decisive,
             "draws": iteration_draws,
             "adjudicated_games": iteration_adjudicated,
-            "adjudication_wins": iteration_adjudication_wins,
+            "adjudication_decisive": iteration_adjudication_decisive,
             "adjudication_draws": iteration_adjudication_draws,
             "adjudication_failed": iteration_adjudication_failed,
             "adjudication_sec": iteration_adjudication_sec,
@@ -1302,7 +1329,9 @@ def main() -> None:
     if args.replay_batch_size is not None:
         cfg.training.replay_batch_size = args.replay_batch_size
     if args.replay_dir is not None:
-        cfg.replay.replay_dir = args.replay_dir
+        cfg.replay.replay_dir = args.replay_dir.resolve()
+    else:
+        cfg.replay.replay_dir = cfg.replay.replay_dir.resolve()
     if args.checkpoint is not None:
         cfg.training.checkpoint_path = args.checkpoint
     if args.max_turns_capitals is not None:

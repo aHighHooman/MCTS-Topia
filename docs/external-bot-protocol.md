@@ -201,5 +201,3 @@ A minimal Python example lives at [random_bot.py](/C:/Users/Umair/OneDrive/Deskt
 
 A more strategy-shaped Python example is available at [simple_bot.py](/C:/Users/Umair/OneDrive/Desktop/Work/Self_Projects/Tribes_MCTS/py/bots/simple_bot.py:1).
 
-A forward-model example that does a small lookahead tree search over request-scoped simulation states
-is available at [forward_model_tree_bot.py](/C:/Users/Umair/OneDrive/Desktop/Work/Self_Projects/Poly/Tribes/py/bots/forward_model_tree_bot.py:1).

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -24,9 +25,17 @@ def main() -> None:
     parser.add_argument("--static-policy-weight", type=float, default=None)
     parser.add_argument("--static-value-weight", type=float, default=None)
     parser.add_argument("--max-game-actions", type=int, default=None)
+    parser.add_argument("--max-actions", type=int, default=None)
     parser.add_argument("--wall-clock-per-action-seconds", type=float, default=None)
     parser.add_argument("--wall-clock-per-turn-seconds", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--deterministic", action="store_true")
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--static-eval-variant", choices=("baseline", "tuned"), default=None)
+    parser.add_argument(
+        "--static-only-bootstrap",
+        action="store_true",
+        help="Use native static-eval MCTS while keeping HybridRLBot replay recording; skips NN init/warmup/forward passes.",
+    )
     args = parser.parse_args()
 
     cfg = HybridAgentConfig()
@@ -44,6 +53,15 @@ def main() -> None:
         cfg.search.static_value_weight = max(0.0, min(1.0, float(args.static_value_weight)))
     if args.max_game_actions is not None:
         cfg.selfplay.max_actions_per_game = args.max_game_actions
+    if args.max_actions is not None:
+        cfg.model.max_actions = int(args.max_actions)
+    if args.seed is not None:
+        # SearchConfig may not declare seed as a dataclass field, but the native
+        # search wrappers read it with getattr(..., "seed", ...), so attaching it
+        # here is intentional and compatible.
+        cfg.search.seed = int(args.seed)
+    if args.static_eval_variant is not None:
+        os.environ["TRIBES_STATIC_EVAL_VARIANT"] = args.static_eval_variant
     wall_clock_per_action = args.wall_clock_per_action_seconds
     if wall_clock_per_action is None:
         wall_clock_per_action = args.wall_clock_per_turn_seconds
@@ -52,8 +70,15 @@ def main() -> None:
     if args.deterministic:
         cfg.search.sample_action = False
         cfg.search.root_temperature = 1e-6
+        cfg.search.dirichlet_epsilon = 0.0
 
-    bot = HybridRLBot(cfg, args.checkpoint, args.replay_dir)
+    bot = HybridRLBot(
+        cfg,
+        args.checkpoint,
+        args.replay_dir,
+        warmup=not args.static_only_bootstrap,
+        static_only_bootstrap=args.static_only_bootstrap,
+    )
     while True:
         try:
             raw_line = input()
