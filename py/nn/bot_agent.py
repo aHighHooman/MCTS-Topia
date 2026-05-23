@@ -15,7 +15,7 @@ from search.config import HybridAgentConfig
 from search.device import require_cuda_device
 from .encoding import EncodedObservation, encode_observation, normalize_message
 from .model import HybridPolicyValueNet
-from search.native import NativeSearchUnavailable, run_native_mcts
+from search.native import NativeSearchUnavailable, run_native_hybrid_mcts, run_native_mcts
 from search.native.cpp_extension import load_native_mcts_extension
 from search.native.mcts import NativeSearchParityError, SearchResult
 from training.replay import (
@@ -194,7 +194,13 @@ class HybridRLBot:
             raise NativeSearchParityError(
                 f"Invalid native MCTS search budget {search_budget}; refusing to bypass search."
             )
-        result = run_native_mcts(
+        search_fn = (
+            run_native_hybrid_mcts
+            if float(getattr(self.config.search, "static_policy_weight", 0.0) or 0.0) > 0.0
+            or float(getattr(self.config.search, "static_value_weight", 0.0) or 0.0) > 0.0
+            else run_native_mcts
+        )
+        result = search_fn(
             message,
             self.model,
             self.config.search,
@@ -249,6 +255,8 @@ class HybridRLBot:
                 tick=int(message["observation"].get("tick", 0)),
                 turn_index=self.turn_index,
                 turn_step_index=self.turn_step_index,
+                static_policy_weight=float(getattr(self.config.search, "static_policy_weight", 0.0) or 0.0),
+                static_value_weight=float(getattr(self.config.search, "static_value_weight", 0.0) or 0.0),
             )
         )
         self.turn_step_index += 1

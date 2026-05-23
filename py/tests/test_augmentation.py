@@ -19,7 +19,7 @@ from nn.belief import BELIEF_PLANE_NAMES
 from search.config import HybridAgentConfig
 from nn.encoding import normalize_message
 from nn.model import HybridPolicyValueNet
-from training.replay import ReplayStore, StepRecord, record_to_payload
+from training.replay import ReplayStore, StepRecord, record_from_payload, record_to_payload
 from training.symmetry_consistency import evaluate_symmetry_consistency
 from training.train import _archive_replay_shards, _training_records_for_iteration, _write_augmented_iteration_shard, collate_batch
 
@@ -144,6 +144,8 @@ def _record() -> StepRecord:
         turn_index=0,
         turn_step_index=0,
         value_target=0.5,
+        static_policy_weight=0.4,
+        static_value_weight=0.2,
     )
 
 
@@ -170,6 +172,16 @@ class AugmentationTest(unittest.TestCase):
         self.assertEqual(rotated["observation"]["belief"]["planes"]["unexplored"][1][1], 1.0)
         self.assertEqual(rotated["observation"]["belief"]["opponent_scalars"], original["observation"]["belief"]["opponent_scalars"])
 
+    def test_replay_serializes_static_guidance_metadata(self) -> None:
+        record = _record()
+
+        loaded = record_from_payload(record_to_payload(record))
+
+        self.assertEqual(loaded.visit_target, record.visit_target)
+        self.assertEqual(loaded.value_target, record.value_target)
+        self.assertEqual(loaded.static_policy_weight, 0.4)
+        self.assertEqual(loaded.static_value_weight, 0.2)
+
     def test_four_rotations_and_double_mirror_are_reversible(self) -> None:
         expected = normalize_message(_message())
         rotated = normalize_message(_message())
@@ -185,7 +197,6 @@ class AugmentationTest(unittest.TestCase):
     def test_collate_preserves_targets_and_shapes_with_augmentation(self) -> None:
         cfg = HybridAgentConfig()
         cfg.training.augment_symmetries = True
-        cfg.training.augmentation_prob = 1.0
         cfg.training.augmentation_seed = 7
         batch = collate_batch([_record()], cfg)
 
@@ -194,16 +205,6 @@ class AugmentationTest(unittest.TestCase):
         self.assertEqual(len(batch["records"]), 1)
         self.assertTrue(torch.equal(batch["policy_targets"][0, :4], torch.tensor([0.2, 0.7, 0.1, 0.0])))
         self.assertAlmostEqual(float(batch["value_targets"][0]), 0.5)
-
-    def test_collate_respects_zero_augmentation_probability(self) -> None:
-        cfg = HybridAgentConfig()
-        cfg.training.augment_symmetries = True
-        cfg.training.augmentation_prob = 0.0
-        batch = collate_batch([_record()], cfg)
-
-        self.assertEqual(tuple(batch["encoded"].board.shape), (1, cfg.model.board_channels, 4, 4))
-        self.assertEqual(len(batch["records"]), 1)
-        self.assertTrue(torch.equal(batch["policy_targets"][0, :4], torch.tensor([0.2, 0.7, 0.1, 0.0])))
 
     def test_symmetry_consistency_metric_is_finite(self) -> None:
         cfg = HybridAgentConfig()

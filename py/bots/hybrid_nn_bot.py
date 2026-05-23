@@ -21,6 +21,8 @@ def main() -> None:
     parser.add_argument("--max-depth", type=int, default=None)
     parser.add_argument("--top-k-actions", type=int, default=None)
     parser.add_argument("--search-batch-size", type=int, default=None)
+    parser.add_argument("--static-policy-weight", type=float, default=None)
+    parser.add_argument("--static-value-weight", type=float, default=None)
     parser.add_argument("--max-game-actions", type=int, default=None)
     parser.add_argument("--wall-clock-per-action-seconds", type=float, default=None)
     parser.add_argument("--wall-clock-per-turn-seconds", type=float, default=None, help=argparse.SUPPRESS)
@@ -36,6 +38,10 @@ def main() -> None:
         cfg.search.top_k_actions = args.top_k_actions
     if args.search_batch_size is not None:
         cfg.search.batch_size = args.search_batch_size
+    if args.static_policy_weight is not None:
+        cfg.search.static_policy_weight = max(0.0, min(1.0, float(args.static_policy_weight)))
+    if args.static_value_weight is not None:
+        cfg.search.static_value_weight = max(0.0, min(1.0, float(args.static_value_weight)))
     if args.max_game_actions is not None:
         cfg.selfplay.max_actions_per_game = args.max_game_actions
     wall_clock_per_action = args.wall_clock_per_action_seconds

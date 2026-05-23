@@ -337,7 +337,7 @@ def run_native_mcts(
     max_depth = -1 if int(search_cfg.max_depth) <= 0 else int(search_cfg.max_depth)
     wall_time_budget = 0.0 if wall_time_seconds is None else max(0.0, float(wall_time_seconds))
     deadline = time.perf_counter() + wall_time_budget if wall_time_budget > 0.0 else None
-    simulations_remaining = int(search_cfg.num_simulations)
+    simulation_budget = max(0, int(search_cfg.num_simulations))
     batch_size = max(1, int(search_cfg.batch_size))
     select_sec = 0.0
     eval_sec = 0.0
@@ -352,11 +352,11 @@ def run_native_mcts(
     max_selected_depth = 0
     telemetry = _SearchTelemetry()
 
-    while (deadline is not None and time.perf_counter() < deadline) or (deadline is None and simulations_remaining > 0):
+    while (deadline is not None and time.perf_counter() < deadline) or (deadline is None and len(expanded_node_ids) < simulation_budget):
         if deadline is not None:
             frontier = batch_size
         else:
-            frontier = min(batch_size, simulations_remaining)
+            frontier = min(batch_size, max(1, simulation_budget - len(expanded_node_ids)))
         selections: List[Any] = []
         eval_messages: List[Dict[str, Any]] = []
         eval_index_by_key: Dict[Any, int] = {}
@@ -489,6 +489,7 @@ def run_native_mcts(
         expand_started_at = time.perf_counter()
         completed_selection_ids: List[int] = []
         completed_leaf_values: List[float] = []
+        expanded_before_batch = len(expanded_node_ids)
         for selection in selections:
             if isinstance(selection, tuple):
                 (
@@ -536,9 +537,9 @@ def run_native_mcts(
             completed_leaf_values.append(float(leaf_value))
         _native_call(tree.complete_selected_paths, completed_selection_ids, completed_leaf_values)
         expand_sec += time.perf_counter() - expand_started_at
-        if deadline is None:
-            simulations_remaining -= int(completed_frontier) if evals_only_batch is not None else frontier
-        elif completed_frontier <= 0 and not selections:
+        if deadline is None and len(expanded_node_ids) == expanded_before_batch:
+            break
+        if deadline is not None and completed_frontier <= 0 and not selections:
             break
 
     if selected_paths <= 0:

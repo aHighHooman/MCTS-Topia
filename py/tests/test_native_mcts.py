@@ -22,7 +22,8 @@ from nn.encoding import (
     normalize_message,
 )
 from nn.model import HybridPolicyValueNet
-from search.native import run_native_mcts, run_native_static_mcts
+from search.native import run_native_hybrid_mcts, run_native_mcts, run_native_static_mcts
+from search.native.hybrid_mcts import _Evaluation, _mix_evaluation
 from search.native.cpp_extension import load_native_mcts_extension
 from search.native.mcts import NativeSearchParityError, _apply_end_turn_visit_guard, _message_cache_key, _root_priors
 
@@ -913,6 +914,42 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertGreater(priors[0], priors[2])
         self.assertGreater(priors[1], priors[2])
+
+    def test_hybrid_eval_zero_weights_matches_nn(self) -> None:
+        nn_eval = _Evaluation([0.8, 0.2], 0.25)
+        static_eval = _Evaluation([0.1, 0.9], -0.75)
+
+        mixed = _mix_evaluation(nn_eval, static_eval, 0.0, 0.0)
+
+        self.assertAlmostEqual(mixed.priors[0], 0.8, places=6)
+        self.assertAlmostEqual(mixed.priors[1], 0.2, places=6)
+        self.assertAlmostEqual(mixed.value, 0.25, places=6)
+
+    def test_hybrid_eval_static_weights_bias_policy_and_value(self) -> None:
+        nn_eval = _Evaluation([0.8, 0.2], 0.25)
+        static_eval = _Evaluation([0.1, 0.9], -0.75)
+
+        mixed = _mix_evaluation(nn_eval, static_eval, 1.0, 1.0)
+
+        self.assertAlmostEqual(sum(mixed.priors), 1.0, places=6)
+        self.assertLess(mixed.priors[0], nn_eval.priors[0])
+        self.assertGreater(mixed.priors[1], nn_eval.priors[1])
+        self.assertAlmostEqual(mixed.value, -0.75, places=6)
+
+    def test_native_hybrid_mcts_smoke(self) -> None:
+        cfg = HybridAgentConfig()
+        cfg.search.num_simulations = 8
+        cfg.search.batch_size = 4
+        cfg.search.sample_action = False
+        cfg.search.dirichlet_epsilon = 0.0
+        cfg.search.static_policy_weight = 1.0
+        cfg.search.static_value_weight = 1.0
+        model = HybridPolicyValueNet(cfg.model).eval()
+
+        res = run_native_hybrid_mcts(_message(), model, cfg.search, cfg.model, "cpu")
+
+        self.assertIn(res.action_id, {"end", "spawn", "road"})
+        self.assertAlmostEqual(sum(res.visit_target), 1.0, places=6)
 
     def test_native_tree_simulates_village_capture(self) -> None:
         extension = load_native_mcts_extension()
