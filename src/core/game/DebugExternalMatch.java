@@ -24,7 +24,7 @@ public final class DebugExternalMatch {
         long agentSeed = Long.parseLong(args[2]);
 
         ArrayList<Agent> players = new ArrayList<>();
-        players.add(new ExternalProcessAgent(agentSeed, new ArrayList<>(Arrays.asList("python", "py/bots/strong_external_bot_v2.py"))));
+        players.add(new ExternalProcessAgent(agentSeed, new ArrayList<>(Arrays.asList("python", "py/bots/native_static_mcts_bot.py"))));
         players.add(new ExternalProcessAgent(agentSeed, new ArrayList<>(Arrays.asList("python", "py/bots/simple_bot.py"))));
 
         Constants.VISUALS = false;

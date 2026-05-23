@@ -26,6 +26,9 @@ public class Board {
     // Array for resource each tile of the board will have
     private Types.RESOURCE[][] resources;
 
+    // Array for the tribe biome that generated each tile's terrain/resource distribution.
+    private Types.TRIBE[][] biomeOwners;
+
     // Array for buildings each tile of the board will have
     private Types.BUILDING[][] buildings;
 
@@ -83,6 +86,7 @@ public class Board {
         this.capitalIDs = capitalIDs;
         JSONArray JResource = JBoard.getJSONArray("resource");
         JSONArray JTerrain = JBoard.getJSONArray("terrain");
+        JSONArray JBiome = JBoard.optJSONArray("biome");
         JSONArray JUnit = JBoard.getJSONArray("unitID");
         JSONArray JCityID = JBoard.getJSONArray("cityID");
         JSONArray JNetwork = JBoard.getJSONArray("network");
@@ -91,6 +95,7 @@ public class Board {
         size = JResource.length();
         terrains = new Types.TERRAIN[size][size];
         resources = new Types.RESOURCE[size][size];
+        biomeOwners = new Types.TRIBE[size][size];
         buildings = new Types.BUILDING[size][size];
         units = new int[size][size];
         tileCityId = new int[size][size];
@@ -112,6 +117,13 @@ public class Board {
                 terrains[i][j] = Types.TERRAIN.getTypeByKey(terrainItem.getInt(j));
                 if (resourceItem.getInt(j) != -1) {
                     resources[i][j] = Types.RESOURCE.getTypeByKey(resourceItem.getInt(j));
+                }
+                if (JBiome != null) {
+                    JSONArray biomeItem = JBiome.getJSONArray(i);
+                    int biomeKey = biomeItem.getInt(j);
+                    if (biomeKey != -1) {
+                        biomeOwners[i][j] = Types.TRIBE.getTypeByKey(biomeKey);
+                    }
                 }
                 units[i][j] = unitIDItem.getInt(j);
                 tileCityId[i][j] = cityIDItem.getInt(j);
@@ -143,6 +155,7 @@ public class Board {
         this.capitalIDs = new int[tribes.length];
         terrains = new Types.TERRAIN[size][size];
         resources = new Types.RESOURCE[size][size];
+        biomeOwners = new Types.TRIBE[size][size];
         buildings = new Types.BUILDING[size][size];
         units = new int[size][size];
         tileCityId = new int[size][size];
@@ -183,6 +196,7 @@ public class Board {
         copyBoard.tribes = new Tribe[this.tribes.length];
         copyBoard.terrains = new Types.TERRAIN[size][size];
         copyBoard.resources = new Types.RESOURCE[size][size];
+        copyBoard.biomeOwners = new Types.TRIBE[size][size];
         copyBoard.buildings = new Types.BUILDING[size][size];
         copyBoard.units = new int[size][size];
         copyBoard.tileCityId = new int[size][size];
@@ -207,6 +221,7 @@ public class Board {
                     copyBoard.units[x][y] = observableUnit == null ? 0 : units[x][y];
                     copyBoard.setTerrainAt(x, y, terrains[x][y]);
                     copyBoard.setResourceAt(x, y, maskResource(playerId, x, y));
+                    copyBoard.setBiomeOwnerAt(x, y, biomeOwners[x][y]);
                     copyBoard.setBuildingAt(x, y, buildings[x][y]);
                     copyBoard.tileCityId[x][y] = tileCityId[x][y];
                     copyBoard.tradeNetwork.setTradeNetworkValue(x,y,tradeNetwork.getTradeNetworkValue(x,y));
@@ -1465,8 +1480,10 @@ public class Board {
     int getUnitIDAt(int x, int y){ return units[x][y]; }
     public void setResourceAt(int x, int y, Types.RESOURCE r){ resources[x][y] =  r; }
     public void setTerrainAt(int x, int y, Types.TERRAIN t){ terrains[x][y] =  t; }
+    public void setBiomeOwnerAt(int x, int y, Types.TRIBE t){ biomeOwners[x][y] = t; }
     public void setBuildingAt(int x, int y, Types.BUILDING b){ buildings[x][y] = b; }
     public Types.RESOURCE getResourceAt(int x, int y){ return resources[x][y]; }
+    public Types.TRIBE getBiomeOwnerAt(int x, int y){ return biomeOwners[x][y]; }
     public Types.BUILDING getBuildingAt(int x, int y){ return buildings[x][y]; }
     public void setUnits(int[][] u){ this.units = u; }
     public int getCityIdAt(int x, int y) { return tileCityId[x][y]; }

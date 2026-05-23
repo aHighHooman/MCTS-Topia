@@ -32,6 +32,9 @@ public class LevelGenerator {
     private double BORDER_EXPANSION = 1/3.0;
     private long seed;
     private Random rnd;
+    private int[] landComponentKeyCache;
+    private boolean landComponentKeyCacheValid;
+    private final HashMap<String, EnumMap<Types.TRIBE, Double>> tribeProbabilityCache = new HashMap<>();
 
     //JSON that contains all the probability values for all the tribes.
     private static JSONObject cachedTerrainProbabilityData;
@@ -89,16 +92,57 @@ public class LevelGenerator {
         if (tribes == null || tribes.length == 0) {
             throw new IllegalArgumentException("At least one tribe is required for level generation.");
         }
+        validatePlayerCountForMap(supportedSize, mapType, tribes.length);
 
         this.mapSize = mapSize;
         this.level = new String[mapSize*mapSize];
         this.biomeOwner = new Types.TRIBE[mapSize*mapSize];
         this.tribes = tribes;
         this.mapType = mapType;
+        this.landComponentKeyCacheValid = false;
         configureMapType(mapType);
 
         //Initialize the level with deep water.
         for(int i = 0; i < mapSize*mapSize; i++){ level[i] = "d: "; };
+    }
+
+    private static void validatePlayerCountForMap(Types.MAP_SIZE mapSize, Types.MAP_TYPE mapType, int playerCount) {
+        int maxPlayers = maxPlayersFor(mapSize, mapType);
+        if (playerCount > maxPlayers) {
+            throw new IllegalArgumentException("Map type " + mapType.getDisplayName()
+                    + " on " + mapSize.getDisplayName() + " supports at most " + maxPlayers
+                    + " players, but got " + playerCount + ".");
+        }
+    }
+
+    private static int maxPlayersFor(Types.MAP_SIZE mapSize, Types.MAP_TYPE mapType) {
+        switch (mapType) {
+            case DRYLANDS:
+            case LAKES:
+            case ARCHIPELAGO:
+            case WATER_WORLD:
+                return mapSize == Types.MAP_SIZE.TINY ? 9 : 16;
+            case PANGEA:
+            case CONTINENTS:
+                switch (mapSize) {
+                    case TINY:
+                        return 4;
+                    case SMALL:
+                        return 7;
+                    case NORMAL:
+                        return 9;
+                    case LARGE:
+                    case HUGE:
+                    case MASSIVE:
+                        return 16;
+                    default:
+                        break;
+                }
+                break;
+            default:
+                break;
+        }
+        throw new IllegalStateException("Unsupported player cap for map type " + mapType + " and size " + mapSize + ".");
     }
 
     /**
@@ -110,6 +154,7 @@ public class LevelGenerator {
         for (int cell = 0; cell < mapSize * mapSize; cell++) {
             level[cell] = DEEP_WATER.getMapChar() + ": ";
         }
+        landComponentKeyCacheValid = false;
         this.profile = GenerationProfile.forMapType(mapType, mapSize);
 
         if (profile.capitalsFromVillages) {
@@ -124,6 +169,7 @@ public class LevelGenerator {
             generateContinentsLand();
         } else if (mapType == Types.MAP_TYPE.PANGEA) {
             generatePangeaLand();
+            enforcePangeaWaterPerimeter();
         } else {
             generateLandFromWetness();
         }
@@ -137,9 +183,20 @@ public class LevelGenerator {
         if (mapType == Types.MAP_TYPE.CONTINENTS) {
             ensureContinentsHaveVillageNearEachCapitalCandidate(villageCells);
         }
-        ArrayList<Integer> capitalCells = selectCapitalVillages(villageCells);
+        ArrayList<Integer> capitalCells = mapType == Types.MAP_TYPE.PANGEA
+                ? selectPangeaCapitalVillages(villageCells)
+                : mapType == Types.MAP_TYPE.CONTINENTS
+                ? selectContinentsCapitalVillages(villageCells)
+                : selectCapitalVillages(villageCells);
+        capitalCells = sanitizeCapitalCells(capitalCells, villageCells);
         convertVillagesToCapitals(capitalCells);
+        if (mapType == Types.MAP_TYPE.CONTINENTS) {
+            expandNaturalOneTileSettlementIslands();
+        }
         villageCells.addAll(placeTinyIslandVillages());
+        if (mapType == Types.MAP_TYPE.CONTINENTS) {
+            ensureContinentsLegalLandmassesHaveSettlement();
+        }
 
         Types.TRIBE[] tileOwner = assignTileOwners(capitalCells);
         this.biomeOwner = tileOwner;
@@ -150,6 +207,9 @@ public class LevelGenerator {
         placeCornerLighthouses();
         normalizeDeepWaterCoastlines();
         adjustStartingResources(capitalCells);
+        if (mapType == Types.MAP_TYPE.PANGEA) {
+            enforcePangeaWaterPerimeter();
+        }
         normalizeDeepWaterCoastlines();
         placeRuins();
         if (mapType != Types.MAP_TYPE.DRYLANDS) {
@@ -189,10 +249,22 @@ public class LevelGenerator {
         adjustStartingResources(capitalCells);
         normalizeDeepWaterCoastlines();
         enforceQuadrantWaterBand();
-        if (mapType != Types.MAP_TYPE.DRYLANDS) {
+        if (mapType == Types.MAP_TYPE.WATER_WORLD) {
             forceSettlementAdjacentLand(capitalCells, currentVillageCells());
+            separateWaterWorldSettlementIslands(capitalCells, currentVillageCells());
             normalizeDeepWaterCoastlines();
             enforceQuadrantWaterBand();
+        } else if (mapType == Types.MAP_TYPE.LAKES) {
+            ensureLakesCapitalVillageConnections(capitalCells, currentVillageCells());
+            normalizeDeepWaterCoastlines();
+            enforceQuadrantWaterBand();
+        } else if (mapType == Types.MAP_TYPE.ARCHIPELAGO) {
+            forceMissingSettlementAdjacentLand(capitalCells, currentVillageCells());
+            normalizeDeepWaterCoastlines();
+            enforceQuadrantWaterBand();
+        } else if (mapType != Types.MAP_TYPE.DRYLANDS) {
+            forceMissingSettlementAdjacentLand(capitalCells, currentVillageCells());
+            normalizeDeepWaterCoastlines();
         }
         normalizeDeepWaterCoastlines();
         placeRuins();
@@ -203,6 +275,9 @@ public class LevelGenerator {
 
     private void generateLandFromWetness() {
         if (LEVELGEN_VERBOSE) System.out.println("Generate map-type land/water.");
+        if (mapType == Types.MAP_TYPE.WATER_WORLD) {
+            return;
+        }
         int targetLand = (int) Math.round(mapSize * mapSize * profile.landRatio);
         int placed = 0;
         while (placed < targetLand) {
@@ -217,14 +292,8 @@ public class LevelGenerator {
             ArrayList<Integer> land = new ArrayList<>();
             ArrayList<Integer> water = new ArrayList<>();
             for (int cell = 0; cell < mapSize * mapSize; cell++) {
-                int waterCount = 0;
-                int total = 0;
-                for (int n : disk(cell, 1)) {
-                    if (getTerrain(n) == DEEP_WATER.getMapChar()) {
-                        waterCount++;
-                    }
-                    total++;
-                }
+                int waterCount = countNearbyTerrain(cell, 1, DEEP_WATER.getMapChar());
+                int total = countCellsInRadius(cell, 1);
                 if (waterCount / (double) total <= profile.landCoefficient) {
                     land.add(cell);
                 } else {
@@ -239,23 +308,6 @@ public class LevelGenerator {
             for (int cell : water) {
                 if (!isSettlement(cell)) {
                     writeTile(cell, "" + DEEP_WATER.getMapChar(), null);
-                }
-            }
-        }
-
-        if (mapType == Types.MAP_TYPE.WATER_WORLD) {
-            int islandCount = Math.max(tribes.length * 2, mapSize / 2);
-            for (int i = 0; i < islandCount; i++) {
-                int center = randomInteriorCell(2);
-                if (!isSettlement(center)) {
-                    writeTile(center, "" + PLAIN.getMapChar(), null);
-                }
-                if (rnd.nextBoolean()) {
-                    ArrayList<Integer> neighbours = crossNeighbors(center);
-                    int neighbour = neighbours.get(randomInt(0, neighbours.size()));
-                    if (!isSettlement(neighbour)) {
-                        writeTile(neighbour, "" + PLAIN.getMapChar(), null);
-                    }
                 }
             }
         }
@@ -277,7 +329,7 @@ public class LevelGenerator {
             Collections.shuffle(neighbours, rnd);
             boolean expanded = false;
             for (int neighbour : neighbours) {
-                if (!land.contains(neighbour)) {
+                if (!land.contains(neighbour) && !nearMapEdge(neighbour, 1)) {
                     land.add(neighbour);
                     frontier.add(neighbour);
                     writeTile(neighbour, "" + PLAIN.getMapChar(), null);
@@ -291,12 +343,27 @@ public class LevelGenerator {
         }
     }
 
+    private void enforcePangeaWaterPerimeter() {
+        for (int cell = 0; cell < mapSize * mapSize; cell++) {
+            if (!nearMapEdge(cell, 1)) {
+                continue;
+            }
+            String resource = getResource(cell);
+            if (!resource.equals("" + Types.RESOURCE.LIGHTHOUSE.getMapChar())
+                    && !resource.equals("" + Types.RESOURCE.FISH.getMapChar())) {
+                resource = "";
+            }
+            writeTile(cell, "" + DEEP_WATER.getMapChar(), resource);
+        }
+    }
+
     private void generateContinentsLand() {
         if (LEVELGEN_VERBOSE) System.out.println("Generate separated Continents landmasses.");
         int targetLand = (int) Math.round(mapSize * mapSize * profile.landRatio);
         int continentCount = Math.max(2, Math.min(tribes.length + 1, mapSize / 4));
         int[] component = new int[mapSize * mapSize];
         Arrays.fill(component, -1);
+        int[] componentSize = new int[continentCount];
 
         ArrayList<ArrayList<Integer>> frontiers = new ArrayList<>();
         int placedLand = 0;
@@ -307,6 +374,7 @@ public class LevelGenerator {
             }
             component[seed] = continent;
             writeTile(seed, "" + PLAIN.getMapChar(), null);
+            componentSize[continent] = 1;
             ArrayList<Integer> frontier = new ArrayList<>();
             frontier.add(seed);
             frontiers.add(frontier);
@@ -323,7 +391,7 @@ public class LevelGenerator {
             if (expandable.isEmpty()) {
                 break;
             }
-            int continent = expandable.get(randomInt(0, expandable.size()));
+            int continent = pickSmallestContinent(expandable, componentSize);
             Integer next = pickContinentExpansionCell(frontiers.get(continent), component, continent);
             if (next == null) {
                 break;
@@ -331,17 +399,35 @@ public class LevelGenerator {
             component[next] = continent;
             writeTile(next, "" + PLAIN.getMapChar(), null);
             frontiers.get(continent).add(next);
+            componentSize[continent]++;
             placedLand++;
         }
     }
 
+    private int pickSmallestContinent(ArrayList<Integer> expandable, int[] componentSize) {
+        int smallest = Integer.MAX_VALUE;
+        ArrayList<Integer> tied = new ArrayList<>();
+        for (int continent : expandable) {
+            if (componentSize[continent] < smallest) {
+                smallest = componentSize[continent];
+                tied.clear();
+                tied.add(continent);
+            } else if (componentSize[continent] == smallest) {
+                tied.add(continent);
+            }
+        }
+        return tied.get(randomInt(0, tied.size()));
+    }
+
     private void writeCapitals(ArrayList<Integer> capitalCells) {
+        landComponentKeyCacheValid = false;
         for (int i = 0; i < capitalCells.size(); i++) {
             level[capitalCells.get(i)] = CITY.getMapChar() + ":" + tribes[i].getKey() + ":" + i;
         }
     }
 
     private void convertVillagesToCapitals(ArrayList<Integer> capitalCells) {
+        landComponentKeyCacheValid = false;
         for (int i = 0; i < capitalCells.size(); i++) {
             int capital = capitalCells.get(i);
             level[capital] = CITY.getMapChar() + ":" + tribes[i].getKey() + ":" + i;
@@ -421,25 +507,62 @@ public class LevelGenerator {
             return islands;
         }
         for (int i = 0; i < profile.tinyIslandVillages; i++) {
-            ArrayList<Integer> candidates = new ArrayList<>();
-            for (int cell = 0; cell < mapSize * mapSize; cell++) {
-                if (getTerrain(cell) == DEEP_WATER.getMapChar()
-                        && getResource(cell).isEmpty()
-                        && !nearLand(cell, 1)
-                        && !nearAny(cell, currentVillageCells(), 2)
-                        && !nearMapEdge(cell, 1)) {
-                    candidates.add(cell);
-                }
+            ArrayList<Integer> candidates = tinyIslandVillageCandidates(true);
+            if (candidates.isEmpty()) {
+                candidates = tinyIslandVillageCandidates(false);
             }
             if (candidates.isEmpty()) {
                 break;
             }
             int center = candidates.get(randomInt(0, candidates.size()));
+            carveTinyIslandWaterPocket(center);
             writeTile(center, "" + VILLAGE.getMapChar(), null);
             islands.add(center);
             normalizeDeepWaterCoastlines();
         }
         return islands;
+    }
+
+    private ArrayList<Integer> tinyIslandVillageCandidates(boolean requireOpenWater) {
+        ArrayList<Integer> candidates = new ArrayList<>();
+        ArrayList<Integer> settlements = currentVillageCells();
+        settlements.addAll(currentCapitalCells());
+        for (int cell = 0; cell < mapSize * mapSize; cell++) {
+            if (!isWaterTerrain(getTerrain(cell))
+                    || !getResource(cell).isEmpty()
+                    || nearAny(cell, settlements, 2)
+                    || nearMapEdge(cell, 1)) {
+                continue;
+            }
+            if (requireOpenWater && (getTerrain(cell) != DEEP_WATER.getMapChar() || nearLand(cell, 1))) {
+                continue;
+            }
+            if (!tinyIslandPocketCanBeCarved(cell)) {
+                continue;
+            }
+            candidates.add(cell);
+        }
+        return candidates;
+    }
+
+    private boolean tinyIslandPocketCanBeCarved(int center) {
+        for (int nearby : disk(center, 1)) {
+            if (nearby == center) {
+                continue;
+            }
+            if (isSettlement(nearby) || getResource(nearby).equals("" + Types.RESOURCE.LIGHTHOUSE.getMapChar())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void carveTinyIslandWaterPocket(int center) {
+        for (int nearby : disk(center, 1)) {
+            if (nearby != center && !isSettlement(nearby)) {
+                writeTile(nearby, "" + DEEP_WATER.getMapChar(), "");
+            }
+        }
     }
 
     private ArrayList<Integer> selectCapitalVillages(ArrayList<Integer> villageCells) {
@@ -454,7 +577,10 @@ public class LevelGenerator {
             while (available.size() < tribes.length) {
                 ArrayList<Integer> candidates = villageCandidates(available, 2, 2);
                 if (candidates.isEmpty()) {
-                    break;
+                    if (!forceCapitalSafeVillageCandidate(available)) {
+                        break;
+                    }
+                    continue;
                 }
                 int village = candidates.get(randomInt(0, candidates.size()));
                 writeTile(village, "" + VILLAGE.getMapChar(), null);
@@ -493,25 +619,270 @@ public class LevelGenerator {
         return capitals;
     }
 
-    private void ensureContinentsHaveVillageNearEachCapitalCandidate(ArrayList<Integer> villageCells) {
-        HashSet<Integer> componentKeys = new HashSet<>();
+    private ArrayList<Integer> sanitizeCapitalCells(ArrayList<Integer> capitalCells, ArrayList<Integer> villageCells) {
+        ArrayList<Integer> sanitized = new ArrayList<>();
+        for (int capital : capitalCells) {
+            if (!nearMapEdge(capital, 2) && !nearMapCorner(capital, 1) && !sanitized.contains(capital)) {
+                sanitized.add(capital);
+                continue;
+            }
+            Integer replacement = findSafeCapitalReplacement(sanitized, villageCells);
+            if (replacement == null && forceCapitalSafeVillageCandidate(villageCells)) {
+                replacement = villageCells.get(villageCells.size() - 1);
+            }
+            sanitized.add(replacement == null ? capital : replacement);
+        }
+        return sanitized;
+    }
+
+    private Integer findSafeCapitalReplacement(ArrayList<Integer> existingCapitals, ArrayList<Integer> villageCells) {
+        ArrayList<Integer> candidates = new ArrayList<>();
         for (int village : villageCells) {
-            componentKeys.add(landComponentKey(village));
+            if (!existingCapitals.contains(village)
+                    && !nearMapEdge(village, 2)
+                    && !nearMapCorner(village, 1)
+                    && getTerrain(village) == VILLAGE.getMapChar()) {
+                candidates.add(village);
+            }
+        }
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        return pickBestVillageCapital(candidates, existingCapitals, profile.coastalCapitals);
+    }
+
+    private ArrayList<Integer> selectPangeaCapitalVillages(ArrayList<Integer> villageCells) {
+        ArrayList<Integer> available = new ArrayList<>();
+        for (int village : villageCells) {
+            if (!nearMapEdge(village, 2)) {
+                available.add(village);
+            }
+        }
+        if (available.size() < tribes.length) {
+            available = withoutLighthouseCornerConflict(villageCells);
+            while (available.size() < tribes.length) {
+                ArrayList<Integer> candidates = villageCandidates(available, 2, 2);
+                if (candidates.isEmpty()) {
+                    if (!forceCapitalSafeVillageCandidate(available)) {
+                        break;
+                    }
+                    continue;
+                }
+                int village = candidates.get(randomInt(0, candidates.size()));
+                writeTile(village, "" + VILLAGE.getMapChar(), null);
+                available.add(village);
+            }
+        }
+        CapitalLayout best = null;
+        int trials = Math.max(500, available.size() * tribes.length * 20);
+        for (int trial = 0; trial < trials; trial++) {
+            ArrayList<Integer> candidates = new ArrayList<>(available);
+            Collections.shuffle(candidates, rnd);
+            ArrayList<Integer> capitals = new ArrayList<>();
+            while (capitals.size() < tribes.length && !candidates.isEmpty()) {
+                int chosen = pickPangeaTrialCapital(candidates, capitals);
+                capitals.add(chosen);
+                candidates.remove(Integer.valueOf(chosen));
+            }
+            if (capitals.size() != tribes.length) {
+                continue;
+            }
+            CapitalLayout layout = new CapitalLayout(capitals, scorePangeaCapitalLayout(capitals));
+            if (best == null || layout.score > best.score) {
+                best = layout;
+            }
+        }
+        if (best != null) {
+            return best.capitals;
+        }
+        return selectCapitalVillages(villageCells);
+    }
+
+    private ArrayList<Integer> selectContinentsCapitalVillages(ArrayList<Integer> villageCells) {
+        ArrayList<Integer> available = new ArrayList<>();
+        for (int village : villageCells) {
+            if (!nearMapEdge(village, 2)) {
+                available.add(village);
+            }
+        }
+        if (available.size() < tribes.length) {
+            available = withoutLighthouseCornerConflict(villageCells);
+            while (available.size() < tribes.length) {
+                ArrayList<Integer> candidates = villageCandidates(available, 2, 2);
+                if (candidates.isEmpty()) {
+                    if (!forceCapitalSafeVillageCandidate(available)) {
+                        break;
+                    }
+                    continue;
+                }
+                int village = candidates.get(randomInt(0, candidates.size()));
+                writeTile(village, "" + VILLAGE.getMapChar(), null);
+                available.add(village);
+            }
         }
 
-        for (Integer component : new ArrayList<>(componentKeys)) {
-            ArrayList<Integer> componentVillages = new ArrayList<>();
-            for (int village : villageCells) {
-                if (landComponentKey(village) == component) {
-                    componentVillages.add(village);
+        HashMap<Integer, ArrayList<Integer>> byComponent = new HashMap<>();
+        for (int village : available) {
+            int component = landComponentKey(village);
+            if (!byComponent.containsKey(component)) {
+                byComponent.put(component, new ArrayList<Integer>());
+            }
+            byComponent.get(component).add(village);
+        }
+
+        ArrayList<Integer> components = new ArrayList<>(byComponent.keySet());
+        CapitalLayout best = null;
+        int trials = Math.max(500, available.size() * tribes.length * 30);
+        for (int trial = 0; trial < trials; trial++) {
+            Collections.shuffle(components, rnd);
+            ArrayList<Integer> capitals = new ArrayList<>();
+            for (int component : components) {
+                if (capitals.size() >= tribes.length) {
+                    break;
+                }
+                ArrayList<Integer> candidates = new ArrayList<>(byComponent.get(component));
+                ArrayList<Integer> filtered = filterByMinimumCapitalDistance(candidates, capitals);
+                if (!filtered.isEmpty()) {
+                    candidates = filtered;
+                }
+                int chosen = pickBestCapital(candidates, capitals, true);
+                capitals.add(chosen);
+            }
+            if (capitals.size() != tribes.length) {
+                continue;
+            }
+            CapitalLayout layout = new CapitalLayout(capitals, scoreContinentsCapitalLayout(capitals));
+            if (best == null || layout.score > best.score) {
+                best = layout;
+            }
+        }
+        if (best != null) {
+            return best.capitals;
+        }
+        return selectCapitalVillages(villageCells);
+    }
+
+    private ArrayList<Integer> withoutLighthouseCornerConflict(ArrayList<Integer> cells) {
+        ArrayList<Integer> filtered = new ArrayList<>();
+        for (int cell : cells) {
+            if (!nearMapCorner(cell, 1)) {
+                filtered.add(cell);
+            }
+        }
+        return filtered;
+    }
+
+    private boolean forceCapitalSafeVillageCandidate(ArrayList<Integer> villageCells) {
+        ArrayList<Integer> candidates = new ArrayList<>();
+        for (int cell = 0; cell < mapSize * mapSize; cell++) {
+            char terrain = getTerrain(cell);
+            if ((terrain == PLAIN.getMapChar() || terrain == FOREST.getMapChar())
+                    && getResource(cell).isEmpty()
+                    && !nearMapEdge(cell, 2)
+                    && !nearMapCorner(cell, 1)
+                    && !nearAny(cell, villageCells, 1)
+                    && !nearAny(cell, currentCapitalCells(), 1)) {
+                candidates.add(cell);
+            }
+        }
+        if (candidates.isEmpty()) {
+            return false;
+        }
+        int village = candidates.get(randomInt(0, candidates.size()));
+        writeTile(village, "" + VILLAGE.getMapChar(), null);
+        villageCells.add(village);
+        return true;
+    }
+
+    private double scoreContinentsCapitalLayout(ArrayList<Integer> capitals) {
+        int minDistance = mapSize;
+        int distanceTotal = 0;
+        int coastal = 0;
+        for (int i = 0; i < capitals.size(); i++) {
+            if (isCoastalCell(capitals.get(i))) {
+                coastal++;
+            }
+            for (int j = i + 1; j < capitals.size(); j++) {
+                int distance = distance(capitals.get(i), capitals.get(j), mapSize);
+                minDistance = Math.min(minDistance, distance);
+                distanceTotal += distance;
+            }
+        }
+        if (capitals.size() <= 1) {
+            minDistance = mapSize;
+        }
+        return minDistance * 1000 + distanceTotal * 20 + coastal * 100;
+    }
+
+    private int pickPangeaTrialCapital(ArrayList<Integer> candidates, ArrayList<Integer> existingCapitals) {
+        int bestScore = Integer.MIN_VALUE;
+        ArrayList<Integer> best = new ArrayList<>();
+        for (int candidate : candidates) {
+            int minDistance = mapSize;
+            for (int capital : existingCapitals) {
+                minDistance = Math.min(minDistance, distance(candidate, capital, mapSize));
+            }
+            if (existingCapitals.isEmpty()) {
+                minDistance = mapSize;
+            }
+            int coastBonus = isCoastalCell(candidate) ? mapSize * 5 : 0;
+            int score = minDistance * 10 + coastBonus + randomInt(0, 3);
+            if (score > bestScore) {
+                bestScore = score;
+                best.clear();
+                best.add(candidate);
+            } else if (score == bestScore) {
+                best.add(candidate);
+            }
+        }
+        return best.get(randomInt(0, best.size()));
+    }
+
+    private double scorePangeaCapitalLayout(ArrayList<Integer> capitals) {
+        int minDistance = mapSize;
+        int distanceTotal = 0;
+        int coastal = 0;
+        for (int i = 0; i < capitals.size(); i++) {
+            if (isCoastalCell(capitals.get(i))) {
+                coastal++;
+            }
+            for (int j = i + 1; j < capitals.size(); j++) {
+                int distance = distance(capitals.get(i), capitals.get(j), mapSize);
+                minDistance = Math.min(minDistance, distance);
+                distanceTotal += distance;
+            }
+        }
+        if (capitals.size() <= 1) {
+            minDistance = mapSize;
+        }
+        return coastal * 10000 + minDistance * 1000 + distanceTotal * 10;
+    }
+
+    private void ensureContinentsHaveVillageNearEachCapitalCandidate(ArrayList<Integer> villageCells) {
+        ArrayList<Integer> componentKeys = landComponentKeys();
+        for (Integer component : componentKeys) {
+            if (countVillagesOnLandComponent(villageCells, component) == 0
+                    && !addVillageToComponentIfPossible(villageCells, component, 2, profile.postTerrainVillageEdgeBuffer)
+                    && !expandComponentUntilVillageFits(villageCells, component, profile.postTerrainVillageEdgeBuffer)) {
+                if (!addVillageToComponentIfPossible(villageCells, component, 2, 1)) {
+                    if (expandComponentTowardInterior(component)) {
+                        addVillageToComponentIfPossible(villageCells, component, 2, 1);
+                    }
+                    if (countVillagesOnLandComponent(villageCells, component) == 0) {
+                        forceVillageOnComponent(villageCells, component);
+                    }
                 }
             }
+        }
+
+        for (Integer component : componentKeys) {
             addVillageToComponentIfPossible(villageCells, component, 2, profile.postTerrainVillageEdgeBuffer);
         }
 
         while (countComponentsWithMultipleVillages(villageCells) < tribes.length) {
             Integer component = findComponentNeedingVillage(villageCells, new HashSet<Integer>());
-            if (component == null || !expandComponentUntilVillageFits(villageCells, component)) {
+            if (component == null || (!expandComponentUntilVillageFits(villageCells, component, profile.postTerrainVillageEdgeBuffer)
+                    && !addVillageToComponentIfPossible(villageCells, component, 2, 1))) {
                 break;
             }
         }
@@ -543,6 +914,101 @@ public class LevelGenerator {
         return true;
     }
 
+    private boolean forceVillageOnComponent(ArrayList<Integer> villageCells, int component) {
+        ArrayList<Integer> candidates = new ArrayList<>();
+        for (int cell = 0; cell < mapSize * mapSize; cell++) {
+            if (isWaterTerrain(getTerrain(cell))
+                    || isSettlement(cell)
+                    || !getResource(cell).isEmpty()
+                    || nearMapEdge(cell, 1)
+                    || landComponentKey(cell) != component) {
+                continue;
+            }
+            if (!nearMapEdge(cell, 1)) {
+                candidates.add(cell);
+            }
+        }
+        if (candidates.isEmpty()) {
+            for (int cell = 0; cell < mapSize * mapSize; cell++) {
+                if (!isWaterTerrain(getTerrain(cell))
+                        && !isSettlement(cell)
+                        && getResource(cell).isEmpty()
+                        && !nearMapEdge(cell, 1)
+                        && landComponentKey(cell) == component) {
+                    candidates.add(cell);
+                }
+            }
+        }
+        if (candidates.isEmpty()) {
+            return false;
+        }
+        int village = candidates.get(randomInt(0, candidates.size()));
+        writeTile(village, "" + VILLAGE.getMapChar(), null);
+        villageCells.add(village);
+        return true;
+    }
+
+    private boolean expandComponentTowardInterior(int component) {
+        ArrayList<Integer> candidates = new ArrayList<>();
+        for (int cell = 0; cell < mapSize * mapSize; cell++) {
+            if (isWaterTerrain(getTerrain(cell)) || landComponentKey(cell) != component) {
+                continue;
+            }
+            for (int neighbour : crossNeighbors(cell)) {
+                if (isWaterTerrain(getTerrain(neighbour))
+                        && !nearMapEdge(neighbour, 1)
+                        && !touchesOtherLandComponent(neighbour, component)) {
+                    candidates.add(neighbour);
+                }
+            }
+        }
+        if (candidates.isEmpty()) {
+            return false;
+        }
+        int newLand = candidates.get(randomInt(0, candidates.size()));
+        writeTile(newLand, "" + PLAIN.getMapChar(), null);
+        return true;
+    }
+
+    private void ensureContinentsLegalLandmassesHaveSettlement() {
+        for (int component : landComponentKeys()) {
+            if (landComponentSizeForKey(component) <= 1 || componentHasSettlement(component)) {
+                continue;
+            }
+            if (componentHasNonEdgeTile(component)) {
+                forceVillageOnComponent(currentVillageCells(), component);
+            }
+        }
+    }
+
+    private int landComponentSizeForKey(int component) {
+        int count = 0;
+        for (int cell = 0; cell < mapSize * mapSize; cell++) {
+            if (!isWaterTerrain(getTerrain(cell)) && landComponentKey(cell) == component) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private boolean componentHasSettlement(int component) {
+        for (int cell = 0; cell < mapSize * mapSize; cell++) {
+            if (isSettlement(cell) && landComponentKey(cell) == component) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean componentHasNonEdgeTile(int component) {
+        for (int cell = 0; cell < mapSize * mapSize; cell++) {
+            if (!isWaterTerrain(getTerrain(cell)) && !nearMapEdge(cell, 1) && landComponentKey(cell) == component) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private int countComponentsWithMultipleVillages(ArrayList<Integer> villageCells) {
         HashSet<Integer> counted = new HashSet<>();
         for (int village : villageCells) {
@@ -568,10 +1034,10 @@ public class LevelGenerator {
         return null;
     }
 
-    private boolean expandComponentUntilVillageFits(ArrayList<Integer> villageCells, int component) {
+    private boolean expandComponentUntilVillageFits(ArrayList<Integer> villageCells, int component, int edgeBuffer) {
         HashSet<Integer> skippedComponents = new HashSet<>();
         for (int attempt = 0; attempt < mapSize * mapSize; attempt++) {
-            if (addVillageToComponentIfPossible(villageCells, component, 2, profile.postTerrainVillageEdgeBuffer)) {
+            if (addVillageToComponentIfPossible(villageCells, component, 2, edgeBuffer)) {
                 return true;
             }
             if (!expandLandComponent(component)) {
@@ -660,6 +1126,18 @@ public class LevelGenerator {
                 writeTile(cells.get(index), "" + FOREST.getMapChar(), null);
             }
         }
+    }
+
+    private ArrayList<Integer> landComponentKeys() {
+        HashSet<Integer> keys = new HashSet<>();
+        for (int cell = 0; cell < mapSize * mapSize; cell++) {
+            if (!isWaterTerrain(getTerrain(cell))) {
+                keys.add(landComponentKey(cell));
+            }
+        }
+        ArrayList<Integer> sorted = new ArrayList<>(keys);
+        Collections.sort(sorted);
+        return sorted;
     }
 
     private TerrainRates terrainRates(Types.TRIBE owner) {
@@ -836,17 +1314,18 @@ public class LevelGenerator {
             boolean outer = !inner && isWithinCityInfluence(cell, 2);
             Types.TRIBE owner = tileOwner[cell];
             char terrain = getTerrain(cell);
+            TerrainRates rates = terrainRates(owner);
             if (terrain == PLAIN.getMapChar() && (inner || outer)) {
-                double fruit = (inner ? 0.18 : 0.06) * getTribeProb("FRUIT", owner);
-                double crop = (inner ? 0.18 : 0.06) * getTribeProb("CROPS", owner);
+                double fruit = resourceChance((inner ? 0.18 : 0.06), rates.plain, "FRUIT", owner);
+                double crop = resourceChance((inner ? 0.18 : 0.06), rates.plain, "CROPS", owner);
                 placeWeightedResource(cell, fruit, FRUIT.getMapChar(), crop, CROPS.getMapChar());
             } else if (terrain == FOREST.getMapChar() && (inner || outer)) {
-                double animal = (inner ? 0.19 : 0.06) * getTribeProb("ANIMAL", owner);
+                double animal = resourceChance((inner ? 0.19 : 0.06), rates.forest, "ANIMAL", owner);
                 if (rnd.nextDouble() < animal) {
                     writeTile(cell, null, "" + ANIMAL.getMapChar());
                 }
             } else if (terrain == MOUNTAIN.getMapChar() && (inner || outer)) {
-                double ore = (inner ? 0.11 : 0.03) * getTribeProb("ORE", owner);
+                double ore = resourceChance((inner ? 0.11 : 0.03), rates.mountain, "ORE", owner);
                 if (rnd.nextDouble() < ore) {
                     writeTile(cell, null, "" + ORE.getMapChar());
                 }
@@ -922,8 +1401,9 @@ public class LevelGenerator {
 
     private ArrayList<Integer> villageCandidates(ArrayList<Integer> existingVillages, int edgeBuffer, int spacing) {
         ArrayList<Integer> candidates = new ArrayList<>();
+        ArrayList<Integer> capitals = currentCapitalCells();
         for (int cell = 0; cell < mapSize * mapSize; cell++) {
-            if (canPlaceVillage(cell, existingVillages, edgeBuffer, spacing)) {
+            if (canPlaceVillage(cell, existingVillages, capitals, edgeBuffer, spacing)) {
                 candidates.add(cell);
             }
         }
@@ -932,12 +1412,16 @@ public class LevelGenerator {
     }
 
     private boolean canPlaceVillage(int cell, ArrayList<Integer> existingVillages, int edgeBuffer, int spacing) {
+        return canPlaceVillage(cell, existingVillages, currentCapitalCells(), edgeBuffer, spacing);
+    }
+
+    private boolean canPlaceVillage(int cell, ArrayList<Integer> existingVillages, ArrayList<Integer> capitals, int edgeBuffer, int spacing) {
         char terrain = getTerrain(cell);
         if ((terrain != PLAIN.getMapChar() && terrain != FOREST.getMapChar())
                 || !getResource(cell).isEmpty()
                 || nearMapEdge(cell, edgeBuffer)
                 || nearAny(cell, existingVillages, spacing)
-                || nearAny(cell, currentCapitalCells(), spacing)) {
+                || nearAny(cell, capitals, spacing)) {
             return false;
         }
         return true;
@@ -945,8 +1429,9 @@ public class LevelGenerator {
 
     private ArrayList<Integer> preTerrainVillageCandidates(ArrayList<Integer> existingVillages, int edgeBuffer, int spacing) {
         ArrayList<Integer> candidates = new ArrayList<>();
+        ArrayList<Integer> capitals = currentCapitalCells();
         for (int cell = 0; cell < mapSize * mapSize; cell++) {
-            if (canPlacePreTerrainVillage(cell, existingVillages, edgeBuffer, spacing)) {
+            if (canPlacePreTerrainVillage(cell, existingVillages, capitals, edgeBuffer, spacing)) {
                 candidates.add(cell);
             }
         }
@@ -955,12 +1440,16 @@ public class LevelGenerator {
     }
 
     private boolean canPlacePreTerrainVillage(int cell, ArrayList<Integer> existingVillages, int edgeBuffer, int spacing) {
+        return canPlacePreTerrainVillage(cell, existingVillages, currentCapitalCells(), edgeBuffer, spacing);
+    }
+
+    private boolean canPlacePreTerrainVillage(int cell, ArrayList<Integer> existingVillages, ArrayList<Integer> capitals, int edgeBuffer, int spacing) {
         char terrain = getTerrain(cell);
         if ((terrain != DEEP_WATER.getMapChar() && terrain != PLAIN.getMapChar() && terrain != FOREST.getMapChar())
                 || !getResource(cell).isEmpty()
                 || nearMapEdge(cell, edgeBuffer)
                 || nearAny(cell, existingVillages, spacing)
-                || nearAny(cell, currentCapitalCells(), spacing)) {
+                || nearAny(cell, capitals, spacing)) {
             return false;
         }
         return true;
@@ -1116,7 +1605,69 @@ public class LevelGenerator {
         return false;
     }
 
+    private void expandNaturalOneTileSettlementIslands() {
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            for (int cell = 0; cell < mapSize * mapSize; cell++) {
+                if (!isSettlement(cell) || landComponentSize(cell) != 1) {
+                    continue;
+                }
+                if (forceExpandOneTileSettlementIsland(cell)) {
+                    changed = true;
+                    normalizeDeepWaterCoastlines();
+                }
+            }
+        }
+    }
+
+    private double resourceChance(double totalLandRate, double terrainRate, String resource, Types.TRIBE owner) {
+        if (terrainRate <= 0.0) {
+            return 0.0;
+        }
+        return clamp((totalLandRate * getTribeProb(resource, owner)) / terrainRate, 0.0, 1.0);
+    }
+
+    private boolean forceExpandOneTileSettlementIsland(int settlement) {
+        int component = landComponentKey(settlement);
+        ArrayList<Integer> candidates = new ArrayList<>();
+        ArrayList<Integer> fallback = new ArrayList<>();
+        for (int neighbour : crossNeighbors(settlement)) {
+            if (!isWaterTerrain(getTerrain(neighbour)) || isSettlement(neighbour)) {
+                continue;
+            }
+            fallback.add(neighbour);
+            if (!touchesOtherLandComponent(neighbour, component)) {
+                candidates.add(neighbour);
+            }
+        }
+        if (candidates.isEmpty()) {
+            candidates = fallback;
+        }
+        if (candidates.isEmpty()) {
+            return false;
+        }
+        int newLand = candidates.get(randomInt(0, candidates.size()));
+        writeTile(newLand, "" + PLAIN.getMapChar(), null);
+        return true;
+    }
+
+    private int landComponentSize(int start) {
+        int component = landComponentKey(start);
+        int count = 0;
+        for (int cell = 0; cell < mapSize * mapSize; cell++) {
+            if (!isWaterTerrain(getTerrain(cell)) && landComponentKey(cell) == component) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     private int landComponentKey(int start) {
+        if (!isWaterTerrain(getTerrain(start))) {
+            ensureLandComponentKeyCache();
+            return landComponentKeyCache[start];
+        }
         boolean[] visited = new boolean[mapSize * mapSize];
         ArrayList<Integer> queue = new ArrayList<>();
         queue.add(start);
@@ -1133,6 +1684,55 @@ public class LevelGenerator {
             }
         }
         return key;
+    }
+
+    private void ensureLandComponentKeyCache() {
+        if (landComponentKeyCacheValid && landComponentKeyCache != null && landComponentKeyCache.length == mapSize * mapSize) {
+            return;
+        }
+        int tileCount = mapSize * mapSize;
+        if (landComponentKeyCache == null || landComponentKeyCache.length != tileCount) {
+            landComponentKeyCache = new int[tileCount];
+        }
+        Arrays.fill(landComponentKeyCache, -1);
+        boolean[] visited = new boolean[tileCount];
+        int[] queue = new int[tileCount];
+        for (int start = 0; start < tileCount; start++) {
+            if (visited[start] || isWaterTerrain(getTerrain(start))) {
+                continue;
+            }
+            int head = 0;
+            int tail = 0;
+            int key = start;
+            visited[start] = true;
+            queue[tail++] = start;
+            while (head < tail) {
+                int cell = queue[head++];
+                if (cell < key) {
+                    key = cell;
+                }
+                int row = cell / mapSize;
+                int column = cell % mapSize;
+                int rowStart = Math.max(0, row - 1);
+                int rowEnd = Math.min(mapSize - 1, row + 1);
+                int columnStart = Math.max(0, column - 1);
+                int columnEnd = Math.min(mapSize - 1, column + 1);
+                for (int y = rowStart; y <= rowEnd; y++) {
+                    int rowOffset = y * mapSize;
+                    for (int x = columnStart; x <= columnEnd; x++) {
+                        int neighbour = rowOffset + x;
+                        if (!visited[neighbour] && !isWaterTerrain(getTerrain(neighbour))) {
+                            visited[neighbour] = true;
+                            queue[tail++] = neighbour;
+                        }
+                    }
+                }
+            }
+            for (int i = 0; i < tail; i++) {
+                landComponentKeyCache[queue[i]] = key;
+            }
+        }
+        landComponentKeyCacheValid = true;
     }
 
     private boolean isWaterTerrain(char terrain) {
@@ -1174,23 +1774,78 @@ public class LevelGenerator {
         return row < buffer || col < buffer || row >= mapSize - buffer || col >= mapSize - buffer;
     }
 
+    private boolean nearMapCorner(int cell, int radius) {
+        int row = cell / mapSize;
+        int col = cell % mapSize;
+        int max = mapSize - 1;
+        return (row <= radius && col <= radius)
+                || (row <= radius && col >= max - radius)
+                || (row >= max - radius && col <= radius)
+                || (row >= max - radius && col >= max - radius);
+    }
+
     private boolean isWithinCityInfluence(int cell, int radius) {
-        for (int nearby : disk(cell, radius)) {
-            char terrain = getTerrain(nearby);
-            if (terrain == CITY.getMapChar() || terrain == VILLAGE.getMapChar()) {
-                return true;
+        int row = cell / mapSize;
+        int column = cell % mapSize;
+        int rowStart = Math.max(0, row - radius);
+        int rowEnd = Math.min(mapSize - 1, row + radius);
+        int columnStart = Math.max(0, column - radius);
+        int columnEnd = Math.min(mapSize - 1, column + radius);
+        for (int y = rowStart; y <= rowEnd; y++) {
+            int rowOffset = y * mapSize;
+            for (int x = columnStart; x <= columnEnd; x++) {
+                char terrain = getTerrain(rowOffset + x);
+                if (terrain == CITY.getMapChar() || terrain == VILLAGE.getMapChar()) {
+                    return true;
+                }
             }
         }
         return false;
     }
 
     private boolean nearLand(int cell, int radius) {
-        for (int nearby : disk(cell, radius)) {
-            if (!isWaterTerrain(getTerrain(nearby))) {
-                return true;
+        int row = cell / mapSize;
+        int column = cell % mapSize;
+        int rowStart = Math.max(0, row - radius);
+        int rowEnd = Math.min(mapSize - 1, row + radius);
+        int columnStart = Math.max(0, column - radius);
+        int columnEnd = Math.min(mapSize - 1, column + radius);
+        for (int y = rowStart; y <= rowEnd; y++) {
+            int rowOffset = y * mapSize;
+            for (int x = columnStart; x <= columnEnd; x++) {
+                if (!isWaterTerrain(getTerrain(rowOffset + x))) {
+                    return true;
+                }
             }
         }
         return false;
+    }
+
+    private int countNearbyTerrain(int cell, int radius, char terrain) {
+        int row = cell / mapSize;
+        int column = cell % mapSize;
+        int rowStart = Math.max(0, row - radius);
+        int rowEnd = Math.min(mapSize - 1, row + radius);
+        int columnStart = Math.max(0, column - radius);
+        int columnEnd = Math.min(mapSize - 1, column + radius);
+        int count = 0;
+        for (int y = rowStart; y <= rowEnd; y++) {
+            int rowOffset = y * mapSize;
+            for (int x = columnStart; x <= columnEnd; x++) {
+                if (getTerrain(rowOffset + x) == terrain) {
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    private int countCellsInRadius(int cell, int radius) {
+        int row = cell / mapSize;
+        int column = cell % mapSize;
+        int rows = Math.min(mapSize - 1, row + radius) - Math.max(0, row - radius) + 1;
+        int columns = Math.min(mapSize - 1, column + radius) - Math.max(0, column - radius) + 1;
+        return rows * columns;
     }
 
     private int randomInteriorCell(int buffer) {
@@ -1229,6 +1884,61 @@ public class LevelGenerator {
                     writeTile(nearby, "" + PLAIN.getMapChar(), null);
                 }
             }
+        }
+    }
+
+    private void forceMissingSettlementAdjacentLand(ArrayList<Integer> capitalCells, ArrayList<Integer> villageCells) {
+        ArrayList<Integer> settlements = new ArrayList<>(capitalCells);
+        settlements.addAll(villageCells);
+        for (int settlement : settlements) {
+            boolean hasLand = false;
+            ArrayList<Integer> candidates = new ArrayList<>();
+            for (int neighbour : crossNeighbors(settlement)) {
+                if (!isWaterTerrain(getTerrain(neighbour))) {
+                    hasLand = true;
+                    break;
+                }
+                if (!isSettlement(neighbour)) {
+                    candidates.add(neighbour);
+                }
+            }
+            if (!hasLand && !candidates.isEmpty()) {
+                writeTile(candidates.get(randomInt(0, candidates.size())), "" + PLAIN.getMapChar(), null);
+            }
+        }
+    }
+
+    private void separateWaterWorldSettlementIslands(ArrayList<Integer> capitalCells, ArrayList<Integer> villageCells) {
+        ArrayList<Integer> settlements = new ArrayList<>(capitalCells);
+        settlements.addAll(villageCells);
+        for (int i = 0; i < settlements.size(); i++) {
+            for (int j = i + 1; j < settlements.size(); j++) {
+                if (landComponentKey(settlements.get(i)) == landComponentKey(settlements.get(j))
+                        && distance(settlements.get(i), settlements.get(j), mapSize) > 1) {
+                    separateWaterWorldSettlementPair(settlements.get(i), settlements.get(j));
+                }
+            }
+        }
+    }
+
+    private void separateWaterWorldSettlementPair(int first, int second) {
+        ArrayList<Integer> mutable = new ArrayList<>();
+        boolean[] firstReachable = reachableLandCells(first);
+        for (int cell = 0; cell < mapSize * mapSize; cell++) {
+            if (!firstReachable[cell] || cell == first || cell == second || isSettlement(cell)) {
+                continue;
+            }
+            if (!isWaterTerrain(getTerrain(cell)) && getResource(cell).isEmpty()) {
+                mutable.add(cell);
+            }
+        }
+        Collections.shuffle(mutable, rnd);
+        for (int cell : mutable) {
+            writeTile(cell, "" + DEEP_WATER.getMapChar(), "");
+            if (landComponentKey(first) != landComponentKey(second)) {
+                return;
+            }
+            writeTile(cell, "" + PLAIN.getMapChar(), "");
         }
     }
 
@@ -1634,7 +2344,7 @@ public class LevelGenerator {
     }
 
     private boolean isCoastalCell(int cell) {
-        for (int neighbour : crossNeighbors(cell)) {
+        for (int neighbour : circle(cell, 1)) {
             char terrain = getTerrain(neighbour);
             if (terrain == SHALLOW_WATER.getMapChar() || terrain == DEEP_WATER.getMapChar()) {
                 return true;
@@ -1726,18 +2436,29 @@ public class LevelGenerator {
             if (getTerrain(cell) != DEEP_WATER.getMapChar()) {
                 continue;
             }
-            for (int neighbour : crossNeighbors(cell)) {
-                char terrain = getTerrain(neighbour);
-                if (terrain != DEEP_WATER.getMapChar() && terrain != SHALLOW_WATER.getMapChar()) {
-                    coastalDeepWater.add(cell);
-                    break;
-                }
+            if (touchesOrthogonalLand(cell)) {
+                coastalDeepWater.add(cell);
             }
         }
 
         for (int cell : coastalDeepWater) {
             writeTile(cell, "" + SHALLOW_WATER.getMapChar(), null);
         }
+    }
+
+    private boolean touchesOrthogonalLand(int cell) {
+        int row = cell / mapSize;
+        int column = cell % mapSize;
+        if (column > 0 && !isWaterTerrain(getTerrain(cell - 1))) {
+            return true;
+        }
+        if (column < mapSize - 1 && !isWaterTerrain(getTerrain(cell + 1))) {
+            return true;
+        }
+        if (row > 0 && !isWaterTerrain(getTerrain(cell - mapSize))) {
+            return true;
+        }
+        return row < mapSize - 1 && !isWaterTerrain(getTerrain(cell + mapSize));
     }
 
     private int getRuinCountForMapSize() {
@@ -1771,11 +2492,22 @@ public class LevelGenerator {
                 && terrain != DEEP_WATER.getMapChar()) {
             return false;
         }
-        for (int nearby : disk(cell, 1)) {
-            if (getTerrain(nearby) == VILLAGE.getMapChar()
-                    || getTerrain(nearby) == CITY.getMapChar()
-                    || getResource(nearby).equals("" + RUINS.getMapChar())) {
-                return false;
+        int row = cell / mapSize;
+        int column = cell % mapSize;
+        int rowStart = Math.max(0, row - 1);
+        int rowEnd = Math.min(mapSize - 1, row + 1);
+        int columnStart = Math.max(0, column - 1);
+        int columnEnd = Math.min(mapSize - 1, column + 1);
+        for (int y = rowStart; y <= rowEnd; y++) {
+            int rowOffset = y * mapSize;
+            for (int x = columnStart; x <= columnEnd; x++) {
+                int nearby = rowOffset + x;
+                char nearbyTerrain = getTerrain(nearby);
+                if (nearbyTerrain == VILLAGE.getMapChar()
+                        || nearbyTerrain == CITY.getMapChar()
+                        || getResource(nearby).equals("" + RUINS.getMapChar())) {
+                    return false;
+                }
             }
         }
         return true;
@@ -1838,9 +2570,18 @@ public class LevelGenerator {
     public double getTribeProb(String name, Types.TRIBE tribe) {
         if(tribe == null) {
             return 1.0;
-        } else {
-            return data.getJSONObject(name).getDouble(tribe.toString());
         }
+        EnumMap<Types.TRIBE, Double> byTribe = tribeProbabilityCache.get(name);
+        if (byTribe == null) {
+            byTribe = new EnumMap<>(Types.TRIBE.class);
+            tribeProbabilityCache.put(name, byTribe);
+        }
+        Double cached = byTribe.get(tribe);
+        if (cached == null) {
+            cached = data.getJSONObject(name).getDouble(tribe.toString());
+            byTribe.put(tribe, cached);
+        }
+        return cached;
     }
 
     /**
@@ -1859,6 +2600,9 @@ public class LevelGenerator {
      * @param resource the desired type of resource.
      */
     public void writeTile(int index, String terrain, String resource) {
+        if (terrain != null && isWaterTerrain(getTerrain(index)) != isWaterTerrain(terrain.charAt(0))) {
+            landComponentKeyCacheValid = false;
+        }
         if(terrain == null) {
             level[index] = "" + getTerrain(index) + ':' + resource;
         }else if(resource == null) {
@@ -1874,7 +2618,7 @@ public class LevelGenerator {
      * @return the character that represents the specific terrain (consult TERRAIN enum).
      */
     public char getTerrain(int index) {
-        return level[index].split(":")[0].charAt(0);
+        return level[index].charAt(0);
     }
 
 
@@ -1893,12 +2637,16 @@ public class LevelGenerator {
      */
     public String getResource(int index)
     {
-        String[] pieces = level[index].split(":", -1);
-        if(pieces.length > 1)
-            if(pieces[1].isEmpty() || pieces[1].charAt(0) == ' ')
-                return "";
-            else return pieces[1];
-        else return "";
+        String tile = level[index];
+        int separator = tile.indexOf(':');
+        if (separator < 0 || separator == tile.length() - 1 || tile.charAt(separator + 1) == ' ') {
+            return "";
+        }
+        int nextSeparator = tile.indexOf(':', separator + 1);
+        if (nextSeparator < 0) {
+            return tile.substring(separator + 1);
+        }
+        return tile.substring(separator + 1, nextSeparator);
     }
 
     /**
@@ -2073,10 +2821,12 @@ public class LevelGenerator {
     private static final class TerrainRates {
         private final double mountain;
         private final double forest;
+        private final double plain;
 
         private TerrainRates(double mountain, double forest) {
             this.mountain = mountain;
             this.forest = forest;
+            this.plain = Math.max(0.0, 1.0 - mountain - forest);
         }
     }
 
