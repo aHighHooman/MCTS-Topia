@@ -617,7 +617,7 @@ def main() -> int:
 
     print(
         "Self-play MCTS NN profile: "
-        f"games={args.games} selected_paths={cfg.search.num_simulations} batch={cfg.search.batch_size} "
+        f"games={args.games} node_budget={cfg.search.num_simulations} batch={cfg.search.batch_size} "
         f"map={cfg.selfplay.map_type}/{cfg.selfplay.map_size} max_turns={cfg.selfplay.max_turns_capitals} "
         f"persistent_bot={cfg.selfplay.persistent_bot} checkpoint={args.checkpoint}",
         flush=True,
@@ -712,7 +712,7 @@ def main() -> int:
     total_native_approximate = sum(int(row["native_approximate_transition"]) for row in game_rows)
     print(
         "\nSelf-play MCTS NN profile: "
-        f"games={len(game_rows)} mode=full_selfplay selected_paths_per_action={cfg.search.num_simulations} "
+        f"games={len(game_rows)} mode=full_selfplay node_budget_per_action={cfg.search.num_simulations} "
         f"batch={cfg.search.batch_size} device={device} checkpoint={args.checkpoint} "
         f"persistent_bot={cfg.selfplay.persistent_bot} "
         f"map={cfg.selfplay.map_type}/{cfg.selfplay.map_size} "

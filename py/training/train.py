@@ -4,6 +4,7 @@ import argparse
 import copy
 import csv
 import json
+import math
 import os
 import random
 import re
@@ -13,7 +14,6 @@ import subprocess
 import statistics
 import time
 from collections import Counter
-from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Dict, List
 
@@ -43,14 +43,25 @@ class ReplayDataset(Dataset):
 
 
 def _stack_encoded(items: List[EncodedObservation]) -> EncodedObservation:
+    max_units = max((item.unit_features.shape[1] for item in items), default=0)
+    max_cities = max((item.city_features.shape[1] for item in items), default=0)
+    max_actions = max((item.action_features.shape[1] for item in items), default=0)
+
+    def pad_slots(tensor: torch.Tensor, size: int) -> torch.Tensor:
+        if tensor.shape[1] >= size:
+            return tensor
+        pad_shape = list(tensor.shape)
+        pad_shape[1] = size - tensor.shape[1]
+        return torch.cat([tensor, tensor.new_zeros(pad_shape)], dim=1)
+
     return EncodedObservation(
         board=torch.cat([item.board for item in items], dim=0),
-        unit_features=torch.cat([item.unit_features for item in items], dim=0),
-        unit_mask=torch.cat([item.unit_mask for item in items], dim=0),
-        city_features=torch.cat([item.city_features for item in items], dim=0),
-        city_mask=torch.cat([item.city_mask for item in items], dim=0),
-        action_features=torch.cat([item.action_features for item in items], dim=0),
-        action_mask=torch.cat([item.action_mask for item in items], dim=0),
+        unit_features=torch.cat([pad_slots(item.unit_features, max_units) for item in items], dim=0),
+        unit_mask=torch.cat([pad_slots(item.unit_mask, max_units) for item in items], dim=0),
+        city_features=torch.cat([pad_slots(item.city_features, max_cities) for item in items], dim=0),
+        city_mask=torch.cat([pad_slots(item.city_mask, max_cities) for item in items], dim=0),
+        action_features=torch.cat([pad_slots(item.action_features, max_actions) for item in items], dim=0),
+        action_mask=torch.cat([pad_slots(item.action_mask, max_actions) for item in items], dim=0),
         scalar_features=torch.cat([item.scalar_features for item in items], dim=0),
         action_ids=[],
     )
@@ -67,16 +78,55 @@ def _append_original_encoded(
     target_records.append(record)
 
 
+def _renormalize_policy_targets(policy_targets: torch.Tensor, target_records: list[StepRecord]) -> torch.Tensor:
+    if policy_targets.numel() == 0:
+        return policy_targets
+    width = int(policy_targets.shape[-1])
+    row_sums = policy_targets.sum(dim=-1, keepdim=True)
+    ok = row_sums.squeeze(-1) > 0.0
+    if bool(ok.all()):
+        return policy_targets / row_sums.clamp_min(1e-12)
+
+    fixed = policy_targets.clone()
+    for row_idx, is_ok in enumerate(ok.tolist()):
+        if is_ok:
+            continue
+        record = target_records[row_idx]
+        action_index = int(getattr(record, "action_index", -1))
+        if 0 <= action_index < width:
+            fixed[row_idx, action_index] = 1.0
+            continue
+        legal_count = min(width, len(getattr(record, "legal_actions", []) or []))
+        if legal_count > 0:
+            fixed[row_idx, :legal_count] = 1.0 / float(legal_count)
+    row_sums = fixed.sum(dim=-1, keepdim=True)
+    return torch.where(row_sums > 0.0, fixed / row_sums.clamp_min(1e-12), fixed)
+
+
+def _align_policy_targets_to_logits(policy_targets: torch.Tensor, logit_width: int) -> torch.Tensor:
+    target_width = int(policy_targets.shape[-1])
+    if target_width == logit_width:
+        return policy_targets
+    if target_width > logit_width:
+        return policy_targets[:, :logit_width]
+    pad_shape = list(policy_targets.shape)
+    pad_shape[-1] = logit_width - target_width
+    return torch.cat([policy_targets, policy_targets.new_zeros(pad_shape)], dim=-1)
+
+
 def collate_batch(records: List[StepRecord], cfg: HybridAgentConfig) -> Dict[str, object]:
     encoded_items: list[EncodedObservation] = []
     target_records: list[StepRecord] = []
     for record in records:
         _append_original_encoded(encoded_items, target_records, record, cfg)
     encoded = _stack_encoded(encoded_items)
+    policy_width = int(encoded.action_features.shape[1])
+    policy_targets = visit_target_tensor(target_records, policy_width)
+    policy_targets = _renormalize_policy_targets(policy_targets, target_records)
     return {
         "encoded": encoded,
         "records": target_records,
-        "policy_targets": visit_target_tensor(target_records, cfg.model.max_actions),
+        "policy_targets": policy_targets,
         "value_targets": torch.tensor([record.value_target for record in target_records], dtype=torch.float32),
         "root_values": torch.tensor([record.root_value for record in target_records], dtype=torch.float32),
     }
@@ -100,35 +150,38 @@ def _load_checkpoint(model: HybridPolicyValueNet, checkpoint_path: Path, optimiz
 
 
 def _append_metrics(path: Path, row: Dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    row_keys = list(row.keys())
-    if not path.exists() or path.stat().st_size == 0:
-        with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=row_keys)
-            writer.writeheader()
-            writer.writerow(row)
-        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row_keys = list(row.keys())
+        if not path.exists() or path.stat().st_size == 0:
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=row_keys)
+                writer.writeheader()
+                writer.writerow(row)
+            return
 
-    with path.open("r", newline="", encoding="utf-8", errors="replace") as handle:
-        reader = csv.DictReader(handle, restkey="_extra")
-        existing_rows = list(reader)
-        fieldnames = list(reader.fieldnames or [])
+        with path.open("r", newline="", encoding="utf-8", errors="replace") as handle:
+            reader = csv.DictReader(handle, restkey="_extra")
+            existing_rows = list(reader)
+            fieldnames = list(reader.fieldnames or [])
 
-    missing_keys = [key for key in row_keys if key not in fieldnames]
-    if missing_keys:
-        fieldnames.extend(missing_keys)
-        for existing in existing_rows:
-            existing.pop("_extra", None)
-        with path.open("w", newline="", encoding="utf-8") as handle:
+        missing_keys = [key for key in row_keys if key not in fieldnames]
+        if missing_keys:
+            fieldnames.extend(missing_keys)
+            for existing in existing_rows:
+                existing.pop("_extra", None)
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows(existing_rows)
+                writer.writerow(row)
+            return
+
+        with path.open("a", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
-            writer.writerows(existing_rows)
             writer.writerow(row)
-        return
-
-    with path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writerow(row)
+    except Exception as exc:
+        print(f"[metrics] warning: failed to append to metrics CSV {path}: {exc}", flush=True)
 
 
 def _append_selfplay_game_metrics(path: Path, row: Dict[str, object]) -> None:
@@ -192,13 +245,29 @@ def _summarize_records(records: List[StepRecord]) -> Dict[str, object]:
         "wins": outcome_counts["wins"],
         "losses": outcome_counts["losses"],
         "draws": outcome_counts["draws"],
+        "policy_entropy": _policy_entropy_bits(records),
+        "static_policy_weight": (
+            sum(float(record.static_policy_weight) for record in records) / max(1, len(records))
+        ),
+        "static_value_weight": (
+            sum(float(record.static_value_weight) for record in records) / max(1, len(records))
+        ),
     }
 
 
 def _summarize_replay_shards(replay_store: ReplayStore, shard_paths: List[Path]) -> Dict[str, object]:
     records: list[StepRecord] = []
-    wins = losses = draws = 0
-    adjudicated_games = adjudication_wins = adjudication_draws = adjudication_failed = 0
+    seen_games = set()
+    adjudicated_games_set = set()
+    adjudication_failed_set = set()
+
+    decisive = 0
+    draws = 0
+    adjudicated_games = 0
+    adjudication_decisive = 0
+    adjudication_draws = 0
+    adjudication_failed = 0
+
     for shard in shard_paths:
         try:
             _, shard_records = replay_store._load_shard(shard)
@@ -207,31 +276,49 @@ def _summarize_replay_shards(replay_store: ReplayStore, shard_paths: List[Path])
         records.extend(shard_records)
         if not shard_records:
             continue
-        player_id = int(shard_records[0].player_id)
         outcome = shard_records[-1].outcome or {}
-        if bool(outcome.get("adjudicated")):
-            adjudicated_games += 1
-            if bool(outcome.get("adjudication_failed")):
-                adjudication_failed += 1
         winner_id = outcome.get("winner_id")
-        if winner_id is None:
-            draws += 1
-            if bool(outcome.get("adjudicated")):
-                adjudication_draws += 1
-        elif int(winner_id) == player_id:
-            wins += 1
-            if bool(outcome.get("adjudicated")):
-                adjudication_wins += 1
+        final_scores = outcome.get("final_scores")
+
+        if isinstance(final_scores, list):
+            scores_key = tuple(sorted(
+                (int(item.get("id", 0)), int(item.get("score", 0)))
+                for item in final_scores if isinstance(item, dict)
+            ))
         else:
-            losses += 1
+            scores_key = (shard.name,)
+
+        game_key = (scores_key, winner_id)
+
+        if game_key not in seen_games:
+            seen_games.add(game_key)
+            if winner_id is None:
+                draws += 1
+            else:
+                decisive += 1
+
+        if bool(outcome.get("adjudicated")):
+            if game_key not in adjudicated_games_set:
+                adjudicated_games_set.add(game_key)
+                adjudicated_games += 1
+                if winner_id is None:
+                    adjudication_draws += 1
+                else:
+                    adjudication_decisive += 1
+            if bool(outcome.get("adjudication_failed")):
+                if game_key not in adjudication_failed_set:
+                    adjudication_failed_set.add(game_key)
+                    adjudication_failed += 1
+
     summary = _summarize_records(records)
-    summary["wins"] = wins
-    summary["losses"] = losses
+    summary["decisive"] = decisive
     summary["draws"] = draws
     summary["adjudicated_games"] = adjudicated_games
-    summary["adjudication_wins"] = adjudication_wins
+    summary["adjudication_decisive"] = adjudication_decisive
     summary["adjudication_draws"] = adjudication_draws
     summary["adjudication_failed"] = adjudication_failed
+    summary.pop("wins", None)
+    summary.pop("losses", None)
     return summary
 
 
@@ -496,6 +583,45 @@ def _format_profile(summary: Dict[str, float]) -> str:
     )
 
 
+def _static_guidance_weights(cfg: HybridAgentConfig, iteration: int) -> tuple[float, float]:
+    phases = [
+        (max(0, int(cfg.training.static_guidance_bootstrap_iterations)), 1.0, 1.0, 1.0, 1.0),
+        (max(0, int(cfg.training.static_guidance_early_iterations)), 1.0, 1.0, 0.75, 0.5),
+        (max(0, int(cfg.training.static_guidance_middle_iterations)), 0.75, 0.5, 0.4, 0.2),
+        (max(0, int(cfg.training.static_guidance_late_iterations)), 0.4, 0.2, 0.1, 0.0),
+        (max(0, int(cfg.training.static_guidance_final_iterations)), 0.1, 0.0, 0.0, 0.0),
+    ]
+    offset = max(0, int(iteration) - 1)
+    for length, p_start, v_start, p_end, v_end in phases:
+        if length <= 0:
+            continue
+        if offset < length:
+            if length == 1:
+                return float(p_end), float(v_end)
+            t = float(offset) / float(length - 1)
+            return (
+                float(p_start + (p_end - p_start) * t),
+                float(v_start + (v_end - v_start) * t),
+            )
+        offset -= length
+    return 0.0, 0.0
+
+
+def _policy_entropy_bits(records: list[StepRecord]) -> float:
+    total = 0.0
+    count = 0
+    for record in records:
+        probs = [float(value) for value in record.visit_target if float(value) > 0.0]
+        if not probs:
+            continue
+        mass = sum(probs)
+        if mass <= 0.0:
+            continue
+        total += -sum((prob / mass) * math.log2(max(1e-12, prob / mass)) for prob in probs)
+        count += 1
+    return total / max(1, count)
+
+
 def _selfplay_game_row(
     *,
     iteration: int,
@@ -530,12 +656,13 @@ def _selfplay_game_row(
         "actions_sec": actions_sec,
         "configured_sims_sec": configured_sims_sec,
         "simulations": simulations,
+        "static_policy_weight": float(summary.get("static_policy_weight", 0.0) or 0.0),
+        "static_value_weight": float(summary.get("static_value_weight", 0.0) or 0.0),
         "profile_actions": profile_actions,
-        "wins": int(summary.get("wins", 0) or 0) if exact_summary else "",
-        "losses": int(summary.get("losses", 0) or 0) if exact_summary else "",
+        "decisive": int(summary.get("decisive", 0) or 0) if exact_summary else "",
         "draws": int(summary.get("draws", 0) or 0) if exact_summary else "",
         "adjudicated_games": int(summary.get("adjudicated_games", 0) or 0) if exact_summary else "",
-        "adjudication_wins": int(summary.get("adjudication_wins", 0) or 0) if exact_summary else "",
+        "adjudication_decisive": int(summary.get("adjudication_decisive", 0) or 0) if exact_summary else "",
         "adjudication_draws": int(summary.get("adjudication_draws", 0) or 0) if exact_summary else "",
         "adjudication_failed": int(summary.get("adjudication_failed", 0) or 0) if exact_summary else "",
         "shards": shard_count,
@@ -599,8 +726,10 @@ def train_round(
             value_targets = batch["value_targets"].to(device)
             output = model(encoded)
             log_probs = torch.log_softmax(output.policy_logits, dim=-1)
+            policy_targets = _align_policy_targets_to_logits(policy_targets, int(log_probs.shape[-1]))
+            policy_targets = policy_targets / policy_targets.sum(dim=-1, keepdim=True).clamp_min(1e-12)
             policy_loss = -(policy_targets * log_probs).sum(dim=-1).mean()
-            value_loss = nn.functional.mse_loss(output.value, value_targets)
+            value_loss = nn.functional.mse_loss(output.value.flatten(), value_targets)
             loss = (
                 cfg.training.policy_loss_weight * policy_loss
                 + cfg.training.value_loss_weight * value_loss
@@ -680,6 +809,10 @@ def _bot_command(
         str(cfg.search.top_k_actions),
         "--search-batch-size",
         str(cfg.search.batch_size),
+        "--static-policy-weight",
+        str(float(getattr(cfg.search, "static_policy_weight", 0.0) or 0.0)),
+        "--static-value-weight",
+        str(float(getattr(cfg.search, "static_value_weight", 0.0) or 0.0)),
         "--max-game-actions",
         str(max(1, int(cfg.selfplay.max_actions_per_game))),
     ]
@@ -776,6 +909,10 @@ def _start_persistent_bot_server(
         str(cfg.search.top_k_actions),
         "--search-batch-size",
         str(cfg.search.batch_size),
+        "--static-policy-weight",
+        str(float(getattr(cfg.search, "static_policy_weight", 0.0) or 0.0)),
+        "--static-value-weight",
+        str(float(getattr(cfg.search, "static_value_weight", 0.0) or 0.0)),
         "--max-game-actions",
         str(max(1, int(cfg.selfplay.max_actions_per_game))),
     ]
@@ -883,10 +1020,9 @@ def train(cfg: HybridAgentConfig, *, device: torch.device, iterations: int | Non
         f"device={device} search=native sims={cfg.search.num_simulations} "
         f"wall_clock_per_action={_format_wall_clock_per_action(cfg)} "
         f"search_batch={cfg.search.batch_size} train_batch={cfg.training.batch_size} "
-        f"replay_batch={cfg.training.replay_batch_size} selfplay_workers={cfg.selfplay.workers} "
+        f"replay_batch={cfg.training.replay_batch_size} "
         f"persistent_bot={cfg.selfplay.persistent_bot} "
-        f"offline_augment_symmetries={cfg.training.augment_symmetries} "
-        f"augmentation_prob={cfg.training.augmentation_prob}",
+        f"offline_augment_symmetries={cfg.training.augment_symmetries}",
         flush=True,
     )
     bot_script = workdir / "py" / "bots" / "hybrid_nn_bot.py"
@@ -895,34 +1031,33 @@ def train(cfg: HybridAgentConfig, *, device: torch.device, iterations: int | Non
     total_iterations = iterations if iterations is not None else cfg.training.num_iterations
     games = games_per_iteration if games_per_iteration is not None else cfg.training.selfplay_games_per_iteration
     tribes = ["Xin Xi", "Imperius"]
-    if cfg.selfplay.workers > 2 and not cfg.selfplay.allow_unsafe_workers:
-        raise ValueError("selfplay workers above 2 require allow_unsafe_workers=True")
-    if cfg.selfplay.workers < 1:
-        raise ValueError("selfplay workers must be at least 1")
-    if cfg.selfplay.persistent_bot and cfg.selfplay.workers != 1:
-        raise ValueError("persistent bot mode currently requires selfplay_workers=1")
 
     for local_iteration in range(total_iterations):
         iteration_started_at = time.monotonic()
         selfplay_elapsed_total = 0.0
         iteration = start_iteration + local_iteration + 1
+        if hasattr(cfg.training, "_static_guidance_override"):
+            cfg.search.static_policy_weight, cfg.search.static_value_weight = getattr(cfg.training, "_static_guidance_override")
+        else:
+            cfg.search.static_policy_weight, cfg.search.static_value_weight = _static_guidance_weights(cfg, iteration)
         print(
             f"\n[iter {local_iteration + 1}/{total_iterations} | global {iteration}] "
             f"self-play games={games} mode={cfg.selfplay.game_mode} max_turns={cfg.selfplay.max_turns_capitals} "
             f"max_actions={cfg.selfplay.max_actions_per_game} "
             f"wall_clock_per_action={_format_wall_clock_per_action(cfg)} "
-            f"action_timeout={cfg.selfplay.external_action_timeout_ms}ms workers={cfg.selfplay.workers} "
+            f"static_policy_weight={cfg.search.static_policy_weight:.3f} "
+            f"static_value_weight={cfg.search.static_value_weight:.3f} "
+            f"action_timeout={cfg.selfplay.external_action_timeout_ms}ms "
             f"persistent_bot={cfg.selfplay.persistent_bot}",
             flush=True,
         )
         iteration_action_counts: Counter[str] = Counter()
-        iteration_wins = iteration_losses = iteration_draws = 0
-        iteration_adjudicated = iteration_adjudication_wins = iteration_adjudication_draws = iteration_adjudication_failed = 0
+        iteration_decisive = iteration_draws = 0
+        iteration_adjudicated = iteration_adjudication_decisive = iteration_adjudication_draws = iteration_adjudication_failed = 0
         iteration_adjudication_sec = 0.0
         iteration_profile_actions = 0.0
         before_iteration_shards = set(replay_store.shards())
         before_count = len(before_iteration_shards)
-        workers = max(1, int(cfg.selfplay.workers))
         persistent_process: subprocess.Popen[str] | None = None
         persistent_host = "127.0.0.1"
         persistent_port = 0
@@ -939,187 +1074,83 @@ def train(cfg: HybridAgentConfig, *, device: torch.device, iterations: int | Non
                 )
                 persistent_log_paths = [stdout_path, stderr_path]
                 print(f"[persistent bot] started host={persistent_host} port={persistent_port}", flush=True)
-            if workers == 1:
-                game_results = []
-                for game_idx in range(games):
-                    seed = iteration * 10_000 + game_idx
-                    before_game_shards = set(replay_store.shards())
-                    before = len(before_game_shards)
-                    print(f"[game {game_idx + 1}/{games}] seed={seed} start shards={before}", flush=True)
-                    bridge_commands = None
-                    if cfg.selfplay.persistent_bot:
-                        bridge = _persistent_bridge_command(bot_bridge_script, persistent_host, persistent_port)
-                        bridge_commands = [bridge, list(bridge)]
-                    game_result = _run_selfplay_game(
-                        cfg, bot_script, checkpoint_path, cfg.replay.replay_dir, tribes, workdir, device,
-                        local_iteration, iteration, game_idx, games, bot_commands=bridge_commands,
-                    )
-                    result = game_result["result"]
-                    after = count_replay_shards(cfg.replay.replay_dir)
-                    ensure_successful_selfplay(result, before, after, str(game_result["label"]))
-                    replay_store.refresh()
-                    new_shards = sorted(set(replay_store.shards()) - before_game_shards)
-                    game_result["new_shards"] = new_shards
-                    game_results.append(game_result)
-            else:
-                game_results = []
+            game_results = []
+            for game_idx in range(games):
+                seed = iteration * 10_000 + game_idx
+                before_game_shards = set(replay_store.shards())
+                before = len(before_game_shards)
+                print(f"[game {game_idx + 1}/{games}] seed={seed} start shards={before}", flush=True)
+                bridge_commands = None
+                if cfg.selfplay.persistent_bot:
+                    bridge = _persistent_bridge_command(bot_bridge_script, persistent_host, persistent_port)
+                    bridge_commands = [bridge, list(bridge)]
+                game_result = _run_selfplay_game(
+                    cfg, bot_script, checkpoint_path, cfg.replay.replay_dir, tribes, workdir, device,
+                    local_iteration, iteration, game_idx, games, bot_commands=bridge_commands,
+                )
+                result = game_result["result"]
+                after = count_replay_shards(cfg.replay.replay_dir)
+                ensure_successful_selfplay(result, before, after, str(game_result["label"]))
+                replay_store.refresh()
+                new_shards = sorted(set(replay_store.shards()) - before_game_shards)
+                game_result["new_shards"] = new_shards
+                game_results.append(game_result)
         finally:
             if persistent_process is not None:
                 _shutdown_persistent_server(persistent_host, persistent_port, persistent_process)
                 persistent_profile_summary = _profile_summary_from_files(persistent_log_paths)
                 print("[persistent bot] stopped", flush=True)
 
-        if workers > 1:
-            print(f"[selfplay] parallel start games={games} workers={workers} start_shards={before_count}", flush=True)
-            game_results = []
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="selfplay") as executor:
-                futures = [
-                    executor.submit(
-                        _run_selfplay_game,
-                        cfg,
-                        bot_script,
-                        checkpoint_path,
-                        cfg.replay.replay_dir,
-                        tribes,
-                        workdir,
-                        device,
-                        local_iteration,
-                        iteration,
-                        game_idx,
-                        games,
-                    )
-                    for game_idx in range(games)
-                ]
-                done, pending = wait(futures, return_when=FIRST_EXCEPTION)
-                first_error: BaseException | None = None
-                for future in done:
-                    try:
-                        game_results.append(future.result())
-                    except BaseException as exc:
-                        first_error = exc
-                        break
-                if first_error is not None:
-                    for future in pending:
-                        future.cancel()
-                    wait(pending, timeout=10)
-                    if not cfg.selfplay.allow_partial_selfplay:
-                        raise RuntimeError("Parallel self-play failed; partial iteration will not train.") from first_error
-                for future in pending:
-                    if future.cancelled():
-                        continue
-                    game_results.append(future.result())
-            replay_store.refresh()
-            after_count = count_replay_shards(cfg.replay.replay_dir)
-            for game_result in game_results:
-                ensure_successful_selfplay(game_result["result"], before_count, after_count, str(game_result["label"]))
-            all_new_shards = sorted(set(replay_store.shards()) - before_iteration_shards)
-            expected_min_shards = 2 * games
-            if len(all_new_shards) < expected_min_shards and not cfg.selfplay.allow_partial_selfplay:
-                raise RuntimeError(
-                    f"Parallel self-play produced {len(all_new_shards)} new shards, expected at least {expected_min_shards}; "
-                    "partial iteration will not train."
-                )
-            for game_result in game_results:
-                game_result["new_shards"] = all_new_shards
-
-        if workers == 1:
-            for game_result in sorted(game_results, key=lambda item: int(item["game_idx"])):
-                result = game_result["result"]
-                elapsed = float(game_result["elapsed"])
-                selfplay_elapsed_total += elapsed
-                game_summary = _summarize_replay_shards(replay_store, list(game_result["new_shards"]))
-                profile_summary = _profile_summary(result.stderr)
-                iteration_profile_actions += float(profile_summary.get("profile_actions", 0.0))
-                iteration_action_counts.update(game_summary.get("actions", {}))
-                iteration_wins += int(game_summary["wins"])
-                iteration_losses += int(game_summary["losses"])
-                iteration_draws += int(game_summary["draws"])
-                iteration_adjudicated += int(game_summary.get("adjudicated_games", 0) or 0)
-                iteration_adjudication_wins += int(game_summary.get("adjudication_wins", 0) or 0)
-                iteration_adjudication_draws += int(game_summary.get("adjudication_draws", 0) or 0)
-                iteration_adjudication_failed += int(game_summary.get("adjudication_failed", 0) or 0)
-                iteration_adjudication_sec += _adjudication_seconds(result.stdout)
-                game_idx = int(game_result["game_idx"])
-                _append_selfplay_game_metrics(
-                    cfg.diagnostics.selfplay_games_csv,
-                    _selfplay_game_row(
-                        iteration=iteration,
-                        local_iteration=local_iteration,
-                        game_idx=game_idx,
-                        games=games,
-                        seed=int(game_result["seed"]),
-                        elapsed=elapsed,
-                        summary=game_summary,
-                        profile_summary=profile_summary,
-                        simulations=int(cfg.search.num_simulations),
-                        shard_count=len(game_result["new_shards"]),
-                        exact_summary=True,
-                    ),
-                )
-                adj_note = ""
-                ag = int(game_summary.get("adjudicated_games", 0) or 0)
-                if ag:
-                    adj_note = (
-                        f" adjudication(shards={ag} failed={int(game_summary.get('adjudication_failed', 0) or 0)} "
-                        f"adj_wins={int(game_summary.get('adjudication_wins', 0) or 0)})"
-                    )
-                print(
-                    f"[game {game_idx + 1}/{games}] done time={_format_seconds(elapsed)} "
-                    f"steps={game_summary['steps']} shards=+{len(game_result['new_shards'])} "
-                    f"ended={_match_end_reason(result.stdout, result.stderr)} "
-                    f"outcomes W/L/D={game_summary['wins']}/{game_summary['losses']}/{game_summary['draws']}"
-                    f"{adj_note} "
-                    f"actions {_format_action_counts(game_summary)}"
-                    f"{_format_profile(profile_summary)}",
-                    flush=True,
-                )
-        else:
-            selfplay_elapsed_total = time.monotonic() - iteration_started_at
-            aggregate_shards = sorted(set(replay_store.shards()) - before_iteration_shards)
-            aggregate_summary = _summarize_replay_shards(replay_store, aggregate_shards)
-            iteration_action_counts.update(aggregate_summary.get("actions", {}))
-            iteration_wins += int(aggregate_summary["wins"])
-            iteration_losses += int(aggregate_summary["losses"])
-            iteration_draws += int(aggregate_summary["draws"])
-            iteration_adjudicated += int(aggregate_summary.get("adjudicated_games", 0) or 0)
-            iteration_adjudication_wins += int(aggregate_summary.get("adjudication_wins", 0) or 0)
-            iteration_adjudication_draws += int(aggregate_summary.get("adjudication_draws", 0) or 0)
-            iteration_adjudication_failed += int(aggregate_summary.get("adjudication_failed", 0) or 0)
-            for game_result in sorted(game_results, key=lambda item: int(item["game_idx"])):
-                game_idx = int(game_result["game_idx"])
-                profile_summary = _profile_summary(game_result["result"].stderr)
-                iteration_adjudication_sec += _adjudication_seconds(game_result["result"].stdout)
-                iteration_profile_actions += float(profile_summary.get("profile_actions", 0.0))
-                _append_selfplay_game_metrics(
-                    cfg.diagnostics.selfplay_games_csv,
-                    _selfplay_game_row(
-                        iteration=iteration,
-                        local_iteration=local_iteration,
-                        game_idx=game_idx,
-                        games=games,
-                        seed=int(game_result["seed"]),
-                        elapsed=float(game_result["elapsed"]),
-                        summary={},
-                        profile_summary=profile_summary,
-                        simulations=int(cfg.search.num_simulations),
-                        shard_count=0,
-                        exact_summary=False,
-                    ),
-                )
-                print(
-                    f"[game {game_idx + 1}/{games}] done time={_format_seconds(float(game_result['elapsed']))} "
-                    f"seed={game_result['seed']} "
-                    f"ended={_match_end_reason(game_result['result'].stdout, game_result['result'].stderr)}"
-                    f"{_format_profile(profile_summary)}",
-                    flush=True,
+        for game_result in sorted(game_results, key=lambda item: int(item["game_idx"])):
+            result = game_result["result"]
+            elapsed = float(game_result["elapsed"])
+            selfplay_elapsed_total += elapsed
+            game_summary = _summarize_replay_shards(replay_store, list(game_result["new_shards"]))
+            profile_summary = _profile_summary(result.stderr)
+            iteration_profile_actions += float(profile_summary.get("profile_actions", 0.0))
+            iteration_action_counts.update(game_summary.get("actions", {}))
+            iteration_decisive += int(game_summary["decisive"])
+            iteration_draws += int(game_summary["draws"])
+            iteration_adjudicated += int(game_summary.get("adjudicated_games", 0) or 0)
+            iteration_adjudication_decisive += int(game_summary.get("adjudication_decisive", 0) or 0)
+            iteration_adjudication_draws += int(game_summary.get("adjudication_draws", 0) or 0)
+            iteration_adjudication_failed += int(game_summary.get("adjudication_failed", 0) or 0)
+            iteration_adjudication_sec += _adjudication_seconds(result.stdout)
+            game_idx = int(game_result["game_idx"])
+            _append_selfplay_game_metrics(
+                cfg.diagnostics.selfplay_games_csv,
+                _selfplay_game_row(
+                    iteration=iteration,
+                    local_iteration=local_iteration,
+                    game_idx=game_idx,
+                    games=games,
+                    seed=int(game_result["seed"]),
+                    elapsed=elapsed,
+                    summary=game_summary,
+                    profile_summary=profile_summary,
+                    simulations=int(cfg.search.num_simulations),
+                    shard_count=len(game_result["new_shards"]),
+                    exact_summary=True,
+                ),
+            )
+            adj_note = ""
+            ag = int(game_summary.get("adjudicated_games", 0) or 0)
+            if ag:
+                adj_note = (
+                    f" adjudication(games={ag} failed={int(game_summary.get('adjudication_failed', 0) or 0)} "
+                    f"adj_decisive={int(game_summary.get('adjudication_decisive', 0) or 0)})"
                 )
             print(
-                f"[selfplay] parallel done time={_format_seconds(selfplay_elapsed_total)} "
-                f"steps={aggregate_summary['steps']} shards=+{len(aggregate_shards)} "
-                f"outcomes W/L/D={aggregate_summary['wins']}/{aggregate_summary['losses']}/{aggregate_summary['draws']} "
-                f"actions {_format_action_counts(aggregate_summary)}",
+                f"[game {game_idx + 1}/{games}] done time={_format_seconds(elapsed)} "
+                f"steps={game_summary['steps']} shards=+{len(game_result['new_shards'])} "
+                f"ended={_match_end_reason(result.stdout, result.stderr)} "
+                f"outcomes decisive/draw={game_summary['decisive']}/{game_summary['draws']}"
+                f"{adj_note} "
+                f"actions {_format_action_counts(game_summary)}"
+                f"{_format_profile(profile_summary)}",
                 flush=True,
             )
+
 
         raw_iteration_shards = sorted(set(replay_store.shards()) - before_iteration_shards)
         current_train_records: list[StepRecord]
@@ -1166,7 +1197,7 @@ def train(cfg: HybridAgentConfig, *, device: torch.device, iterations: int | Non
             f"fresh_train_records={len(current_train_records)} old_train_records={old_replay_records} "
             f"total_train_records={len(training_records)} "
             f"iteration_actions {_format_action_counts({'actions': dict(iteration_action_counts)})} "
-            f"outcomes W/L/D={iteration_wins}/{iteration_losses}/{iteration_draws}",
+            f"outcomes decisive/draw={iteration_decisive}/{iteration_draws}",
             flush=True,
         )
         training_started_at = time.monotonic()
@@ -1199,11 +1230,10 @@ def train(cfg: HybridAgentConfig, *, device: torch.device, iterations: int | Non
             "replay_steps": replay_store.step_count(),
             "replay_shards": count_replay_shards(cfg.replay.replay_dir),
             "games_completed": len(game_results),
-            "wins": iteration_wins,
-            "losses": iteration_losses,
+            "decisive": iteration_decisive,
             "draws": iteration_draws,
             "adjudicated_games": iteration_adjudicated,
-            "adjudication_wins": iteration_adjudication_wins,
+            "adjudication_decisive": iteration_adjudication_decisive,
             "adjudication_draws": iteration_adjudication_draws,
             "adjudication_failed": iteration_adjudication_failed,
             "adjudication_sec": iteration_adjudication_sec,
@@ -1211,6 +1241,9 @@ def train(cfg: HybridAgentConfig, *, device: torch.device, iterations: int | Non
             "action_decisions": iteration_profile_actions,
             "action_decisions_sec": action_decisions_sec,
             "configured_sims_sec": configured_sims_sec,
+            "static_policy_weight": float(cfg.search.static_policy_weight),
+            "static_value_weight": float(cfg.search.static_value_weight),
+            "policy_entropy": _policy_entropy_bits(training_records),
             "selfplay_sec": selfplay_elapsed_total,
             "train_sec": training_elapsed,
             "checkpoint_sec": checkpoint_elapsed,
@@ -1238,6 +1271,13 @@ def main() -> None:
     parser.add_argument("--top-k-actions", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--search-batch-size", type=int, default=None)
+    parser.add_argument("--static-policy-weight", type=float, default=None)
+    parser.add_argument("--static-value-weight", type=float, default=None)
+    parser.add_argument("--static-guidance-bootstrap-iterations", type=int, default=None)
+    parser.add_argument("--static-guidance-early-iterations", type=int, default=None)
+    parser.add_argument("--static-guidance-middle-iterations", type=int, default=None)
+    parser.add_argument("--static-guidance-late-iterations", type=int, default=None)
+    parser.add_argument("--static-guidance-final-iterations", type=int, default=None)
     parser.add_argument("--replay-batch-size", type=int, default=None)
     parser.add_argument("--replay-dir", type=Path, default=None)
     parser.add_argument("--checkpoint", type=Path, default=None)
@@ -1253,15 +1293,11 @@ def main() -> None:
     parser.add_argument("--wall-clock-per-action-seconds", type=float, default=None)
     parser.add_argument("--wall-clock-per-turn-seconds", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--progress-interval-seconds", type=int, default=None)
-    parser.add_argument("--selfplay-workers", type=int, default=None)
-    parser.add_argument("--allow-unsafe-workers", action="store_true")
-    parser.add_argument("--allow-partial-selfplay", action="store_true")
     parser.add_argument("--profile-selfplay", action="store_true")
     parser.add_argument("--persistent-bot", action="store_true")
     parser.add_argument("--no-persistent-bot", action="store_true")
     parser.add_argument("--augment-symmetries", action="store_true", help="Enable default offline D4 replay augmentation.")
     parser.add_argument("--no-augment-symmetries", action="store_true", help="Disable offline D4 replay augmentation.")
-    parser.add_argument("--augmentation-prob", type=float, default=None)
     parser.add_argument("--augmentation-seed", type=int, default=None)
     args = parser.parse_args()
 
@@ -1276,10 +1312,26 @@ def main() -> None:
         cfg.training.batch_size = args.batch_size
     if args.search_batch_size is not None:
         cfg.search.batch_size = args.search_batch_size
+    if args.static_policy_weight is not None or args.static_value_weight is not None:
+        cfg.search.static_policy_weight = max(0.0, min(1.0, float(args.static_policy_weight or 0.0)))
+        cfg.search.static_value_weight = max(0.0, min(1.0, float(args.static_value_weight or 0.0)))
+        setattr(cfg.training, "_static_guidance_override", (cfg.search.static_policy_weight, cfg.search.static_value_weight))
+    if args.static_guidance_bootstrap_iterations is not None:
+        cfg.training.static_guidance_bootstrap_iterations = args.static_guidance_bootstrap_iterations
+    if args.static_guidance_early_iterations is not None:
+        cfg.training.static_guidance_early_iterations = args.static_guidance_early_iterations
+    if args.static_guidance_middle_iterations is not None:
+        cfg.training.static_guidance_middle_iterations = args.static_guidance_middle_iterations
+    if args.static_guidance_late_iterations is not None:
+        cfg.training.static_guidance_late_iterations = args.static_guidance_late_iterations
+    if args.static_guidance_final_iterations is not None:
+        cfg.training.static_guidance_final_iterations = args.static_guidance_final_iterations
     if args.replay_batch_size is not None:
         cfg.training.replay_batch_size = args.replay_batch_size
     if args.replay_dir is not None:
-        cfg.replay.replay_dir = args.replay_dir
+        cfg.replay.replay_dir = args.replay_dir.resolve()
+    else:
+        cfg.replay.replay_dir = cfg.replay.replay_dir.resolve()
     if args.checkpoint is not None:
         cfg.training.checkpoint_path = args.checkpoint
     if args.max_turns_capitals is not None:
@@ -1307,12 +1359,6 @@ def main() -> None:
         cfg.selfplay.wall_clock_per_action_seconds = wall_clock_per_action
     if args.progress_interval_seconds is not None:
         cfg.selfplay.progress_interval_seconds = args.progress_interval_seconds
-    if args.selfplay_workers is not None:
-        cfg.selfplay.workers = args.selfplay_workers
-    if args.allow_unsafe_workers:
-        cfg.selfplay.allow_unsafe_workers = True
-    if args.allow_partial_selfplay:
-        cfg.selfplay.allow_partial_selfplay = True
     if args.profile_selfplay:
         cfg.selfplay.profile_selfplay = True
     if args.persistent_bot:
@@ -1323,24 +1369,8 @@ def main() -> None:
         cfg.training.augment_symmetries = True
     if args.no_augment_symmetries:
         cfg.training.augment_symmetries = False
-    if args.augmentation_prob is not None:
-        cfg.training.augmentation_prob = args.augmentation_prob
-        if cfg.training.augment_symmetries and args.augmentation_prob < 1.0:
-            print(
-                "[train] warning: --augmentation-prob is deprecated for offline augmentation and will be ignored; "
-                "offline D4 augmentation materializes all 8 variants.",
-                flush=True,
-            )
     if args.augmentation_seed is not None:
         cfg.training.augmentation_seed = args.augmentation_seed
-    if not 0.0 <= cfg.training.augmentation_prob <= 1.0:
-        parser.error("--augmentation-prob must be between 0.0 and 1.0")
-    if cfg.selfplay.workers > 2 and not cfg.selfplay.allow_unsafe_workers:
-        parser.error("--selfplay-workers above 2 requires --allow-unsafe-workers")
-    if cfg.selfplay.workers < 1:
-        parser.error("--selfplay-workers must be at least 1")
-    if cfg.selfplay.persistent_bot and cfg.selfplay.workers != 1:
-        parser.error("--persistent-bot currently requires --selfplay-workers 1")
     device = require_cuda_device()
     train(cfg, device=device, iterations=args.iterations, games_per_iteration=args.games_per_iteration)
 

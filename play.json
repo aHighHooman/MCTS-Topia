@@ -5,11 +5,11 @@
   "Game Mode comment": "Capitals matches tribes_rl.train defaults; also Might / Perfection / Domination / Glory",
   "Map Type": "Drylands",
   "Map Type comment": "Drylands / Lakes / Continents / Pangea / Archipelago / Water World",
-  "Map Size": "Small",
+  "Map Size": "Tiny",
   "Map Size comment": "Tiny / Small / Normal / Large / Huge / Massive",
   "Glory Score Limit": 10000,
   "Glory Score Limit comment": "5000 / 10000 / 15000 / 20000 / 25000 (Glory only)",
-  "Seed": 9999,
+  "Seed": 99999,
   "Seed comment": "-1 picks a random seed each launch",
   "Max Turns Capitals": 50,
   "Max Turns Capitals comment": "Capitals/Might turn cap; code default is 50",
@@ -31,34 +31,21 @@
       "External Command": [
         "python",
         "py/bots/simple_bot.py"
-      ],
-      "External Startup Timeout Ms": 60000,
-      "External Action Timeout Ms": 300000,
-      "External Shutdown Timeout Ms": 30000,
-      "External Match Timeout Ms": 0,
-      "External Log Dir": "rl/gui_watch/logs/seat0"
+      ]
     },
     {
       "Type": "External",
       "Tribe": "Imperius",
       "External Command": [
         "python",
-        "py/bots/native_static_mcts_bot.py",
-        "--deterministic",
-        "--max-depth",
-        "0",
-        "--top-k-actions",
-        "128",
-        "--search-batch-size",
-        "64",
+        "py/bots/hybrid_nn_bot.py",
+        "--checkpoint",
+        "py/rl/checkpoints/latest_iter_0006.pt",
         "--wall-clock-per-action-seconds",
-        "2"
-      ],
-      "External Startup Timeout Ms": 60000,
-      "External Action Timeout Ms": 300000,
-      "External Shutdown Timeout Ms": 30000,
-      "External Match Timeout Ms": 0,
-      "External Log Dir": "rl/gui_watch/logs/seat1"
+        "1",
+        "--search-batch-size",
+        "64"
+      ]
     }
   ]
 }

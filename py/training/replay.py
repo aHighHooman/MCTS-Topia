@@ -29,6 +29,8 @@ class StepRecord:
     decisive: bool = False
     outcome: Dict[str, Any] | None = None
     value_target: float = 0.0
+    static_policy_weight: float = 0.0
+    static_value_weight: float = 0.0
 
 
 def record_to_payload(record: StepRecord) -> Dict[str, Any]:
@@ -48,6 +50,8 @@ def record_to_payload(record: StepRecord) -> Dict[str, Any]:
         "decisive": record.decisive,
         "outcome": record.outcome,
         "value_target": record.value_target,
+        "static_policy_weight": record.static_policy_weight,
+        "static_value_weight": record.static_value_weight,
     }
 
 
