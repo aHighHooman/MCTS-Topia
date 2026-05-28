@@ -6,21 +6,23 @@ Default configuration from `ModelConfig` is derived from named schemas in `py/nn
 
 | Item | Default |
 |---|---:|
-| Board input | `73 x 16 x 16` |
+| Board input | `82 x 16 x 16` |
 | Board tokens | `256` |
 | Unit tokens | up to `256` |
 | City tokens | up to `64` |
 | Action candidates | up to `512` |
-| Action feature width | `267` |
-| Scalar features | `99`, represented as `99` scalar tokens |
-| Unit feature width | `45` |
-| City feature width | `29` |
-| Model width | `160` |
-| Transformer layers | `5` |
+| Action feature width | `325` |
+| Scalar features | `95`, represented as `95` scalar tokens plus 1 scalar summary token |
+| Unit feature width | `41` |
+| City feature width | `34` |
+| CNN channels | `128` |
+| Board residual blocks | `4` |
+| Model width | `256` |
+| Transformer layers | `6` |
 | Attention heads | `8` |
 | Explicit belief board planes in NN input | `0` |
 | Coordinate-prior empty board planes | `0` |
-| Trainable parameters | `2,185,570` |
+| Trainable parameters | `7,124,610` |
 
 ## End-to-End Data Flow
 
@@ -61,7 +63,7 @@ The current NN encoding follows a strict known-fact rule: tensors may include ob
 flowchart TB
     Msg["Normalized message<br/>belief may be present but is not NN input"]
 
-    subgraph Board["Board tensor: B x 73 x H x W"]
+    subgraph Board["Board tensor: B x 82 x H x W"]
         TileBase["Base channels<br/>valid, explored, visible, x, y,<br/>tile unit/city presence, road"]
         Terrain["Terrain one-hot<br/>9 types"]
         Resource["Resource one-hot<br/>9 types"]
@@ -71,19 +73,19 @@ flowchart TB
     end
 
     subgraph Entities["Entity tensors"]
-        Units["unit_features<br/>B x 256 x 45<br/>id, position, owner, hp, stats,<br/>veteran/hidden/hint/status,<br/>unit-type one-hot"]
+        Units["unit_features<br/>B x 256 x 41<br/>id, position, owner, hp, stats,<br/>veteran/hidden/hint/status,<br/>unit-type one-hot"]
         UnitMask["unit_mask<br/>B x 256"]
-        Cities["city_features<br/>B x 64 x 29<br/>id, position, owner, level,<br/>population, production, walls,<br/>building counts"]
+        Cities["city_features<br/>B x 64 x 34<br/>id, position, owner, level,<br/>population, production, walls,<br/>building counts"]
         CityMask["city_mask<br/>B x 64"]
     end
 
     subgraph Actions["Legal action tensors"]
-        ActionFeatures["action_features<br/>B x 512 x 267<br/>spatial deltas, source/target summaries,<br/>tile summary, native context,<br/>action/unit/building/resource/tech one-hot"]
+        ActionFeatures["action_features<br/>B x 512 x 325<br/>spatial deltas, source/target summaries,<br/>tile summary, native context,<br/>action/unit/building/resource/tech/level-up one-hot"]
         ActionMask["action_mask<br/>B x 512"]
         ActionIds["action_ids<br/>original Java action ids"]
     end
 
-    Scalars["scalar_features<br/>B x 99<br/>game/own facts, own exact techs,<br/>relationships, visible/deduced opponent tech evidence"]
+    Scalars["scalar_features<br/>B x 95<br/>game/own facts, own exact techs,<br/>relationships, visible/deduced opponent tech evidence"]
 
     Msg --> Board
     Msg --> Entities
@@ -91,7 +93,7 @@ flowchart TB
     Msg --> Scalars
 ```
 
-The encoder fills every configured board channel through `BOARD_SCHEMA`; there are no empty coordinate-prior channels. `HybridPolicyValueNet._with_empty_board_priors` remains as a compatibility hook, but `ModelConfig.use_empty_board_coordinate_priors` defaults to `False` and `POPULATED_BOARD_CHANNELS` covers every schema channel.
+The encoder exposes every configured board channel through `BOARD_SCHEMA`; there are no empty coordinate-prior channels in the default schema. Some channels are explicitly reserved placeholders, including `reserved_hidden_authoritative`, but they are still named schema channels and are not treated as free coordinate-prior capacity. `HybridPolicyValueNet._with_empty_board_priors` remains as a compatibility hook, but `ModelConfig.use_empty_board_coordinate_priors` defaults to `False` and `POPULATED_BOARD_CHANNELS` covers every schema channel.
 
 Board features include visible facts only:
 
@@ -106,9 +108,9 @@ Board features include visible facts only:
 - visible city level
 - visible territory ownership when present
 
-Unit and city feature schemas are split. Unit rows use `UNIT_FEATURE_SCHEMA` with width `45`; city rows use `CITY_FEATURE_SCHEMA` with width `29`. The older shared `entity_feature_dim` remains in `ModelConfig` as a unit-width compatibility alias.
+Unit and city feature schemas are split. Unit rows use `UNIT_FEATURE_SCHEMA` with width `41`; city rows use `CITY_FEATURE_SCHEMA` with width `34`. The older shared `entity_feature_dim` remains in `ModelConfig` as a unit-width compatibility alias.
 
-Action features use `ACTION_FEATURE_SCHEMA` with width `267`:
+Action features use `ACTION_FEATURE_SCHEMA` with width `325`:
 
 - source/target coordinates and deltas
 - action intent flags
@@ -116,9 +118,9 @@ Action features use `ACTION_FEATURE_SCHEMA` with width `267`:
 - source and target city summaries
 - target tile summary
 - native context: capture type, target-player relationship, target player id, diplomacy flags
-- typed one-hots for action type, requested unit/building/resource, and requested tech
+- typed one-hots for action type, requested unit/building/resource/tech, and level-up bonus
 
-Scalar features use `SCALAR_FEATURE_SCHEMA` with width `99`:
+Scalar features use `SCALAR_FEATURE_SCHEMA` with width `95`:
 
 - game metadata and own tribe facts
 - own exact researched tech flags from the player-specific observation
@@ -145,59 +147,66 @@ Its outputs are split by use:
 
 ```mermaid
 flowchart TB
-    BoardIn["Board<br/>B x 73 x H x W"]
-    UnitIn["Units<br/>B x 256 x 45 + mask"]
-    CityIn["Cities<br/>B x 64 x 29 + mask"]
-    ActionIn["Actions<br/>B x 512 x 267 + mask"]
-    ScalarIn["Scalars<br/>B x 99"]
+    BoardIn["Board<br/>B x 82 x H x W"]
+    UnitIn["Units<br/>B x 256 x 41 + mask"]
+    CityIn["Cities<br/>B x 64 x 34 + mask"]
+    ActionIn["Actions<br/>B x 512 x 325 + mask"]
+    ScalarIn["Scalars<br/>B x 95"]
 
     subgraph BoardEncoder["Board encoder"]
-        Conv0["3x3 Conv<br/>73 -> 96"]
+        Conv0["3x3 Conv<br/>82 -> 128"]
         GN0["GroupNorm + GELU"]
         Res1["ResidualConvBlock<br/>3x3 Conv, GN, GELU,<br/>3x3 Conv, GN, skip"]
-        Res2["ResidualConvBlock"]
-        Conv1["1x1 Conv<br/>96 -> 160 + GELU"]
-        Flatten["Flatten spatial<br/>B x 256 x 160"]
+        ResN["4 total ResidualConvBlocks<br/>configured by board_res_blocks"]
+        Conv1["1x1 Conv<br/>128 -> 256 + GELU"]
+        Flatten["Flatten spatial<br/>B x 256 x 256"]
     end
 
-    UnitProj["Linear unit projection<br/>45 -> 160"]
-    CityProj["Linear city projection<br/>29 -> 160"]
-    ScalarProj["Scalar token encoder<br/>per-scalar Linear 1 -> 160<br/>+ learned scalar-index embedding"]
-    ActProj["Linear action projection<br/>267 -> 160"]
+    UnitProj["Linear unit projection<br/>41 -> 256"]
+    CityProj["Linear city projection<br/>34 -> 256"]
+    ScalarProj["Scalar token encoder<br/>per-scalar Linear 1 -> 256<br/>+ learned scalar-index embedding"]
+    ScalarSummary["Scalar summary token<br/>Linear 95 -> 256 -> 256"]
+    ActProj["Linear action projection<br/>325 -> 256"]
 
-    TypeEmb["Token type embeddings<br/>scalar, board, unit, city, CLS"]
-    Cat["Token concat + dropout<br/>default B x 676 x 160"]
+    TypeEmb["Token type embeddings<br/>scalar, scalar summary, board, unit, city, CLS"]
+    Cat["Token concat + dropout<br/>default B x 673 x 256"]
     Mask["Padding mask<br/>invalid unit and city tokens"]
-    Core["TransformerEncoder<br/>5 layers, 8 heads,<br/>FFN width 640, GELU"]
+    Core["TransformerEncoder<br/>6 layers, 8 heads,<br/>FFN width 1024, GELU"]
     Pooled["Pooled state<br/>CLS token output"]
     ActionAttn["Action cross-attention<br/>queries=legal actions<br/>keys/values=context latent"]
-    Policy["Policy head<br/>Linear 160 -> 160 -> 1<br/>masked logits B x 512"]
-    Value["Value head<br/>Linear 160 -> 160 -> 1<br/>tanh value B"]
+    ValueActionPool["Value action context<br/>mean pool + max pool + attention pool"]
+    Policy["Policy head<br/>Linear 256 -> 256 -> 1<br/>masked logits B x 512"]
+    Value["Value head<br/>Linear 1024 -> 256 -> 1<br/>tanh value B"]
 
-    BoardIn --> Conv0 --> GN0 --> Res1 --> Res2 --> Conv1 --> Flatten
+    BoardIn --> Conv0 --> GN0 --> Res1 --> ResN --> Conv1 --> Flatten
     UnitIn --> UnitProj
     CityIn --> CityProj
     ScalarIn --> ScalarProj
+    ScalarIn --> ScalarSummary
     ActionIn --> ActProj
 
     Flatten --> TypeEmb
     UnitProj --> TypeEmb
     CityProj --> TypeEmb
     ScalarProj --> TypeEmb
+    ScalarSummary --> TypeEmb
     TypeEmb --> Cat
     Cat --> Core
     Mask --> Core
     Core --> Pooled
-    Pooled --> Value
     Core --> ActionAttn
     ActProj --> ActionAttn
     ActionAttn --> Policy
+    ActionAttn --> ValueActionPool
+    Pooled --> ValueActionPool
+    Pooled --> Value
+    ValueActionPool --> Value
 ```
 
 Token order in the Transformer context:
 
 ```text
-[CLS] [99 scalar tokens] [board tiles] [unit tokens] [city tokens]
+[CLS] [scalar summary] [95 scalar tokens] [board tiles] [unit tokens] [city tokens]
 ```
 
 Token type ids:
@@ -205,18 +214,21 @@ Token type ids:
 | Token type id | Meaning |
 |---:|---|
 | `0` | scalar |
+| `1` | scalar summary |
 | `3` | board |
 | `4` | unit |
 | `5` | city |
 | `6` | CLS |
 
-Token type ids `1` and `2` are currently unused.
+Token type id `2` is currently unused.
 
 Default context token count:
 
 ```text
-1 CLS + 99 scalar + 256 board + 256 units + 64 cities = 676 tokens
+1 CLS + 1 scalar summary + 95 scalar + 256 board + 256 units + 64 cities = 673 tokens
 ```
+
+The policy path uses action features as queries into the Transformer latent context, then applies a per-action MLP and masks invalid actions. The value path now also consumes legal-action context: it concatenates the pooled state with masked mean-pool, masked max-pool, and pooled-state attention over action tokens, producing a `4 * d_model` value input before the final tanh head.
 
 ## Action Selection with MCTS
 
@@ -287,7 +299,7 @@ loss = policy_loss_weight * policy_cross_entropy
 | Board ownership/control | Visible owner buckets encode unit/city/territory ownership | Spatial ownership is available to the CNN only when present in observation evidence. |
 | Action bottleneck | Only legal actions are action-query tokens; default cap is 512 | If Java generates more than 512 legal actions, later actions are truncated and cannot be selected. |
 | Entity truncation | Units cap 256, cities cap 64 | Large or unusual maps should still be checked. |
-| Dense board channels | `board_channels=73`, all channels named by schema | There are no spare coordinate-prior channels in the default model. |
+| Dense board channels | `board_channels=82`, all channels named by schema | There are no spare coordinate-prior channels in the default model. |
 | Value target | Mostly terminal discounted return, shaped reward defaults to `0.0` | Sparse value signal may be slow in long games unless search/value quality is already good. |
 | Masking | Unit/city masks are applied in Transformer; action mask after policy head | Invalid entities/actions are masked, board tiles are dense. |
 

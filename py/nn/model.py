@@ -55,20 +55,29 @@ class HybridPolicyValueNet(nn.Module):
         self.empty_board_channel_indices = [
             channel for channel in range(cfg.board_channels) if channel not in POPULATED_BOARD_CHANNELS
         ]
-        self.board_encoder = nn.Sequential(
+        board_layers: list[nn.Module] = [
             nn.Conv2d(cfg.board_channels, cfg.cnn_channels, kernel_size=3, padding=1),
             _make_spatial_norm(cfg.cnn_channels),
             nn.GELU(),
-            ResidualConvBlock(cfg.cnn_channels),
-            ResidualConvBlock(cfg.cnn_channels),
-            nn.Conv2d(cfg.cnn_channels, cfg.d_model, kernel_size=1),
-            nn.GELU(),
+        ]
+        board_layers.extend(ResidualConvBlock(cfg.cnn_channels) for _ in range(max(1, int(getattr(cfg, "board_res_blocks", 2)))))
+        board_layers.extend(
+            [
+                nn.Conv2d(cfg.cnn_channels, cfg.d_model, kernel_size=1),
+                nn.GELU(),
+            ]
         )
+        self.board_encoder = nn.Sequential(*board_layers)
         self.unit_proj = nn.Linear(getattr(cfg, "unit_feature_dim", cfg.entity_feature_dim), cfg.d_model)
         self.city_proj = nn.Linear(getattr(cfg, "city_feature_dim", cfg.entity_feature_dim), cfg.d_model)
         self.action_proj = nn.Linear(cfg.action_feature_dim, cfg.d_model)
         self.scalar_value_proj = nn.Linear(1, cfg.d_model)
         self.scalar_index_embeddings = nn.Embedding(cfg.scalar_dim, cfg.d_model)
+        self.scalar_summary_proj = nn.Sequential(
+            nn.Linear(cfg.scalar_dim, cfg.d_model),
+            nn.GELU(),
+            nn.Linear(cfg.d_model, cfg.d_model),
+        )
         self.cls_token = nn.Parameter(torch.zeros(1, 1, cfg.d_model)) if cfg.use_cls_token else None
         self.token_type_embeddings = nn.Embedding(7, cfg.d_model)
         self.token_dropout = nn.Dropout(cfg.dropout)
@@ -88,8 +97,14 @@ class HybridPolicyValueNet(nn.Module):
             dropout=cfg.dropout,
             batch_first=True,
         )
+        self.value_action_attention = nn.MultiheadAttention(
+            embed_dim=cfg.d_model,
+            num_heads=cfg.n_heads,
+            dropout=cfg.dropout,
+            batch_first=True,
+        )
         self.policy_head = nn.Sequential(nn.Linear(cfg.d_model, cfg.d_model), nn.GELU(), nn.Linear(cfg.d_model, 1))
-        self.value_head = nn.Sequential(nn.Linear(cfg.d_model, cfg.d_model), nn.GELU(), nn.Linear(cfg.d_model, 1))
+        self.value_head = nn.Sequential(nn.Linear(cfg.d_model * 4, cfg.d_model), nn.GELU(), nn.Linear(cfg.d_model, 1))
         nn.init.zeros_(self.value_head[-1].weight)
         nn.init.zeros_(self.value_head[-1].bias)
 
@@ -103,6 +118,7 @@ class HybridPolicyValueNet(nn.Module):
         unit_tokens = self._add_token_type(self.unit_proj(encoded.unit_features), 4)
         city_tokens = self._add_token_type(self.city_proj(encoded.city_features), 5)
         scalar_tokens = self._add_token_type(self._encode_scalars(encoded.scalar_features), 0)
+        scalar_summary_token = self._add_token_type(self.scalar_summary_proj(encoded.scalar_features).unsqueeze(1), 1)
         batch_size = encoded.board.shape[0]
 
         pieces = []
@@ -110,11 +126,11 @@ class HybridPolicyValueNet(nn.Module):
         if self.cls_token is not None:
             pieces.append(self._add_token_type(self.cls_token.expand(batch_size, -1, -1), 6))
             cls_len = 1
-        pieces.extend([scalar_tokens, board_tokens, unit_tokens, city_tokens])
+        pieces.extend([scalar_summary_token, scalar_tokens, board_tokens, unit_tokens, city_tokens])
         tokens = self.token_dropout(torch.cat(pieces, dim=1))
 
         scalar_len = encoded.scalar_features.shape[1]
-        board_start = cls_len + scalar_len
+        board_start = cls_len + 1 + scalar_len
         unit_start = board_start + board_tokens.shape[1]
         city_start = unit_start + encoded.unit_features.shape[1]
         key_padding_mask = torch.zeros(batch_size, tokens.shape[1], dtype=torch.bool, device=tokens.device)
@@ -138,7 +154,9 @@ class HybridPolicyValueNet(nn.Module):
             average_attn_weights=False,
         )
         logits = self.policy_head(attended).squeeze(-1).masked_fill(~encoded.action_mask, -1e9)
-        value = torch.tanh(self.value_head(pooled).squeeze(-1))
+        action_context = self._pool_actions_for_value(pooled, attended, encoded.action_mask)
+        value_input = torch.cat([pooled, action_context], dim=-1)
+        value = torch.tanh(self.value_head(value_input).squeeze(-1))
         debug = None
         if return_debug:
             debug = {
@@ -146,6 +164,7 @@ class HybridPolicyValueNet(nn.Module):
                 "latent": latent,
                 "pooled_state": pooled,
                 "action_attended": attended,
+                "value_action_context": action_context,
             }
             if attention_weights is not None:
                 debug["action_attention_weights"] = attention_weights
@@ -227,3 +246,34 @@ class HybridPolicyValueNet(nn.Module):
     def _add_token_type(self, tokens: torch.Tensor, token_type: int) -> torch.Tensor:
         type_ids = torch.full((tokens.shape[0], tokens.shape[1]), token_type, dtype=torch.long, device=tokens.device)
         return tokens + self.token_type_embeddings(type_ids)
+
+    def _pool_actions_for_value(
+        self,
+        pooled: torch.Tensor,
+        action_tokens: torch.Tensor,
+        action_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if action_tokens.shape[1] == 0:
+            return action_tokens.new_zeros((action_tokens.shape[0], action_tokens.shape[2] * 3))
+        has_action = action_mask.any(dim=1, keepdim=True)
+        valid = action_mask.unsqueeze(-1).to(action_tokens.dtype)
+        count = valid.sum(dim=1).clamp_min(1.0)
+        mean_pool = (action_tokens * valid).sum(dim=1) / count
+
+        masked_actions = action_tokens.masked_fill(~action_mask.unsqueeze(-1), torch.finfo(action_tokens.dtype).min)
+        max_pool = masked_actions.max(dim=1).values
+        max_pool = torch.where(has_action, max_pool, torch.zeros_like(max_pool))
+
+        safe_action_mask = action_mask.clone()
+        safe_action_mask[~has_action.squeeze(1), 0] = True
+        safe_action_tokens = action_tokens.masked_fill(~safe_action_mask.unsqueeze(-1), 0.0)
+        attn_pool, _ = self.value_action_attention(
+            pooled.unsqueeze(1),
+            safe_action_tokens,
+            safe_action_tokens,
+            key_padding_mask=~safe_action_mask,
+            need_weights=False,
+        )
+        attn_pool = attn_pool.squeeze(1)
+        attn_pool = torch.where(has_action, attn_pool, torch.zeros_like(attn_pool))
+        return torch.cat([mean_pool, max_pool, attn_pool], dim=-1)
