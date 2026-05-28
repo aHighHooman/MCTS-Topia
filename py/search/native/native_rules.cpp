@@ -238,6 +238,22 @@ std::string action_string(const NativeAction& action, const char* primary, const
 }
 
 NativeTile* tile_at(NativeGameState& state, int x, int y) {
+  if (x >= 0 && y >= 0 && x < state.board_size && y < state.board_size) {
+    int index = y * state.board_size + x;
+    if (index >= 0 && index < static_cast<int>(state.tiles.size())) {
+      NativeTile& tile = state.tiles[index];
+      if (tile.x == x && tile.y == y) {
+        return &tile;
+      }
+    }
+    index = x * state.board_size + y;
+    if (index >= 0 && index < static_cast<int>(state.tiles.size())) {
+      NativeTile& tile = state.tiles[index];
+      if (tile.x == x && tile.y == y) {
+        return &tile;
+      }
+    }
+  }
   for (NativeTile& tile : state.tiles) {
     if (tile.x == x && tile.y == y) {
       return &tile;
@@ -602,7 +618,8 @@ int unit_points(const std::string& type) {
   static const std::map<std::string, int> points = {
       {"WARRIOR", 10}, {"RIDER", 15}, {"DEFENDER", 15}, {"SWORDMAN", 25}, {"SWORDSMAN", 25},
       {"ARCHER", 15}, {"CATAPULT", 40}, {"KNIGHT", 40}, {"MIND_BENDER", 25}, {"CLOAK", 0},
-      {"RAMMER", 0}, {"SCOUT", 40}, {"BOMBER", 0}, {"SUPERUNIT", 50}};
+      {"DAGGER", 10}, {"RAMMER", 0}, {"SCOUT", 40}, {"BOMBER", 0}, {"SUPERUNIT", 50},
+      {"PIRATE", 0}};
   auto it = points.find(type);
   return it == points.end() ? 0 : it->second;
 }
@@ -610,9 +627,9 @@ int unit_points(const std::string& type) {
 double unit_attack(const std::string& type) {
   static const std::map<std::string, double> values = {
       {"WARRIOR", 2}, {"RIDER", 2}, {"DEFENDER", 1}, {"SWORDMAN", 3}, {"SWORDSMAN", 3},
-      {"ARCHER", 2}, {"CATAPULT", 4}, {"KNIGHT", 3.5}, {"MIND_BENDER", 0}, {"CLOAK", 0},
+      {"ARCHER", 2}, {"CATAPULT", 4}, {"KNIGHT", 3.5}, {"MIND_BENDER", 0}, {"CLOAK", 2},
       {"DAGGER", 2}, {"RAMMER", 3}, {"SCOUT", 2}, {"BOMBER", 3}, {"SUPERUNIT", 4},
-      {"JUGGERNAUT", 4}, {"PIRATE", 3}};
+      {"JUGGERNAUT", 4}, {"DINGHY", 2}, {"PIRATE", 2}};
   auto it = values.find(type);
   return it == values.end() ? 2 : it->second;
 }
@@ -1582,6 +1599,46 @@ void append_visible_city_payload(NativeGameState& state, const NativeCity& city)
   }
 }
 
+void append_visible_unit_payload(NativeGameState& state, const NativeUnit& unit) {
+  if (!state.observation.contains("units") || !py::isinstance<py::list>(state.observation["units"])) {
+    return;
+  }
+  py::dict out;
+  out["id"] = unit.id;
+  out["p"] = unit.tribe_id;
+  out["tribe_id"] = unit.tribe_id;
+  out["c"] = unit.city_id;
+  out["city_id"] = unit.city_id;
+  out["t"] = unit.type;
+  out["type"] = unit.type;
+  out["x"] = unit.x;
+  out["y"] = unit.y;
+  out["hp"] = unit.current_hp;
+  out["current_hp"] = unit.current_hp;
+  out["hpx"] = unit.current_hp_exact;
+  out["current_hp_exact"] = unit.current_hp_exact;
+  out["mhp"] = unit.max_hp;
+  out["max_hp"] = unit.max_hp;
+  out["k"] = unit.kills;
+  out["kills"] = unit.kills;
+  out["v"] = unit.veteran;
+  out["is_veteran"] = unit.veteran;
+  out["s"] = unit.status;
+  out["status"] = unit.status;
+  out["h"] = unit.hidden;
+  out["is_hidden"] = unit.hidden;
+  out["atk"] = unit.attack;
+  out["attack"] = unit.attack;
+  out["def"] = unit.defence;
+  out["defence"] = unit.defence;
+  out["mov"] = unit.movement;
+  out["movement"] = unit.movement;
+  out["r"] = unit.range;
+  out["range"] = unit.range;
+  out["cost"] = unit.cost;
+  py::reinterpret_borrow<py::list>(state.observation["units"]).append(out);
+}
+
 int reveal_from_current_assets(NativeGameState& state) {
   int newly_explored = 0;
   auto reveal_square = [&](int cx, int cy, int radius) {
@@ -1651,6 +1708,141 @@ void ensure_tribe_init_tech(NativeTribe& tribe);
 void regenerate_tribe_actions(NativeGameState& state, std::vector<NativeAction>& actions, int max_actions);
 void regenerate_city_actions(NativeGameState& state, std::vector<NativeAction>& actions, int max_actions, const NativeCity& city);
 
+int infiltrate_spawn_priority(const NativeCity& city, const NativeTile& tile, const NativeTribe& tribe) {
+  if (tile.x == city.x && tile.y == city.y) {
+    return 0;
+  }
+  const bool gets_defence_bonus =
+      (tile.terrain == "FOREST" && has_tech(tribe, "ARCHERY")) ||
+      (tile.terrain == "MOUNTAIN" && has_tech(tribe, "CLIMBING")) ||
+      ((tile.terrain == "SHALLOW_WATER" || tile.terrain == "DEEP_WATER") && has_tech(tribe, "AQUATISM"));
+  return gets_defence_bonus ? 1 : 2;
+}
+
+std::string infiltrate_spawn_type(const NativeTile& tile) {
+  if (tile.terrain == "SHALLOW_WATER" || tile.terrain == "DEEP_WATER") {
+    return "PIRATE";
+  }
+  return "DAGGER";
+}
+
+bool apply_infiltrate(NativeGameState& next, const NativeAction& action) {
+  const int unit_id = action_int(action, "unit_id", "u", 0);
+  const int target_city_id = action_int(action, "target_city_id", "tc", action_int(action, "city_id", "c", 0));
+  NativeUnit* cloak = unit_by_id(next, unit_id);
+  NativeCity* target_city = city_by_id(next, target_city_id);
+  if (cloak == nullptr || target_city == nullptr ||
+      (cloak->type != "CLOAK" && cloak->type != "DINGHY") || !unit_can_attack(*cloak) ||
+      target_city->infiltrated || target_city->tribe_id == cloak->tribe_id ||
+      relationship_between(next, cloak->tribe_id, target_city->tribe_id) == "TREATY") {
+    return false;
+  }
+
+  const int distance = std::max(std::abs(cloak->x - target_city->x), std::abs(cloak->y - target_city->y));
+  if (distance > std::max(1, cloak->range)) {
+    return false;
+  }
+
+  NativeTile* city_tile = tile_at(next, target_city->x, target_city->y);
+  if (city_tile == nullptr) {
+    return false;
+  }
+  NativeUnit* city_occupant = city_tile->unit_id > 0 ? unit_by_id(next, city_tile->unit_id) : nullptr;
+  if (city_occupant != nullptr && city_occupant->tribe_id != target_city->tribe_id) {
+    return false;
+  }
+
+  const int attacker_id = cloak->tribe_id;
+  const int defender_id = target_city->tribe_id;
+  const double cloak_attack = cloak->attack > 0.0 ? cloak->attack : unit_attack(cloak->type);
+  set_relationship(next, attacker_id, defender_id, "WAR");
+  set_relationship(next, defender_id, attacker_id, "WAR");
+
+  if (city_occupant != nullptr) {
+    city_occupant->current_hp = std::max(0, city_occupant->current_hp - static_cast<int>(cloak_attack));
+    city_occupant->current_hp_exact = static_cast<double>(city_occupant->current_hp);
+    set_unit_payload_field(next, city_occupant->id, "current_hp", "hp", py::int_(city_occupant->current_hp));
+    set_unit_payload_field(next, city_occupant->id, "current_hp_exact", "hpx", py::float_(city_occupant->current_hp_exact));
+    if (city_occupant->current_hp <= 0) {
+      remove_unit_ownership_payload(next, *city_occupant);
+      mark_unit_removed(next, *city_occupant);
+      city_tile->unit_id = 0;
+      sync_tile_to_payload(next, *city_tile);
+    }
+  }
+
+  update_tribe_economy(next, attacker_id, target_city->production, 0);
+  target_city->infiltrated = true;
+  set_city_payload_field(next, target_city->id, "infiltrated", "inf", py::bool_(true));
+
+  NativeTribe* attacker = tribe_by_id(next, attacker_id);
+  if (attacker == nullptr) {
+    return false;
+  }
+  std::vector<NativeTile*> spawn_tiles = city_territory_tiles(next, *target_city);
+  std::sort(spawn_tiles.begin(), spawn_tiles.end(), [&](const NativeTile* left, const NativeTile* right) {
+    const int left_priority = infiltrate_spawn_priority(*target_city, *left, *attacker);
+    const int right_priority = infiltrate_spawn_priority(*target_city, *right, *attacker);
+    if (left_priority != right_priority) {
+      return left_priority < right_priority;
+    }
+    if (left->x != right->x) {
+      return left->x < right->x;
+    }
+    return left->y < right->y;
+  });
+
+  int spawned = 0;
+  const int spawn_limit = std::min(5, std::max(0, target_city->level));
+  for (NativeTile* tile : spawn_tiles) {
+    if (spawned >= spawn_limit) {
+      break;
+    }
+    if (tile == nullptr || tile->unit_id > 0 || tile->terrain.empty()) {
+      continue;
+    }
+    NativeUnit dagger;
+    dagger.id = next_unit_id(next);
+    dagger.tribe_id = attacker_id;
+    dagger.city_id = target_city->id;
+    dagger.x = tile->x;
+    dagger.y = tile->y;
+    dagger.type = infiltrate_spawn_type(*tile);
+    dagger.current_hp = unit_max_hp(dagger.type);
+    dagger.current_hp_exact = static_cast<double>(dagger.current_hp);
+    dagger.max_hp = dagger.current_hp;
+    dagger.kills = 0;
+    dagger.veteran = false;
+    dagger.hidden = false;
+    dagger.attack = unit_attack(dagger.type);
+    dagger.defence = unit_defence(dagger.type);
+    dagger.movement = dagger.type == "PIRATE" ? 2 : 1;
+    dagger.range = 1;
+    dagger.cost = unit_cost(dagger.type);
+    dagger.status = "FINISHED";
+    next.units.push_back(dagger);
+    target_city->unit_ids.push_back(dagger.id);
+    tile->unit_id = dagger.id;
+    sync_tile_to_payload(next, *tile);
+    append_visible_unit_payload(next, dagger);
+    py::list unit_ids;
+    for (int existing_unit_id : target_city->unit_ids) {
+      unit_ids.append(existing_unit_id);
+    }
+    set_city_payload_field(next, target_city->id, "units", nullptr, unit_ids);
+    set_city_payload_field(next, target_city->id, "unit_ids", nullptr, unit_ids);
+    update_tribe_economy(next, attacker_id, 0, unit_points(dagger.type));
+    spawned++;
+  }
+
+  NativeUnit* spent_cloak = unit_by_id(next, unit_id);
+  if (spent_cloak != nullptr) {
+    remove_unit_ownership_payload(next, *spent_cloak);
+    mark_unit_removed(next, *spent_cloak);
+  }
+  return true;
+}
+
 void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& actions, int max_actions, const NativeUnit& unit) {
   if (unit.tribe_id != state.active_player_id) {
     return;
@@ -1707,6 +1899,36 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
     examine.payload["tribe_id"] = state.active_player_id;
     examine.payload["p"] = state.active_player_id;
     append_generated_action(state, actions, max_actions, std::move(examine));
+  }
+
+  if (unit_can_attack(unit) && (unit.type == "CLOAK" || unit.type == "DINGHY")) {
+    const int radius = std::max(1, unit.range);
+    for (NativeCity& city : state.cities) {
+      if (city.tribe_id == unit.tribe_id || city.infiltrated ||
+          relationship_between(state, unit.tribe_id, city.tribe_id) == "TREATY") {
+        continue;
+      }
+      if (std::max(std::abs(unit.x - city.x), std::abs(unit.y - city.y)) > radius) {
+        continue;
+      }
+      NativeTile* city_tile = tile_at(state, city.x, city.y);
+      NativeUnit* occupant = city_tile != nullptr && city_tile->unit_id > 0 ? unit_by_id(state, city_tile->unit_id) : nullptr;
+      if (occupant != nullptr && occupant->tribe_id != city.tribe_id) {
+        continue;
+      }
+      NativeAction infiltrate;
+      infiltrate.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
+          ":u" + std::to_string(unit.id) + ":infiltrate:c" + std::to_string(city.id);
+      infiltrate.type = "INFILTRATE";
+      infiltrate.unit_id = unit.id;
+      infiltrate.city_id = city.id;
+      infiltrate.payload = py::dict();
+      infiltrate.payload["tribe_id"] = state.active_player_id;
+      infiltrate.payload["p"] = state.active_player_id;
+      infiltrate.payload["target_city_id"] = city.id;
+      infiltrate.payload["tc"] = city.id;
+      append_generated_action(state, actions, max_actions, std::move(infiltrate));
+    }
   }
 
   if (unit_can_attack(unit) && unit.attack > 0.0 && unit.type != "MIND_BENDER" && unit.type != "CLOAK" && unit.type != "DINGHY") {
@@ -4024,6 +4246,8 @@ NativeGameState apply_action_strict(
     applied_ok = apply_attack(next, applied);
   } else if (type == "CONVERT") {
     applied_ok = apply_convert(next, applied);
+  } else if (type == "INFILTRATE") {
+    applied_ok = apply_infiltrate(next, applied);
   } else if (type == "HEAL_OTHERS") {
     applied_ok = apply_heal_others(next, applied);
   } else if (type == "EXAMINE") {

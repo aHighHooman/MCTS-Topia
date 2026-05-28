@@ -15,9 +15,15 @@ from search.config import HybridAgentConfig
 from nn.encoding import (
     ACTION_FEATURE_INDEX,
     ACTION_NATIVE_CONTEXT_START,
+    BOARD_FEATURE_INDEX,
+    BUILDING_TYPES,
+    LEVEL_UP_BONUS_TYPES,
+    RESOURCE_TYPES,
     SCALAR_MY_TECH_START,
     TECH_TYPES,
     TERRAIN_TYPES,
+    UNIT_FEATURE_INDEX,
+    UNIT_STATUS_TYPES,
     encode_observation,
     normalize_message,
 )
@@ -26,6 +32,7 @@ from search.native import run_native_hybrid_mcts, run_native_mcts, run_native_st
 from search.native.hybrid_mcts import _Evaluation, _mix_evaluation
 from search.native.cpp_extension import load_native_mcts_extension
 from search.native.mcts import NativeSearchParityError, _apply_end_turn_visit_guard, _message_cache_key, _root_priors
+from search.native.parity_runner import _canonical_state
 
 
 def _message() -> dict:
@@ -95,6 +102,85 @@ def _message_with_unit_move() -> dict:
         {"id": "move", "type": "MOVE", "unit_id": 1, "destination": {"x": 2, "y": 1}, "x": 2, "y": 1},
         {"id": "road", "type": "BUILD_ROAD", "tribe_id": 0, "position": {"x": 1, "y": 2}, "x": 1, "y": 2},
     ]
+    return message
+
+
+def _message_with_infiltrate() -> dict:
+    message = _message()
+    observation = message["observation"]
+    observation["tribes"] = [
+        {"id": 0, "stars": 3, "score": 0, "researched_tech_ids": ["DIPLOMACY"], "cities": [10], "extra_units": []},
+        {"id": 1, "stars": 8, "score": 0, "researched_tech_ids": [], "cities": [20], "extra_units": []},
+    ]
+    observation["cities"] = [
+        {
+            "id": 10,
+            "tribe_id": 0,
+            "x": 0,
+            "y": 0,
+            "level": 1,
+            "population": 0,
+            "population_need": 2,
+            "production": 1,
+            "is_capital": True,
+            "has_walls": False,
+            "units": [],
+        },
+        {
+            "id": 20,
+            "tribe_id": 1,
+            "x": 2,
+            "y": 1,
+            "level": 3,
+            "population": 2,
+            "population_need": 5,
+            "production": 4,
+            "is_capital": True,
+            "has_walls": False,
+            "units": [2],
+        },
+    ]
+    for y in range(0, 3):
+        for x in range(1, 4):
+            observation["board"]["tiles"][y][x]["city_id"] = 20
+    observation["board"]["tiles"][0][0]["terrain"] = "CITY"
+    observation["board"]["tiles"][0][0]["city_id"] = 10
+    observation["board"]["tiles"][1][2]["terrain"] = "CITY"
+    observation["units"] = [
+        {
+            "id": 1,
+            "tribe_id": 0,
+            "city_id": 10,
+            "type": "CLOAK",
+            "x": 1,
+            "y": 1,
+            "current_hp": 10,
+            "max_hp": 10,
+            "kills": 0,
+            "is_veteran": False,
+            "status": "FRESH",
+            "is_hidden": False,
+            "attack": 2,
+            "range": 1,
+        },
+        {
+            "id": 2,
+            "tribe_id": 1,
+            "city_id": 20,
+            "type": "WARRIOR",
+            "x": 2,
+            "y": 1,
+            "current_hp": 10,
+            "max_hp": 10,
+            "kills": 0,
+            "is_veteran": False,
+            "status": "FRESH",
+            "is_hidden": False,
+        },
+    ]
+    observation["board"]["tiles"][1][1]["unit_id"] = 1
+    observation["board"]["tiles"][1][2]["unit_id"] = 2
+    message["actions"] = [{"id": "infiltrate", "type": "INFILTRATE", "unit_id": 1, "u": 1, "target_city_id": 20, "tc": 20}]
     return message
 
 
@@ -662,6 +748,28 @@ class NativeMCTSTest(unittest.TestCase):
         target = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 2)
         self.assertLess(target["current_hp"], 10)
 
+    def test_native_infiltrate_transition_spawns_daggers(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        tree = extension.NativeMCTS(_message_with_infiltrate(), [0], [1.0], 0.1, False, 7, 64)
+
+        selection = dict(tree.select_leaf(4, 1.5))
+        leaf_payload = dict(selection["leaf_payload"])
+
+        self.assertFalse(selection["leaf_terminal"])
+        self.assertFalse(leaf_payload["is_terminal"])
+        city = next(city for city in leaf_payload["observation"]["cities"] if city["id"] == 20)
+        self.assertTrue(city["infiltrated"])
+        self.assertTrue(city["inf"])
+        attacker = next(tribe for tribe in leaf_payload["observation"]["tribes"] if tribe["id"] == 0)
+        self.assertEqual(attacker["stars"], 7)
+        defender = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 2)
+        self.assertEqual(defender["current_hp"], 8)
+        self.assertFalse(any(unit["id"] == 1 for unit in leaf_payload["observation"]["units"]))
+        spawned = [unit for unit in leaf_payload["observation"]["units"] if unit["tribe_id"] == 0 and unit["type"] == "DAGGER"]
+        self.assertEqual(len(spawned), 3)
+        self.assertEqual([(unit["x"], unit["y"]) for unit in spawned], [(1, 0), (1, 2), (2, 0)])
+
     def test_native_tree_applies_unit_upgrades(self) -> None:
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)
@@ -725,6 +833,61 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertEqual(int(fish_features.sum().item()), 1)
         self.assertEqual(int(ride_features.sum().item()), 1)
         self.assertNotEqual(int(fish_features.argmax().item()), int(ride_features.argmax().item()))
+
+    def test_level_up_bonus_identity_is_encoded(self) -> None:
+        cfg = HybridAgentConfig()
+        message = _message()
+        message["actions"] = [
+            {"id": "workshop", "type": "LEVEL_UP", "city_id": 10, "bonus": "WORKSHOP"},
+            {"id": "explorer", "type": "LEVEL_UP", "city_id": 10, "bonus": "EXPLORER"},
+        ]
+
+        encoded = encode_observation(message, cfg.model)
+        bonus_start = ACTION_FEATURE_INDEX["level_up_bonus:WORKSHOP"]
+        workshop_features = encoded.action_features[0, 0, bonus_start : bonus_start + len(LEVEL_UP_BONUS_TYPES)]
+        explorer_features = encoded.action_features[0, 1, bonus_start : bonus_start + len(LEVEL_UP_BONUS_TYPES)]
+
+        self.assertEqual(int(workshop_features.sum().item()), 1)
+        self.assertEqual(int(explorer_features.sum().item()), 1)
+        self.assertEqual(float(workshop_features[LEVEL_UP_BONUS_TYPES.index("WORKSHOP")]), 1.0)
+        self.assertEqual(float(explorer_features[LEVEL_UP_BONUS_TYPES.index("EXPLORER")]), 1.0)
+
+    def test_java_resource_building_relationship_and_status_values_are_encoded(self) -> None:
+        cfg = HybridAgentConfig()
+        message = _message()
+        tile = message["observation"]["board"]["tiles"][0][0]
+        tile["resource"] = "LIGHTHOUSE"
+        tile["building"] = "FOREST_TEMPLE"
+        tile["unit_id"] = 99
+        message["observation"]["units"].append(
+            {
+                "id": 99,
+                "tribe_id": 0,
+                "type": "RIDER",
+                "x": 0,
+                "y": 0,
+                "current_hp": 10,
+                "max_hp": 10,
+                "status": "ATTACKED",
+            }
+        )
+        message["observation"]["rel"] = [["PEACE", "TREATY"], ["TREATY", "PEACE"]]
+        message["actions"] = [
+            {"id": "build", "type": "BUILD", "city_id": 10, "x": 0, "y": 0, "building_type": "FOREST_TEMPLE"},
+            {"id": "cancel", "type": "CANCEL_TREATY", "tribe_id": 0, "target_player_id": 1},
+        ]
+
+        encoded = encode_observation(message, cfg.model)
+
+        self.assertEqual(float(encoded.board[0, BOARD_FEATURE_INDEX["resource:LIGHTHOUSE"], 0, 0]), 1.0)
+        self.assertEqual(float(encoded.board[0, BOARD_FEATURE_INDEX["building:FOREST_TEMPLE"], 0, 0]), 1.0)
+        self.assertEqual(
+            float(encoded.board[0, BOARD_FEATURE_INDEX["visible_unit_status:ATTACKED"], 0, 0]),
+            1.0,
+        )
+        self.assertEqual(float(encoded.unit_features[0, 0, UNIT_FEATURE_INDEX["status:ATTACKED"]]), 1.0)
+        self.assertEqual(float(encoded.action_features[0, 0, ACTION_FEATURE_INDEX["building_type:FOREST_TEMPLE"]]), 1.0)
+        self.assertEqual(float(encoded.action_features[0, 1, ACTION_FEATURE_INDEX["target_relationship:TREATY"]]), 1.0)
 
     def test_native_state_fields_are_encoded_for_model(self) -> None:
         cfg = HybridAgentConfig()
@@ -1030,6 +1193,18 @@ class NativeMCTSTest(unittest.TestCase):
         response = json.loads(completed.stdout.strip().splitlines()[-1])
 
         self.assertIn(response.get("actionId"), {"capture", "end"})
+
+    def test_parity_canonical_state_ignores_action_ids_order_and_territory_noise(self) -> None:
+        java_state = _message()
+        cpp_state = json.loads(json.dumps(java_state))
+        cpp_state["actions"] = list(reversed(cpp_state["actions"]))
+        for index, action in enumerate(cpp_state["actions"]):
+            action["id"] = f"sim:{index}"
+            action["i"] = 100 + index
+        cpp_state["observation"]["board"]["tiles"][3][1]["city_id"] = 2
+        cpp_state["observation"]["board"]["tiles"][3][1]["territory_city_id"] = 2
+
+        self.assertEqual(_canonical_state(java_state, 0), _canonical_state(cpp_state, 0))
 
 
 if __name__ == "__main__":
