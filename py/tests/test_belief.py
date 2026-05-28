@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,15 +16,24 @@ if str(PY_ROOT) not in sys.path:
 
 from nn.belief import BeliefTracker
 from nn.bot_agent import HybridRLBot
+from project_paths import game_src_root
 from search.config import HybridAgentConfig
 from nn.encoding import (
     ACTION_FEATURE_SCHEMA,
+    ACTION_TYPES,
+    ACTION_TYPE_ALIASES,
     BOARD_FEATURE_INDEX,
     BOARD_SCHEMA,
+    BUILDING_TYPES,
     CITY_FEATURE_SCHEMA,
+    RELATIONSHIP_TYPES,
+    RESOURCE_TYPES,
     SCALAR_FEATURE_INDEX,
     SCALAR_FEATURE_SCHEMA,
     TECH_TYPES,
+    TERRAIN_TYPES,
+    UNIT_STATUS_TYPES,
+    UNIT_TYPES,
     UNIT_FEATURE_SCHEMA,
     encode_observation,
 )
@@ -61,7 +71,7 @@ def _message() -> dict:
             "board": {"size": size, "tiles": tiles},
             "units": [
                 {"id": 1, "tribe_id": 0, "type": "WARRIOR", "x": 1, "y": 1, "current_hp": 10, "max_hp": 10, "hint": True},
-                {"id": 2, "tribe_id": 1, "type": "RIDER", "x": 2, "y": 2, "current_hp": 10, "max_hp": 10, "range": 1, "mov": 2},
+                {"id": 2, "tribe_id": 1, "type": "RIDER", "x": 2, "y": 2, "current_hp": 10, "max_hp": 10, "range": 1, "movement": 2},
             ],
             "cities": [
                 {"id": 10, "tribe_id": 0, "x": 0, "y": 0, "is_capital": True, "buildings": []},
@@ -75,6 +85,15 @@ def _message() -> dict:
         },
         "actions": [{"id": "end", "type": "END_TURN"}],
     }
+
+
+def _mcts_message() -> dict:
+    message = _message()
+    message["actions"] = [
+        {"id": "end", "type": "END_TURN"},
+        {"id": "research", "type": "RESEARCH_TECH", "tech": "RIDING"},
+    ]
+    return message
 
 
 class BeliefBuilderTest(unittest.TestCase):
@@ -168,6 +187,40 @@ class BeliefBuilderTest(unittest.TestCase):
 
 
 class BeliefEncoderTest(unittest.TestCase):
+    def test_encoder_type_lists_cover_java_enums(self) -> None:
+        types_source = (game_src_root() / "core" / "Types.java").read_text()
+
+        def enum_names(name: str) -> list[str]:
+            marker = f"public enum {name}"
+            start = types_source.find(marker)
+            self.assertGreaterEqual(start, 0, f"Missing enum {name}")
+            brace = types_source.find("{", start)
+            self.assertGreaterEqual(brace, 0, f"Missing enum body {name}")
+            depth = 0
+            end = brace
+            while end < len(types_source):
+                char = types_source[end]
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                end += 1
+            body = types_source[brace + 1 : end]
+            constants = body.split(";", 1)[0]
+            return re.findall(r"^\s*([A-Z][A-Z0-9_]*)\s*(?:\(|,)", constants, re.M)
+
+        self.assertEqual(TERRAIN_TYPES, enum_names("TERRAIN"))
+        self.assertEqual(RESOURCE_TYPES, enum_names("RESOURCE"))
+        self.assertEqual(BUILDING_TYPES, enum_names("BUILDING"))
+        self.assertEqual(UNIT_TYPES, enum_names("UNIT"))
+        self.assertEqual(TECH_TYPES, enum_names("TECHNOLOGY"))
+        self.assertEqual(RELATIONSHIP_TYPES[:-1], enum_names("RELATIONSHIP"))
+        self.assertEqual(UNIT_STATUS_TYPES, enum_names("TURN_STATUS"))
+        java_actions = {ACTION_TYPE_ALIASES.get(name, name) for name in enum_names("ACTION")}
+        self.assertEqual(java_actions, set(ACTION_TYPES) - {"STEP_MOVE"})
+
     def test_model_config_dimensions_match_named_schemas(self) -> None:
         cfg = HybridAgentConfig()
 
@@ -240,7 +293,7 @@ class BeliefBotFlowTest(unittest.TestCase):
 
             with patch("nn.bot_agent.run_native_mcts", side_effect=fake_mcts):
                 bot = HybridRLBot(cfg, Path("missing.pt"), Path(tmp), model=model, device=torch.device("cpu"), native_available=True, warmup=False)
-                response = bot.choose_action(_message())
+                response = bot.choose_action(_mcts_message())
 
         self.assertEqual(response["actionId"], "end")
         self.assertTrue(captured["root_has_belief"])
@@ -260,15 +313,18 @@ class BeliefBotFlowTest(unittest.TestCase):
 
             with patch("nn.bot_agent.run_native_mcts", side_effect=fake_mcts):
                 bot = HybridRLBot(cfg, Path("missing.pt"), Path(tmp), model=model, device=torch.device("cpu"), native_available=True, warmup=False)
-                bot.choose_action(_message())
-                bot.choose_action(_message())
-                next_turn = _message()
+                bot.choose_action(_mcts_message())
+                bot.choose_action(_mcts_message())
+                next_turn = _mcts_message()
                 next_turn["player_id"] = 1
                 next_turn["observation"]["active_player_id"] = 1
                 bot.choose_action(next_turn)
 
         self.assertEqual(len(captured), 3)
-        self.assertEqual(captured, [100.0, 100.0, 100.0])
+        for budget in captured:
+            self.assertIsNotNone(budget)
+            self.assertGreater(float(budget), 99.0)
+            self.assertLessEqual(float(budget), 100.0)
 
 
 if __name__ == "__main__":

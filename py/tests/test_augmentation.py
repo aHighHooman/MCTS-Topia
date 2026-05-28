@@ -22,6 +22,7 @@ from nn.model import HybridPolicyValueNet
 from training.replay import ReplayStore, StepRecord, record_from_payload, record_to_payload
 from training.symmetry_consistency import evaluate_symmetry_consistency
 from training.train import _archive_replay_shards, _training_records_for_iteration, _write_augmented_iteration_shard, collate_batch
+from training.pretrain_static import _record_value_target
 
 
 def _message() -> dict:
@@ -144,6 +145,7 @@ def _record() -> StepRecord:
         turn_index=0,
         turn_step_index=0,
         value_target=0.5,
+        static_value_target=-0.125,
         static_policy_weight=0.4,
         static_value_weight=0.2,
     )
@@ -179,6 +181,7 @@ class AugmentationTest(unittest.TestCase):
 
         self.assertEqual(loaded.visit_target, record.visit_target)
         self.assertEqual(loaded.value_target, record.value_target)
+        self.assertAlmostEqual(float(loaded.static_value_target), -0.125)
         self.assertEqual(loaded.static_policy_weight, 0.4)
         self.assertEqual(loaded.static_value_weight, 0.2)
 
@@ -205,6 +208,15 @@ class AugmentationTest(unittest.TestCase):
         self.assertEqual(len(batch["records"]), 1)
         self.assertTrue(torch.equal(batch["policy_targets"][0, :4], torch.tensor([0.2, 0.7, 0.1, 0.0])))
         self.assertAlmostEqual(float(batch["value_targets"][0]), 0.5)
+
+    def test_static_pretrain_value_target_source_can_use_static_eval(self) -> None:
+        record = _record()
+        legacy_record = _record()
+        legacy_record.static_value_target = None
+
+        self.assertAlmostEqual(_record_value_target(record, "outcome"), 0.5)
+        self.assertAlmostEqual(_record_value_target(record, "static"), -0.125)
+        self.assertAlmostEqual(_record_value_target(legacy_record, "static"), 0.25)
 
     def test_symmetry_consistency_metric_is_finite(self) -> None:
         cfg = HybridAgentConfig()

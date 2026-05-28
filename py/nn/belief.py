@@ -160,20 +160,6 @@ def _tech_name(value: Any) -> str:
     return str(value or "").strip().upper().replace(" ", "_")
 
 
-def _message_is_normalized(message: Mapping[str, Any]) -> bool:
-    observation = message.get("observation")
-    if not isinstance(observation, Mapping) or "active_player_id" not in observation:
-        return False
-    board = observation.get("board")
-    if not isinstance(board, Mapping) or "tiles" not in board:
-        return False
-    actions = message.get("actions", [])
-    if not actions:
-        return True
-    first_action = actions[0] if isinstance(actions, list) else None
-    return isinstance(first_action, Mapping) and "type" in first_action
-
-
 @dataclass
 class LastSeenEnemyUnit:
     owner: int
@@ -202,12 +188,7 @@ class BeliefSnapshot:
     def annotate_without_update(self, message: Mapping[str, Any]) -> dict[str, Any]:
         from .encoding import normalize_message
 
-        if _message_is_normalized(message):
-            normalized = dict(message)
-            normalized["observation"] = dict(message["observation"])
-            normalized["actions"] = list(message.get("actions", []) or [])
-        else:
-            normalized = normalize_message(dict(message))
+        normalized = normalize_message(dict(message))
         normalized["observation"]["belief"] = _build_belief(
             normalized,
             tech_evidence=self.tech_evidence,
@@ -523,7 +504,7 @@ def _mark_known_threat(planes: dict[str, Any], unit: Mapping[str, Any], size: in
     ux = _as_int(unit.get("x"), -1)
     uy = _as_int(unit.get("y"), -1)
     attack_range = max(1, _as_int(unit.get("range"), 1))
-    movement = max(0, _as_int(unit.get("mov"), 0))
+    movement = max(0, _as_int(unit.get("movement"), 0))
     threat_plane = planes["known_enemy_threat"]
     if isinstance(threat_plane, np.ndarray):
         if movement > 0:
@@ -586,10 +567,10 @@ def _update_last_seen_units(
             unit_type=_tech_name(unit.get("type")),
             x=_as_int(unit.get("x"), -1),
             y=_as_int(unit.get("y"), -1),
-            current_hp=_as_int(unit.get("current_hp", unit.get("hp")), 0),
+            current_hp=_as_int(unit.get("current_hp"), 0),
             max_hp=_as_int(unit.get("max_hp"), 0),
             attack_range=max(1, _as_int(unit.get("range"), 1)),
-            movement=max(1, _as_int(unit.get("mov", unit.get("movement")), 1)),
+            movement=max(1, _as_int(unit.get("movement"), 1)),
             last_seen_tick=tick,
         )
 
