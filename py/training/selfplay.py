@@ -5,7 +5,7 @@ from typing import Sequence
 
 import torch
 
-from search.config import HybridAgentConfig
+from .config import HybridAgentConfig
 from .java_selfplay import run_selfplay_match
 from .replay import ReplayStore
 

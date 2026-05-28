@@ -14,6 +14,7 @@ if str(PY_ROOT) not in sys.path:
 
 from search.config import HybridAgentConfig
 from nn.bot_agent import HybridRLBot
+from training.config import RL_ROOT
 from training.java_selfplay import run_selfplay_match
 from training.persistent_bot_server import _configure
 from training.train import _bot_command, _match_end_reason
@@ -152,7 +153,7 @@ class SelfPlayConfigTest(unittest.TestCase):
             java_cwd = root / "repo"
             py_cwd.mkdir()
             java_cwd.mkdir()
-            cfg.training.output_dir = Path("rl")
+            cfg.training.output_dir = RL_ROOT
 
             class FakeProcess:
                 returncode = 0
@@ -184,7 +185,7 @@ class SelfPlayConfigTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(captured["java_cwd"], java_cwd)
-        self.assertEqual(Path(captured["play_path"]).parent, py_cwd / "rl" / "playfiles")
+        self.assertEqual(Path(captured["play_path"]).parent, RL_ROOT / "playfiles")
 
 
 if __name__ == "__main__":

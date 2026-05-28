@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Sequence
 
-from search.config import HybridAgentConfig
+from .config import HybridAgentConfig
 
 
 def _terminate_process_tree(process: subprocess.Popen[str], grace_seconds: float = 3.0) -> None:

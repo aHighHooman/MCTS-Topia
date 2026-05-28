@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from search.config import HybridAgentConfig
+from training.config import HybridAgentConfig, rl_path
 from .java_selfplay import run_selfplay_match
 from .replay import ReplayStore
 
@@ -277,7 +277,7 @@ def run_tournament(args: argparse.Namespace) -> tuple[Path, Path, dict[str, floa
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a checkpoint-vs-checkpoint self-play Elo tournament.")
-    parser.add_argument("--checkpoint-dir", type=Path, default=Path("rl/checkpoints"))
+    parser.add_argument("--checkpoint-dir", type=Path, default=rl_path("checkpoints"))
     parser.add_argument("--pattern", default="latest_iter_*.pt")
     parser.add_argument("--limit", type=int, default=None, help="Only use the last N discovered checkpoints.")
     parser.add_argument("--games-per-pair", type=int, default=1)
@@ -288,7 +288,7 @@ def main() -> None:
     parser.add_argument("--seed-base", type=int, default=900_000)
     parser.add_argument("--initial-elo", type=float, default=1500.0)
     parser.add_argument("--k-factor", type=float, default=32.0)
-    parser.add_argument("--output-dir", type=Path, default=Path("rl/tournaments"))
+    parser.add_argument("--output-dir", type=Path, default=rl_path("tournaments"))
     parser.add_argument("--jsonl", type=Path, default=None)
     parser.add_argument("--csv", type=Path, default=None)
     parser.add_argument("--simulations", type=int, default=64)

@@ -10,7 +10,7 @@ from typing import Any
 
 import torch
 
-from search.config import HybridAgentConfig
+from .config import HybridAgentConfig, rl_path
 from .replay import ReplayStore
 from .selfplay import run_selfplay
 from .train import (
@@ -61,7 +61,7 @@ def _static_bot_command(
         str(checkpoint_path),
         "--replay-dir",
         str(cfg.replay.replay_dir),
-        "--static-only-bootstrap",
+        "--static-only-hybrid-nn",
         "--simulations",
         str(int(cfg.search.num_simulations)),
         "--max-depth",
@@ -311,9 +311,9 @@ def main() -> None:
         description="Generate bootstrap replay by running static-only HybridRLBot against itself."
     )
     parser.add_argument("--games", type=int, required=True, help="Number of static-vs-static self-play games to generate.")
-    parser.add_argument("--replay-dir", type=Path, default=Path("rl/replay_static_bootstrap"))
+    parser.add_argument("--replay-dir", type=Path, default=rl_path("replay_static_bootstrap"))
     parser.add_argument("--shard-prefix", type=str, default=None)
-    parser.add_argument("--checkpoint", type=Path, default=Path("rl/checkpoints/static_bootstrap_dummy.pt"))
+    parser.add_argument("--checkpoint", type=Path, default=rl_path("checkpoints", "static_bootstrap_dummy.pt"))
     parser.add_argument("--static-bot-script", type=Path, default=None)
     parser.add_argument("--tribes", type=_parse_tribes, default=_parse_tribes("Xin Xi,Imperius"))
     parser.add_argument("--device", type=str, default="cpu", help="Device passed through to the self-play runner.")

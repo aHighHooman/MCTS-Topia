@@ -18,7 +18,7 @@ if str(PY_ROOT) not in sys.path:
 
 from nn.bot_agent import HybridRLBot
 from nn.model import HybridPolicyValueNet
-from search.config import HybridAgentConfig
+from training.config import HybridAgentConfig
 from search.device import require_cuda_device
 from search.native.cpp_extension import load_native_mcts_extension
 
@@ -28,7 +28,13 @@ def _load_checkpoint(model: HybridPolicyValueNet, checkpoint_path: Path) -> None
         return
     payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state_dict = payload.get("model", payload)
-    model.load_state_dict(state_dict)
+    model_state = model.state_dict()
+    compatible = {
+        key: value
+        for key, value in state_dict.items()
+        if key in model_state and getattr(value, "shape", None) == getattr(model_state[key], "shape", None)
+    }
+    model.load_state_dict(compatible, strict=False)
 
 
 def _configure(args: argparse.Namespace) -> HybridAgentConfig:

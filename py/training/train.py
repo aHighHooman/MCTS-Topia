@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import copy
 import csv
 import json
@@ -24,7 +23,7 @@ from torch.utils.data import Dataset
 from .augment_replay import augment_record, symmetry_specs
 from nn.encoding import EncodedObservation, encode_observation
 from nn.model import HybridPolicyValueNet, count_parameters
-from search.config import HybridAgentConfig
+from .config import HybridAgentConfig
 from search.device import move_optimizer_state, require_cuda_device
 from .replay import ReplayStore, StepRecord, record_to_payload, visit_target_tensor
 from .selfplay import run_selfplay
@@ -137,7 +136,13 @@ def _load_checkpoint(model: HybridPolicyValueNet, checkpoint_path: Path, optimiz
         return 0
     payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state_dict = payload.get("model", payload)
-    model.load_state_dict(state_dict)
+    model_state = model.state_dict()
+    compatible = {
+        key: value
+        for key, value in state_dict.items()
+        if key in model_state and getattr(value, "shape", None) == getattr(model_state[key], "shape", None)
+    }
+    model.load_state_dict(compatible, strict=False)
     if optimizer is not None and isinstance(payload, dict) and payload.get("optimizer") is not None:
         try:
             optimizer.load_state_dict(payload["optimizer"])
@@ -203,7 +208,7 @@ def _action_type(record: StepRecord) -> str:
     action = next((item for item in record.legal_actions if str(item.get("id")) == selected), None)
     if action is None and 0 <= int(record.action_index) < len(record.legal_actions):
         action = record.legal_actions[int(record.action_index)]
-    raw = str((action or {}).get("type") or (action or {}).get("t") or "UNKNOWN")
+    raw = str((action or {}).get("type") or "UNKNOWN")
     normalized = raw.strip().upper().replace(" ", "_")
     aliases = {
         "MOVE": "MOVE",
@@ -763,8 +768,8 @@ def train_round(
     return totals
 
 
-def count_replay_shards(replay_dir: Path) -> int:
-    return sum(1 for _ in replay_dir.glob("replay_*.pt"))
+def count_replay_shards(replay_dir: Path, shard_prefix: str = "replay") -> int:
+    return sum(1 for _ in replay_dir.glob(f"{shard_prefix}_*.pt"))
 
 
 def ensure_successful_selfplay(
@@ -1001,7 +1006,9 @@ def _run_selfplay_game(
     }
 
 
-def train(cfg: HybridAgentConfig, *, device: torch.device, iterations: int | None = None, games_per_iteration: int | None = None) -> None:
+def train(cfg: HybridAgentConfig, *, device: torch.device | None = None) -> None:
+    if device is None:
+        device = _resolve_training_device(cfg)
     cfg.training.device = str(device)
     workdir = Path(__file__).resolve().parents[2]
     checkpoint_path = cfg.training.checkpoint_path
@@ -1028,8 +1035,8 @@ def train(cfg: HybridAgentConfig, *, device: torch.device, iterations: int | Non
     bot_script = workdir / "py" / "bots" / "hybrid_nn_bot.py"
     bot_server_script = workdir / "py" / "training" / "persistent_bot_server.py"
     bot_bridge_script = workdir / "py" / "training" / "persistent_bot_bridge.py"
-    total_iterations = iterations if iterations is not None else cfg.training.num_iterations
-    games = games_per_iteration if games_per_iteration is not None else cfg.training.selfplay_games_per_iteration
+    total_iterations = cfg.training.num_iterations
+    games = cfg.training.selfplay_games_per_iteration
     tribes = ["Xin Xi", "Imperius"]
 
     for local_iteration in range(total_iterations):
@@ -1089,7 +1096,7 @@ def train(cfg: HybridAgentConfig, *, device: torch.device, iterations: int | Non
                     local_iteration, iteration, game_idx, games, bot_commands=bridge_commands,
                 )
                 result = game_result["result"]
-                after = count_replay_shards(cfg.replay.replay_dir)
+                after = count_replay_shards(cfg.replay.replay_dir, cfg.replay.shard_prefix)
                 ensure_successful_selfplay(result, before, after, str(game_result["label"]))
                 replay_store.refresh()
                 new_shards = sorted(set(replay_store.shards()) - before_game_shards)
@@ -1228,7 +1235,7 @@ def train(cfg: HybridAgentConfig, *, device: torch.device, iterations: int | Non
         row = {
             "iteration": iteration,
             "replay_steps": replay_store.step_count(),
-            "replay_shards": count_replay_shards(cfg.replay.replay_dir),
+            "replay_shards": count_replay_shards(cfg.replay.replay_dir, cfg.replay.shard_prefix),
             "games_completed": len(game_results),
             "decisive": iteration_decisive,
             "draws": iteration_draws,
@@ -1262,117 +1269,17 @@ def train(cfg: HybridAgentConfig, *, device: torch.device, iterations: int | Non
         )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Train the benchmark-style Tribes hybrid RL agent.")
-    parser.add_argument("--iterations", "--rounds", dest="iterations", type=int, default=None)
-    parser.add_argument("--games-per-iteration", "--games-per-round", dest="games_per_iteration", type=int, default=None)
-    parser.add_argument("--simulations", "--mcts-sims", dest="simulations", type=int, default=None)
-    parser.add_argument("--max-depth", type=int, default=None)
-    parser.add_argument("--top-k-actions", type=int, default=None)
-    parser.add_argument("--batch-size", type=int, default=None)
-    parser.add_argument("--search-batch-size", type=int, default=None)
-    parser.add_argument("--static-policy-weight", type=float, default=None)
-    parser.add_argument("--static-value-weight", type=float, default=None)
-    parser.add_argument("--static-guidance-bootstrap-iterations", type=int, default=None)
-    parser.add_argument("--static-guidance-early-iterations", type=int, default=None)
-    parser.add_argument("--static-guidance-middle-iterations", type=int, default=None)
-    parser.add_argument("--static-guidance-late-iterations", type=int, default=None)
-    parser.add_argument("--static-guidance-final-iterations", type=int, default=None)
-    parser.add_argument("--replay-batch-size", type=int, default=None)
-    parser.add_argument("--replay-dir", type=Path, default=None)
-    parser.add_argument("--checkpoint", type=Path, default=None)
-    parser.add_argument("--max-turns-capitals", type=int, default=None)
-    parser.add_argument("--max-actions-per-turn", type=int, default=None)
-    parser.add_argument("--max-actions-per-game", type=int, default=None)
-    parser.add_argument("--adjudicate-incomplete-games", action="store_true")
-    parser.add_argument("--adjudicator-bot", type=str, default=None)
-    parser.add_argument("--adjudication-max-turns-capitals", type=int, default=None)
-    parser.add_argument("--adjudication-max-actions-per-game", type=int, default=None)
-    parser.add_argument("--match-timeout-seconds", type=int, default=None)
-    parser.add_argument("--external-action-timeout-ms", type=int, default=None)
-    parser.add_argument("--wall-clock-per-action-seconds", type=float, default=None)
-    parser.add_argument("--wall-clock-per-turn-seconds", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--progress-interval-seconds", type=int, default=None)
-    parser.add_argument("--profile-selfplay", action="store_true")
-    parser.add_argument("--persistent-bot", action="store_true")
-    parser.add_argument("--no-persistent-bot", action="store_true")
-    parser.add_argument("--augment-symmetries", action="store_true", help="Enable default offline D4 replay augmentation.")
-    parser.add_argument("--no-augment-symmetries", action="store_true", help="Disable offline D4 replay augmentation.")
-    parser.add_argument("--augmentation-seed", type=int, default=None)
-    args = parser.parse_args()
+def _resolve_training_device(cfg: HybridAgentConfig) -> torch.device:
+    device = torch.device(str(cfg.training.device))
+    if device.type == "cuda":
+        return require_cuda_device()
+    return device
 
+
+def main() -> None:
     cfg = HybridAgentConfig()
-    if args.simulations is not None:
-        cfg.search.num_simulations = args.simulations
-    if args.max_depth is not None:
-        cfg.search.max_depth = args.max_depth
-    if args.top_k_actions is not None:
-        cfg.search.top_k_actions = args.top_k_actions
-    if args.batch_size is not None:
-        cfg.training.batch_size = args.batch_size
-    if args.search_batch_size is not None:
-        cfg.search.batch_size = args.search_batch_size
-    if args.static_policy_weight is not None or args.static_value_weight is not None:
-        cfg.search.static_policy_weight = max(0.0, min(1.0, float(args.static_policy_weight or 0.0)))
-        cfg.search.static_value_weight = max(0.0, min(1.0, float(args.static_value_weight or 0.0)))
-        setattr(cfg.training, "_static_guidance_override", (cfg.search.static_policy_weight, cfg.search.static_value_weight))
-    if args.static_guidance_bootstrap_iterations is not None:
-        cfg.training.static_guidance_bootstrap_iterations = args.static_guidance_bootstrap_iterations
-    if args.static_guidance_early_iterations is not None:
-        cfg.training.static_guidance_early_iterations = args.static_guidance_early_iterations
-    if args.static_guidance_middle_iterations is not None:
-        cfg.training.static_guidance_middle_iterations = args.static_guidance_middle_iterations
-    if args.static_guidance_late_iterations is not None:
-        cfg.training.static_guidance_late_iterations = args.static_guidance_late_iterations
-    if args.static_guidance_final_iterations is not None:
-        cfg.training.static_guidance_final_iterations = args.static_guidance_final_iterations
-    if args.replay_batch_size is not None:
-        cfg.training.replay_batch_size = args.replay_batch_size
-    if args.replay_dir is not None:
-        cfg.replay.replay_dir = args.replay_dir.resolve()
-    else:
-        cfg.replay.replay_dir = cfg.replay.replay_dir.resolve()
-    if args.checkpoint is not None:
-        cfg.training.checkpoint_path = args.checkpoint
-    if args.max_turns_capitals is not None:
-        cfg.selfplay.max_turns_capitals = args.max_turns_capitals
-    if args.max_actions_per_turn is not None:
-        cfg.selfplay.max_actions_per_turn = args.max_actions_per_turn
-    if args.max_actions_per_game is not None:
-        cfg.selfplay.max_actions_per_game = args.max_actions_per_game
-    if args.adjudicate_incomplete_games:
-        cfg.selfplay.adjudicate_incomplete_games = True
-    if args.adjudicator_bot is not None:
-        cfg.selfplay.adjudicator_bot = args.adjudicator_bot
-    if args.adjudication_max_turns_capitals is not None:
-        cfg.selfplay.adjudication_max_turns_capitals = args.adjudication_max_turns_capitals
-    if args.adjudication_max_actions_per_game is not None:
-        cfg.selfplay.adjudication_max_actions_per_game = args.adjudication_max_actions_per_game
-    if args.match_timeout_seconds is not None:
-        cfg.selfplay.timeout_seconds = args.match_timeout_seconds
-    if args.external_action_timeout_ms is not None:
-        cfg.selfplay.external_action_timeout_ms = args.external_action_timeout_ms
-    wall_clock_per_action = args.wall_clock_per_action_seconds
-    if wall_clock_per_action is None:
-        wall_clock_per_action = args.wall_clock_per_turn_seconds
-    if wall_clock_per_action is not None:
-        cfg.selfplay.wall_clock_per_action_seconds = wall_clock_per_action
-    if args.progress_interval_seconds is not None:
-        cfg.selfplay.progress_interval_seconds = args.progress_interval_seconds
-    if args.profile_selfplay:
-        cfg.selfplay.profile_selfplay = True
-    if args.persistent_bot:
-        cfg.selfplay.persistent_bot = True
-    if args.no_persistent_bot:
-        cfg.selfplay.persistent_bot = False
-    if args.augment_symmetries:
-        cfg.training.augment_symmetries = True
-    if args.no_augment_symmetries:
-        cfg.training.augment_symmetries = False
-    if args.augmentation_seed is not None:
-        cfg.training.augmentation_seed = args.augmentation_seed
-    device = require_cuda_device()
-    train(cfg, device=device, iterations=args.iterations, games_per_iteration=args.games_per_iteration)
+    cfg.replay.replay_dir = cfg.replay.replay_dir.resolve()
+    train(cfg)
 
 
 if __name__ == "__main__":

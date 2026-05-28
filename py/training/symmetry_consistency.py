@@ -7,7 +7,7 @@ import torch
 from nn.augmentation import transform_message_symmetry
 from nn.encoding import EncodedObservation, encode_observation
 from nn.model import HybridPolicyValueNet
-from search.config import HybridAgentConfig
+from training.config import HybridAgentConfig
 from .replay import StepRecord
 
 

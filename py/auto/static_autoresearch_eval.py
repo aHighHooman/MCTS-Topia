@@ -57,6 +57,7 @@ if str(PY_ROOT) not in sys.path:
     sys.path.insert(0, str(PY_ROOT))
 
 from search.config import HybridAgentConfig
+from training.config import rl_path
 from training.replay import ReplayStore
 from training.selfplay import run_selfplay
 
@@ -557,7 +558,7 @@ def _run_match(
             commands,
             tribes,
             REPO_ROOT,
-            checkpoint_path=Path("rl/checkpoints/latest.pt"),
+            checkpoint_path=rl_path("checkpoints", "latest.pt"),
             replay_store=replay_store,
             device=torch.device("cpu"),
             progress_label=f"static-eval match={match_index} {seat0.name} vs {seat1.name}",
@@ -902,7 +903,7 @@ def main() -> int:
     parser.add_argument("--candidate-ref", default="HEAD", help="Git ref for the candidate/current variant. Default: HEAD.")
     parser.add_argument("--previous-ref", default="HEAD~1", help="Git ref for latest accepted/previous variant. Default: HEAD~1.")
     parser.add_argument("--baseline-ref", default="main", help="Git ref for baseline/v1 variant. Default: main.")
-    parser.add_argument("--output-dir", type=Path, default=Path("rl/static_autoresearch_eval"))
+    parser.add_argument("--output-dir", type=Path, default=rl_path("static_autoresearch_eval"))
     parser.add_argument("--jsonl", type=Path, default=None)
     parser.add_argument("--csv", type=Path, default=None)
     parser.add_argument("--keep-worktrees", action="store_true", help="Reuse existing output worktrees instead of recreating them.")

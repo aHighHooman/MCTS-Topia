@@ -12,12 +12,13 @@ if str(PY_ROOT) not in sys.path:
 
 from nn.bot_agent import HybridRLBot
 from search.config import HybridAgentConfig
+from training.config import rl_path
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Protocol-facing hybrid RL bot for Tribes.")
-    parser.add_argument("--checkpoint", type=Path, default=Path("rl/checkpoints/latest.pt"))
-    parser.add_argument("--replay-dir", type=Path, default=Path("rl/replay"))
+    parser.add_argument("--checkpoint", type=Path, default=rl_path("checkpoints", "latest.pt"))
+    parser.add_argument("--replay-dir", type=Path, default=rl_path("replay"))
     parser.add_argument("--simulations", type=int, default=None)
     parser.add_argument("--max-depth", type=int, default=None)
     parser.add_argument("--top-k-actions", type=int, default=None)
@@ -35,6 +36,11 @@ def main() -> None:
         "--static-only-bootstrap",
         action="store_true",
         help="Use native static-eval MCTS while keeping HybridRLBot replay recording; skips NN init/warmup/forward passes.",
+    )
+    parser.add_argument(
+        "--static-only-hybrid-nn",
+        action="store_true",
+        help="Alias for --static-only-bootstrap. Runs the HybridRLBot protocol/replay path with static-eval MCTS and no NN work.",
     )
     args = parser.parse_args()
 
@@ -76,8 +82,8 @@ def main() -> None:
         cfg,
         args.checkpoint,
         args.replay_dir,
-        warmup=not args.static_only_bootstrap,
-        static_only_bootstrap=args.static_only_bootstrap,
+        warmup=not (args.static_only_bootstrap or args.static_only_hybrid_nn),
+        static_only_bootstrap=args.static_only_bootstrap or args.static_only_hybrid_nn,
     )
     while True:
         try:
