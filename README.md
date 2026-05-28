@@ -25,7 +25,7 @@ Important current limitations:
 
 ## Repository Layout
 
-- `src/`: Java source
+- Java source comes from `C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes\src` by default
 - `py/bots/`: launchable external bots
 - `py/nn/`: model, observation encoding, belief state, and NN bot agent code
 - `py/search/`: MCTS config plus native/static search implementation
@@ -36,7 +36,7 @@ Important current limitations:
 - `levels/`: CSV map files
 - `lib/json.jar`: JSON dependency
 - `terrainProbs.json`: generated-map terrain/resource probabilities
-- `src/core/game/RegressionHarness.java`: regression suite
+- external `src/core/game/RegressionHarness.java`: regression suite
 
 Generated directories are ignored by Git:
 
@@ -60,9 +60,16 @@ C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\Tribes_MCTS
 ```
 
 The RL workflow keeps the original root-relative layout: Python code lives under
-`py/`, Java headless self-play builds into `out/`, and local training state lives
-under `rl/`. The `rl/` directory is intentionally ignored by Git because it holds
-large local checkpoints, replay shards, metrics, and run logs.
+`py/`, Java headless self-play builds into this repo's `out/`, and local training
+state lives under `rl/`. The Java game source is compiled from:
+
+```text
+C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes
+```
+
+Set `$env:TRIBES_GAME_ROOT` to point at a different game checkout. The `rl/`
+directory is intentionally ignored by Git because it holds large local
+checkpoints, replay shards, metrics, and run logs.
 
 Before running Python commands from a fresh PowerShell session:
 
@@ -84,9 +91,7 @@ python -m pytest py/tests
 Run from the repo root:
 
 ```powershell
-if (Test-Path out) { Remove-Item -LiteralPath out -Recurse -Force }
-New-Item -ItemType Directory -Force out | Out-Null
-& "$env:JAVA_HOME\bin\javac.exe" -cp "lib/json.jar" -d out (Get-ChildItem -Recurse src -Filter *.java | ForEach-Object { $_.FullName })
+.\scripts\build_java.ps1
 ```
 
 ## Run A Single Game
@@ -153,7 +158,7 @@ The main fields are:
 - `Players`: player types for a single game
 - `Tribes`: tribe assignment for those players
 
-Player names currently supported by `src/Run.java`:
+Player names currently supported by external `src/Run.java`:
 
 - `Human`
 - `External`
@@ -212,12 +217,15 @@ Tournament behavior:
 Compile and run:
 
 ```powershell
+$gameRoot = if ($env:TRIBES_GAME_ROOT) { $env:TRIBES_GAME_ROOT } else { 'C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes' }
 $sources = Join-Path (Get-Location) 'sources.txt'
-Get-ChildItem -Recurse src -Filter *.java | % FullName | Set-Content -LiteralPath $sources
+Get-ChildItem -Recurse (Join-Path $gameRoot 'src') -Filter *.java | % FullName | Set-Content -LiteralPath $sources
 if (Test-Path out) { Remove-Item -LiteralPath out -Recurse -Force }
 mkdir out | Out-Null
-& "$env:JAVA_HOME\bin\javac.exe" -cp "lib/json.jar" -d out @$sources
-& "$env:JAVA_HOME\bin\java.exe" -cp "out;lib/json.jar" core.game.RegressionHarness
+$jsonJar = Join-Path $gameRoot 'lib\json.jar'
+if (-not (Test-Path $jsonJar)) { $jsonJar = 'lib/json.jar' }
+& "$env:JAVA_HOME\bin\javac.exe" -cp $jsonJar -d out @$sources
+& "$env:JAVA_HOME\bin\java.exe" -cp "out;$jsonJar" core.game.RegressionHarness
 Remove-Item -LiteralPath $sources -Force
 ```
 

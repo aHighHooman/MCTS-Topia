@@ -2,7 +2,7 @@
 ## Project Shape
 
 - Mixed Java/Python project for a Polytopia-like engine, bot evaluation, RL self-play, and native MCTS.
-- Java engine/rules live under `src/`; Python code is organized by purpose under `py/bots`, `py/nn`, `py/search`, `py/training`, and `py/profiling`.
+- Java engine/rules are sourced from `C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes\src`; Python code is organized by purpose under `py/bots`, `py/nn`, `py/search`, `py/training`, and `py/profiling`.
 - Work from the repo root: `C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\Tribes_MCTS`.
 
 ## Setup Gotchas
@@ -13,6 +13,7 @@
 - Python imports require:
   - `$env:PYTHONPATH = "$PWD\py"`
 - Java depends on `lib/json.jar`; include it in compile and run classpaths.
+- `$env:TRIBES_GAME_ROOT` can override the external game checkout. The default is `C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes`.
 - Generated/local directories are intentionally ignored: `out/`, `save/`, `logs/`, `debug-logs/`, `tmp/`, `rl/`, `.pytest_cache/`, `py/search/native/.build*/`.
 
 ## Build And Test Commands
@@ -20,20 +21,21 @@
 Compile Java:
 
 ```powershell
-if (Test-Path out) { Remove-Item -LiteralPath out -Recurse -Force }
-New-Item -ItemType Directory -Force out | Out-Null
-& "$env:JAVA_HOME\bin\javac.exe" -cp "lib/json.jar" -d out (Get-ChildItem -Recurse src -Filter *.java | ForEach-Object { $_.FullName })
+.\scripts\build_java.ps1
 ```
 
 Run Java regression harness:
 
 ```powershell
+$gameRoot = if ($env:TRIBES_GAME_ROOT) { $env:TRIBES_GAME_ROOT } else { 'C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes' }
 $sources = Join-Path (Get-Location) 'sources.txt'
-Get-ChildItem -Recurse src -Filter *.java | ForEach-Object { $_.FullName } | Set-Content -LiteralPath $sources
+Get-ChildItem -Recurse (Join-Path $gameRoot 'src') -Filter *.java | ForEach-Object { $_.FullName } | Set-Content -LiteralPath $sources
 if (Test-Path out) { Remove-Item -LiteralPath out -Recurse -Force }
 New-Item -ItemType Directory -Force out | Out-Null
-& "$env:JAVA_HOME\bin\javac.exe" -cp "lib/json.jar" -d out @$sources
-& "$env:JAVA_HOME\bin\java.exe" -cp "out;lib/json.jar" core.game.RegressionHarness
+$jsonJar = Join-Path $gameRoot 'lib\json.jar'
+if (-not (Test-Path $jsonJar)) { $jsonJar = 'lib/json.jar' }
+& "$env:JAVA_HOME\bin\javac.exe" -cp $jsonJar -d out @$sources
+& "$env:JAVA_HOME\bin\java.exe" -cp "out;$jsonJar" core.game.RegressionHarness
 Remove-Item -LiteralPath $sources -Force
 ```
 
@@ -74,9 +76,9 @@ python -m profiling.selfplay_mcts_nn --config py/profiling/configs/selfplay_mcts
 ## Important Files
 
 - `docs/external-bot-protocol.md`: JSON stdin/stdout protocol and forward-model command loop.
-- `src/core/game/RegressionHarness.java`: broad Java rules regression suite.
-- `src/HeadlessPlay.java`: headless Java game runner used by self-play.
-- `src/Tournament.java`: tournament runner.
+- external `src/core/game/RegressionHarness.java`: broad Java rules regression suite.
+- external `src/HeadlessPlay.java`: headless Java game runner used by self-play.
+- external `src/Tournament.java`: tournament runner.
 - `py/profiling/mcts_search.py`: primary MCTS search profiler implementation.
 - `py/profiling/selfplay_mcts_nn.py`: primary self-play MCTS+NN profiler implementation.
 - `py/profiling/configs/`: profiler config JSON files.
