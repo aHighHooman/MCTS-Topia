@@ -71,10 +71,9 @@ _ROOT_ALWAYS_KEEP_TYPES = {
     "UPGRADE_BOMBER",
 }
 
-
 def _action_type(action: Dict[str, Any]) -> str:
     payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
-    return str(action.get("type") or action.get("t") or payload.get("type") or payload.get("t") or "")
+    return str(action.get("type") or payload.get("type") or "")
 
 
 def _select_root_indexes(root_actions: List[Dict[str, Any]], priors: List[float], top_k_actions: int) -> List[int]:
@@ -172,6 +171,22 @@ def run_native_static_mcts(
 
     while (deadline is not None and time.perf_counter() < deadline) or (deadline is None and len(expanded_node_ids) < simulation_budget):
         frontier = batch_size if deadline is not None else min(batch_size, max(1, simulation_budget - len(expanded_node_ids)))
+        native_static_batch = getattr(tree, "run_static_search_batch", None)
+        if native_static_batch is not None:
+            expanded_count, completed_frontier = _native_call(
+                native_static_batch,
+                int(frontier),
+                int(max_depth),
+                float(search_cfg.c_puct),
+            )
+            selected_paths += int(completed_frontier)
+            for _ in range(int(expanded_count)):
+                expanded_node_ids.add(len(expanded_node_ids))
+            if deadline is None and int(expanded_count) <= 0:
+                break
+            if deadline is not None and int(completed_frontier) <= 0:
+                break
+            continue
         selections: List[tuple[int, int, int, bool, _Evaluation | None]] = []
         eval_messages: List[Dict[str, Any]] = []
         eval_index_by_key: Dict[Any, int] = {}

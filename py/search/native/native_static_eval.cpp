@@ -144,6 +144,22 @@ const NativeTribe* tribe_by_id(const NativeGameState& state, int id) {
 }
 
 const NativeTile* tile_at(const NativeGameState& state, int x, int y) {
+  if (x >= 0 && y >= 0 && x < state.board_size && y < state.board_size) {
+    int index = y * state.board_size + x;
+    if (index >= 0 && index < static_cast<int>(state.tiles.size())) {
+      const NativeTile& tile = state.tiles[index];
+      if (tile.x == x && tile.y == y) {
+        return &tile;
+      }
+    }
+    index = x * state.board_size + y;
+    if (index >= 0 && index < static_cast<int>(state.tiles.size())) {
+      const NativeTile& tile = state.tiles[index];
+      if (tile.x == x && tile.y == y) {
+        return &tile;
+      }
+    }
+  }
   for (const NativeTile& tile : state.tiles) {
     if (tile.x == x && tile.y == y) {
       return &tile;
@@ -202,14 +218,19 @@ double unit_value(const NativeUnit& unit) {
 
 double unit_power(const NativeUnit& unit) {
   const double hp_scale = unit.max_hp > 0 ? clamp(static_cast<double>(unit.current_hp) / unit.max_hp, 0.15, 1.20) : 1.0;
-  return (1.4 * unit_attack(unit.type) + 1.1 * unit_defence(unit.type) + 0.45 * unit_range(unit.type) +
-          0.30 * unit_mobility(unit.type)) *
+  const double attack = unit.attack > 0.0 ? unit.attack : static_cast<double>(unit_attack(unit.type));
+  const double defence = unit.defence > 0.0 ? unit.defence : static_cast<double>(unit_defence(unit.type));
+  const double range = unit.range > 0 ? static_cast<double>(unit.range) : static_cast<double>(unit_range(unit.type));
+  const double mobility = unit.movement > 0 ? static_cast<double>(unit.movement) : static_cast<double>(unit_mobility(unit.type));
+  return (1.4 * attack + 1.1 * defence + 0.45 * range + 0.30 * mobility) *
              hp_scale +
          (unit.veteran ? 0.8 : 0.0);
 }
 
 bool can_threaten(const NativeUnit& attacker, int x, int y) {
-  const int threat_reach = unit_mobility(attacker.type) + unit_range(attacker.type);
+  const int mobility = attacker.movement > 0 ? attacker.movement : unit_mobility(attacker.type);
+  const int range = attacker.range > 0 ? attacker.range : unit_range(attacker.type);
+  const int threat_reach = mobility + range;
   return chebyshev(attacker.x, attacker.y, x, y) <= threat_reach;
 }
 
@@ -220,8 +241,8 @@ double enemy_attack_pressure_at(const NativeGameState& state, int player_id, int
       continue;
     }
     const int dist = std::max(1, chebyshev(enemy.x, enemy.y, x, y));
-    const int direct_reach = unit_range(enemy.type);
-    const int move_attack_reach = unit_mobility(enemy.type) + direct_reach;
+    const int direct_reach = enemy.range > 0 ? enemy.range : unit_range(enemy.type);
+    const int move_attack_reach = (enemy.movement > 0 ? enemy.movement : unit_mobility(enemy.type)) + direct_reach;
     double reach_bonus = 0.12;
     if (dist <= direct_reach) {
       reach_bonus = 1.15;
@@ -1184,21 +1205,37 @@ double state_value_tuned(const NativeGameState& state) {
   return std::tanh(raw / 95.0);
 }
 
-py::dict evaluation_to_dict(const NativeRoot& root) {
+StaticEvaluation static_evaluation_for_state(
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions) {
+  StaticEvaluation evaluation;
+  evaluation.priors = priors_for_state(state, actions);
+  evaluation.value = use_baseline_eval() ? state_value_baseline(state) : state_value_tuned(state);
+  return evaluation;
+}
+
+py::dict evaluation_to_dict(const StaticEvaluation& evaluation) {
   py::dict out;
   py::list priors;
-  for (double prior : priors_for_state(root.state, root.actions)) {
+  for (double prior : evaluation.priors) {
     priors.append(prior);
   }
   out["priors"] = priors;
-  out["value"] = use_baseline_eval() ? state_value_baseline(root.state) : state_value_tuned(root.state);
+  out["value"] = evaluation.value;
   return out;
 }
 
 }  // namespace
 
+StaticEvaluation evaluate_static_state(
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions) {
+  return static_evaluation_for_state(state, actions);
+}
+
 py::dict evaluate_static(const py::dict& payload, int max_actions) {
-  return evaluation_to_dict(parse_root_payload(payload, max_actions));
+  NativeRoot root = parse_root_payload(payload, max_actions);
+  return evaluation_to_dict(static_evaluation_for_state(root.state, root.actions));
 }
 
 py::list evaluate_static_batch(const py::list& payloads, int max_actions) {

@@ -20,7 +20,9 @@ namespace py = pybind11;
 using tribes::native::NativeAction;
 using tribes::native::NativeGameState;
 using tribes::native::NativeRoot;
+using tribes::native::StaticEvaluation;
 using tribes::native::apply_action_strict;
+using tribes::native::evaluate_static_state;
 using tribes::native::parse_root_payload;
 using tribes::native::serialize_evaluation_payload;
 using tribes::native::value_to_root_perspective;
@@ -653,6 +655,116 @@ class NativeMCTS {
     return py::make_tuple(out, completed_simulations);
   }
 
+  py::tuple run_static_search_batch(int frontier, int max_depth, double c_puct) {
+    last_batch_depth_sum_ = 0;
+    last_batch_max_depth_ = 0;
+    int expanded_nodes = 0;
+    int completed_simulations = 0;
+    if (frontier <= 0) {
+      return py::make_tuple(expanded_nodes, completed_simulations);
+    }
+    for (int i = 0; i < frontier; ++i) {
+      std::vector<int> path_node_ids;
+      std::vector<int> path_action_indexes;
+      path_node_ids.reserve(8);
+      path_action_indexes.reserve(8);
+      int current_node_id = 0;
+      double leaf_value = leaf_value_for(nodes_[0], states_[nodes_[0].state_index]);
+      bool needs_expansion = false;
+      int parent_node_id = -1;
+      int parent_action_index = -1;
+      bool leaf_terminal = nodes_[0].terminal;
+      int leaf_active_player_id = states_[nodes_[0].state_index].active_player_id;
+      bool leaf_value_root_perspective = states_[nodes_[0].state_index].terminal_value_known;
+      const NativeGameState* selected_leaf_state = &states_[nodes_[0].state_index];
+      const bool unlimited_depth = max_depth <= 0;
+
+      for (int depth = 0; unlimited_depth || depth < max_depth; ++depth) {
+        const Node& node = nodes_[current_node_id];
+        const NativeGameState& state = states_[node.state_index];
+        leaf_terminal = node.terminal || state.terminal;
+        leaf_active_player_id = state.active_player_id;
+        selected_leaf_state = &state;
+        leaf_value_root_perspective = leaf_terminal && state.terminal_value_known;
+        if (leaf_terminal || state.legal_action_indexes.empty()) {
+          leaf_value = leaf_value_for(node, state);
+          break;
+        }
+
+        const int local_action_index = select_action_index(node, c_puct);
+        path_node_ids.push_back(current_node_id);
+        path_action_indexes.push_back(local_action_index);
+
+        const int child_node_id = node.child_node_ids[local_action_index];
+        if (child_node_id < 0) {
+          needs_expansion = true;
+          parent_node_id = current_node_id;
+          parent_action_index = local_action_index;
+          break;
+        }
+
+        current_node_id = child_node_id;
+        const Node& child = nodes_[current_node_id];
+        const NativeGameState& child_state = states_[child.state_index];
+        leaf_terminal = child.terminal || child_state.terminal;
+        leaf_value = leaf_value_for(child, child_state);
+        leaf_active_player_id = child_state.active_player_id;
+        selected_leaf_state = &child_state;
+        leaf_value_root_perspective = leaf_terminal && child_state.terminal_value_known;
+        if (leaf_terminal) {
+          break;
+        }
+      }
+
+      const int selected_depth = static_cast<int>(path_node_ids.size());
+      last_batch_depth_sum_ += selected_depth;
+      last_batch_max_depth_ = std::max(last_batch_max_depth_, selected_depth);
+      completed_simulations += 1;
+
+      if (!needs_expansion) {
+        complete_path_internal_unchecked(
+            path_node_ids,
+            path_action_indexes,
+            leaf_value,
+            leaf_active_player_id,
+            leaf_value_root_perspective);
+        continue;
+      }
+
+      NativeGameState child_state = apply_action(
+          states_[nodes_[parent_node_id].state_index],
+          states_[nodes_[parent_node_id].state_index].legal_action_indexes[parent_action_index]);
+      leaf_terminal = child_state.terminal;
+      leaf_active_player_id = child_state.active_player_id;
+      leaf_value_root_perspective = leaf_terminal && child_state.terminal_value_known;
+      StaticEvaluation evaluation;
+      if (leaf_terminal) {
+        evaluation.value = terminal_value_for(child_state);
+      } else {
+        evaluation = evaluate_static_state(child_state, actions_);
+      }
+
+      child_state.terminal = child_state.terminal || leaf_terminal;
+      const int state_index = static_cast<int>(states_.size());
+      states_.push_back(std::move(child_state));
+      const int child_node_id = static_cast<int>(nodes_.size());
+      nodes_[parent_node_id].child_node_ids[parent_action_index] = child_node_id;
+      nodes_.push_back(make_node(
+          state_index,
+          evaluation.priors,
+          evaluation.value,
+          states_[state_index].terminal));
+      expanded_nodes += 1;
+      complete_path_internal_unchecked(
+          path_node_ids,
+          path_action_indexes,
+          evaluation.value,
+          leaf_active_player_id,
+          leaf_value_root_perspective);
+    }
+    return py::make_tuple(expanded_nodes, completed_simulations);
+  }
+
   void complete_selected_paths(
       const std::vector<int>& selection_ids,
       const std::vector<double>& leaf_values) {
@@ -1020,6 +1132,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("select_leaf_batch_compact", &NativeMCTS::select_leaf_batch_compact)
       .def("select_leaf_batch_evals_only", &NativeMCTS::select_leaf_batch_evals_only)
       .def("select_leaf_batches_evals_only", &NativeMCTS::select_leaf_batches_evals_only)
+      .def("run_static_search_batch", &NativeMCTS::run_static_search_batch)
       .def("last_batch_stats", &NativeMCTS::last_batch_stats)
       .def("expand", &NativeMCTS::expand)
       .def("backprop", &NativeMCTS::backprop)

@@ -23,6 +23,15 @@ def _resolve_config_path(path: Path) -> Path:
     return path
 
 
+def _normalize_profile_defaults(defaults: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, value in defaults.items():
+        normalized[str(key).replace("-", "_")] = value
+    if bool(normalized.get("static_only_hybrid_nn", False)):
+        normalized["evaluator"] = "static-bot"
+    return normalized
+
+
 def load_config_defaults(parser: argparse.ArgumentParser, argv: list[str] | None = None) -> argparse.Namespace:
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument("--config", type=Path, default=None, help="JSON config file with argparse option names.")
@@ -38,11 +47,11 @@ def load_config_defaults(parser: argparse.ArgumentParser, argv: list[str] | None
     if not isinstance(defaults, dict):
         raise TypeError(f"profile config must be a JSON object: {config_args.config}")
 
-    normalized: dict[str, Any] = {}
-    for key, value in defaults.items():
-        normalized[str(key).replace("-", "_")] = value
+    normalized = _normalize_profile_defaults(defaults)
     parser.set_defaults(**normalized)
     args = parser.parse_args(remaining)
+    if bool(getattr(args, "static_only_hybrid_nn", False)):
+        setattr(args, "evaluator", "static-bot")
     for action in parser._actions:
         if action.type is Path:
             value = getattr(args, action.dest, None)

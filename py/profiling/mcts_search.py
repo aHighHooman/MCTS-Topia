@@ -10,6 +10,7 @@ from pathlib import Path
 import pstats
 import random
 import sys
+import tempfile
 import time
 from collections import Counter
 from typing import Any, Callable
@@ -23,12 +24,14 @@ if str(PY_ROOT) not in sys.path:
 DEFAULT_AUTORESEARCH_CHECKPOINT = PY_ROOT / "profiling" / "mcts_search_profiling_random_init_model.pt"
 
 from nn.encoding import EncodedObservation, encode_observation
+from nn.bot_agent import HybridRLBot
 from nn.model import HybridPolicyValueNet
 from profiling.config import load_config_defaults
 from search.config import HybridAgentConfig
 from search.native import mcts as native_mcts
 from search.native import static_mcts as native_static_mcts
 from search.native.cpp_extension import load_native_mcts_extension
+from training.config import rl_path
 
 _STATIC_TREE_DEPTH_SUM = 0
 _STATIC_TREE_MAX_DEPTH = 0
@@ -134,6 +137,53 @@ class BranchingCollector:
             )
             self.root_visit_entropy_sum += entropy
             self.root_visit_samples += 1
+
+
+def _result_from_bot_response(payload: dict[str, Any], response: dict[str, Any] | None) -> native_mcts.SearchResult:
+    actions = _payload_actions(payload)
+    action_ids = [str(action.get("id")) for action in actions]
+    selected_action_id = str((response or {}).get("actionId") or "")
+    try:
+        action_index = action_ids.index(selected_action_id)
+    except ValueError:
+        action_index = 0
+    visit_target = [0.0] * len(action_ids)
+    if visit_target and selected_action_id in action_ids:
+        visit_target[action_index] = 1.0
+    return native_mcts.SearchResult(
+        action_id=selected_action_id,
+        action_index=action_index,
+        visit_distribution={selected_action_id: 1.0} if selected_action_id else {},
+        visit_target=visit_target,
+        value=0.0,
+    )
+
+
+def _result_from_bot_record(payload: dict[str, Any], bot: HybridRLBot, response: dict[str, Any] | None) -> native_mcts.SearchResult:
+    if not bot.records:
+        return _result_from_bot_response(payload, response)
+    record = bot.records[-1]
+    actions = _payload_actions(payload)
+    action_ids = [str(action.get("id")) for action in actions]
+    selected_action_id = str(getattr(record, "action_id", "") or (response or {}).get("actionId") or "")
+    action_index = int(getattr(record, "action_index", 0) or 0)
+    visit_target = [float(value) for value in list(getattr(record, "visit_target", []) or [])]
+    if len(visit_target) != len(action_ids):
+        visit_target = [0.0] * len(action_ids)
+        if selected_action_id in action_ids:
+            visit_target[action_ids.index(selected_action_id)] = 1.0
+    visit_distribution = {
+        action_id: float(visit_target[index])
+        for index, action_id in enumerate(action_ids[: len(visit_target)])
+        if float(visit_target[index]) > 0.0
+    }
+    return native_mcts.SearchResult(
+        action_id=selected_action_id,
+        action_index=action_index,
+        visit_distribution=visit_distribution,
+        visit_target=visit_target,
+        value=float(getattr(record, "root_value", 0.0) or 0.0),
+    )
 
 
 def _sync_if_needed(device: torch.device | str) -> None:
@@ -362,6 +412,22 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
             _STATIC_TREE_SELECTED_PATHS += int(completed)
             return result, int(completed)
 
+        def run_static_search_batch(self, *args: Any, **kwargs: Any) -> Any:
+            global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_SELECTED_PATHS, _STATIC_TREE_EXPANDED_NODE_IDS
+            started_at = time.perf_counter()
+            expanded, completed = self._tree.run_static_search_batch(*args, **kwargs)
+            expanded = int(expanded)
+            completed = int(completed)
+            collector.add("native_tree.run_static_search_batch", time.perf_counter() - started_at, items=completed)
+            batch_depth_sum, batch_max_depth = self._tree.last_batch_stats()
+            _STATIC_TREE_DEPTH_SUM += int(batch_depth_sum)
+            _STATIC_TREE_MAX_DEPTH = max(_STATIC_TREE_MAX_DEPTH, int(batch_max_depth))
+            _STATIC_TREE_SELECTED_PATHS += completed
+            start_id = len(_STATIC_TREE_EXPANDED_NODE_IDS)
+            for offset in range(expanded):
+                _STATIC_TREE_EXPANDED_NODE_IDS.add(start_id + offset)
+            return expanded, completed
+
         def expand(self, *args: Any, **kwargs: Any) -> Any:
             global _STATIC_TREE_EXPANDED_NODE_IDS
             result, _elapsed = _time_call(
@@ -529,7 +595,7 @@ def _load_payload(path: Path | None) -> dict[str, Any]:
 
 
 
-_CAPTURE_BOT_SOURCE = 'from __future__ import annotations\n\nimport argparse\nimport json\nimport sys\nfrom pathlib import Path\nfrom typing import Any\n\n\ndef _pick_action_id(actions: list[dict[str, Any]]) -> str | None:\n    if not actions:\n        return None\n    for action in actions:\n        action_type = str(action.get("type") or action.get("t") or "").upper()\n        if action_type == "END_TURN":\n            return str(action.get("id"))\n    return str(actions[0].get("id"))\n\n\ndef main() -> int:\n    parser = argparse.ArgumentParser(description="Capture the first real self-play action_request payload.")\n    parser.add_argument("--output", type=Path, required=True)\n    parser.add_argument("--py-root", type=Path, required=True)\n    args = parser.parse_args()\n\n    py_root = str(args.py_root.resolve())\n    if py_root not in sys.path:\n        sys.path.insert(0, py_root)\n\n    from nn.belief import BeliefTracker\n    from nn.encoding import normalize_message\n\n    tracker = BeliefTracker()\n    wrote_payload = False\n    args.output.parent.mkdir(parents=True, exist_ok=True)\n\n    for raw_line in sys.stdin:\n        line = raw_line.strip()\n        if not line:\n            continue\n        try:\n            message = json.loads(line)\n        except json.JSONDecodeError:\n            continue\n\n        msg_type = message.get("type")\n        if msg_type == "action_request":\n            normalized = tracker.annotate(normalize_message(message))\n            payload = {\n                "player_id": int(normalized.get("player_id", 0) or 0),\n                "observation": normalized["observation"],\n                "actions": list(normalized.get("actions", []) or []),\n            }\n            if not wrote_payload:\n                tmp = args.output.with_suffix(args.output.suffix + ".tmp")\n                tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")\n                tmp.replace(args.output)\n                wrote_payload = True\n\n            action_ids = [str(action.get("id")) for action in payload["actions"]]\n            selected = _pick_action_id(payload["actions"])\n            print(json.dumps({"actionId": selected, "rankedActionIds": action_ids}), flush=True)\n            continue\n\n        if msg_type == "game_over":\n            print(json.dumps({"ok": True}), flush=True)\n            break\n\n        print(json.dumps({"error": f"unsupported message type: {msg_type}"}), flush=True)\n\n    return 0\n\n\nif __name__ == "__main__":\n    raise SystemExit(main())\n'
+_CAPTURE_BOT_SOURCE = 'from __future__ import annotations\n\nimport argparse\nimport json\nimport sys\nfrom pathlib import Path\nfrom typing import Any\n\n\ndef _pick_action_id(actions: list[dict[str, Any]]) -> str | None:\n    if not actions:\n        return None\n    for action in actions:\n        action_type = str(action.get("type") or "").upper()\n        if action_type == "END_TURN":\n            return str(action.get("id"))\n    return str(actions[0].get("id"))\n\n\ndef main() -> int:\n    parser = argparse.ArgumentParser(description="Capture the first real self-play action_request payload.")\n    parser.add_argument("--output", type=Path, required=True)\n    parser.add_argument("--py-root", type=Path, required=True)\n    args = parser.parse_args()\n\n    py_root = str(args.py_root.resolve())\n    if py_root not in sys.path:\n        sys.path.insert(0, py_root)\n\n    from nn.belief import BeliefTracker\n    from nn.encoding import normalize_message\n\n    tracker = BeliefTracker()\n    wrote_payload = False\n    args.output.parent.mkdir(parents=True, exist_ok=True)\n\n    for raw_line in sys.stdin:\n        line = raw_line.strip()\n        if not line:\n            continue\n        try:\n            message = json.loads(line)\n        except json.JSONDecodeError:\n            continue\n\n        msg_type = message.get("type")\n        if msg_type == "action_request":\n            normalized = tracker.annotate(normalize_message(message))\n            payload = {\n                "player_id": int(normalized.get("player_id", 0) or 0),\n                "observation": normalized["observation"],\n                "actions": list(normalized.get("actions", []) or []),\n            }\n            if not wrote_payload:\n                tmp = args.output.with_suffix(args.output.suffix + ".tmp")\n                tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")\n                tmp.replace(args.output)\n                wrote_payload = True\n\n            action_ids = [str(action.get("id")) for action in payload["actions"]]\n            selected = _pick_action_id(payload["actions"])\n            print(json.dumps({"actionId": selected, "rankedActionIds": action_ids}), flush=True)\n            continue\n\n        if msg_type == "game_over":\n            print(json.dumps({"ok": True}), flush=True)\n            break\n\n        print(json.dumps({"error": f"unsupported message type: {msg_type}"}), flush=True)\n\n    return 0\n\n\nif __name__ == "__main__":\n    raise SystemExit(main())\n'
 
 
 def _write_capture_bot(script_path: Path) -> None:
@@ -603,7 +669,7 @@ def _capture_selfplay_start_payload(args: argparse.Namespace, seed: int | None =
             [command, list(command)],
             tribes,
             workdir,
-            checkpoint_path=Path("rl/checkpoints/latest.pt"),
+            checkpoint_path=rl_path("checkpoints", "latest.pt"),
             replay_store=replay_store,
             device=torch.device("cpu"),
             progress_label=f"profile-capture-{safe_mode}-seed{run_seed}",
@@ -1099,7 +1165,7 @@ def _payload_actions(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _action_type(action: dict[str, Any]) -> str:
-    return str(action.get("type") or action.get("t") or "UNKNOWN").upper()
+    return str(action.get("type") or "UNKNOWN").upper()
 
 
 def _percentile(values: list[int], percentile: float) -> float:
@@ -1231,11 +1297,55 @@ def _default_mcts_search_output_path(args: argparse.Namespace, filename: str) ->
     return Path("debug-logs") / f"mcts-search-{args.evaluator}" / filename
 
 
+def _run_bot_profile_case(
+    case: PayloadCase,
+    *,
+    bot: HybridRLBot,
+    collector: TimingCollector,
+    using_walltime: bool,
+    repeats: int,
+) -> tuple[native_mcts.SearchResult | None, SearchStats, float]:
+    global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_SELECTED_PATHS, _STATIC_TREE_EXPANDED_NODE_IDS
+    _STATIC_TREE_DEPTH_SUM = 0
+    _STATIC_TREE_MAX_DEPTH = 0
+    _STATIC_TREE_SELECTED_PATHS = 0
+    _STATIC_TREE_EXPANDED_NODE_IDS = set()
+    last_result: native_mcts.SearchResult | None = None
+    stats = SearchStats("walltime" if using_walltime else "simulations", 0.0)
+    started_at = time.perf_counter()
+    for _ in range(max(1, int(repeats))):
+        depth_sum_before = _STATIC_TREE_DEPTH_SUM
+        selected_paths_before = _STATIC_TREE_SELECTED_PATHS
+        expanded_before = len(_STATIC_TREE_EXPANDED_NODE_IDS)
+        bot.reset_episode()
+        response, _elapsed = _time_call(
+            collector,
+            "bot.choose_action.total",
+            lambda: bot.choose_action(case.payload),
+            device=bot.device,
+            items=1,
+        )
+        last_result = _result_from_bot_record(case.payload, bot, response)
+        selected_delta = max(0, _STATIC_TREE_SELECTED_PATHS - selected_paths_before)
+        expanded_delta = max(0, len(_STATIC_TREE_EXPANDED_NODE_IDS) - expanded_before)
+        stats.depth_sum += max(0, _STATIC_TREE_DEPTH_SUM - depth_sum_before)
+        stats.max_depth = max(stats.max_depth, _STATIC_TREE_MAX_DEPTH)
+        stats.selected_paths += selected_delta
+        stats.expanded_nodes += expanded_delta
+        stats.simulations += expanded_delta
+    _sync_if_needed(bot.device)
+    elapsed = time.perf_counter() - started_at
+    stats.elapsed_sec = elapsed
+    return last_result, stats, elapsed
+
+
 def _run_one_profile_case(
     case: PayloadCase,
     *,
     evaluator_mode: str,
     model: HybridPolicyValueNet | None,
+    bot: HybridRLBot | None,
+    collector: TimingCollector,
     cfg: HybridAgentConfig,
     device: torch.device,
     using_walltime: bool,
@@ -1243,6 +1353,17 @@ def _run_one_profile_case(
     repeats: int,
 ) -> tuple[native_mcts.SearchResult | None, SearchStats, float]:
     global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_SELECTED_PATHS, _STATIC_TREE_EXPANDED_NODE_IDS
+    if evaluator_mode in {"bot", "static-bot"}:
+        if bot is None:
+            raise RuntimeError("Bot evaluator mode requires a HybridRLBot instance.")
+        return _run_bot_profile_case(
+            case,
+            bot=bot,
+            collector=collector,
+            using_walltime=using_walltime,
+            repeats=repeats,
+        )
+
     last_result: native_mcts.SearchResult | None = None
     stats = SearchStats("walltime" if using_walltime else "simulations", 0.0)
     if evaluator_mode == "static":
@@ -1307,7 +1428,20 @@ def main() -> int:
             "By default this captures generated PlayLG self-play starts and benchmarks 10 positions x 10 sec."
         )
     )
-    parser.add_argument("--evaluator", choices=["nn", "static"], default="nn", help="Evaluator backend to profile. Default: nn.")
+    parser.add_argument(
+        "--evaluator",
+        choices=["nn", "static", "bot", "static-bot"],
+        default="nn",
+        help=(
+            "Evaluator backend to profile. Use bot for HybridRLBot.choose_action, "
+            "or static-bot for the static-only bootstrap HybridRLBot path. Default: nn."
+        ),
+    )
+    parser.add_argument(
+        "--static-only-hybrid-nn",
+        action="store_true",
+        help="Profile HybridRLBot.choose_action with static-eval MCTS and no NN work. Equivalent to --evaluator static-bot.",
+    )
     parser.add_argument("--payload", type=Path, default=None, help="Profile one existing JSON root payload instead of generated self-play starts.")
     parser.add_argument("--synthetic", action="store_true", help="Use the old tiny synthetic 4x4 root instead of real generated starts.")
 
@@ -1354,6 +1488,8 @@ def main() -> int:
     parser.add_argument("--profile-csv", type=Path, default=None, help="Optional CSV path for cProfile rows.")
     parser.add_argument("--position-csv", type=Path, default=None, help="Optional CSV path for per-position search throughput rows.")
     args = load_config_defaults(parser)
+    if args.static_only_hybrid_nn:
+        args.evaluator = "static-bot"
 
     if args.position_csv is None:
         args.position_csv = _default_mcts_search_output_path(args, "positions.csv")
@@ -1379,11 +1515,15 @@ def main() -> int:
         cfg.search.top_k_actions = int(args.top_k_actions)
     if args.no_dirichlet:
         cfg.search.dirichlet_epsilon = 0.0
+    if using_walltime:
+        cfg.selfplay.wall_clock_per_action_seconds = max(0.0, float(args.wall_time_sec))
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     model: HybridPolicyValueNet | None = None
+    bot: HybridRLBot | None = None
+    bot_replay_tmp: tempfile.TemporaryDirectory[str] | None = None
     checkpoint_status = "random_init"
-    if args.evaluator == "nn":
+    if args.evaluator in {"nn", "bot"}:
         model = HybridPolicyValueNet(cfg.model).eval().to(device)
         if args.checkpoint is not None:
             checkpoint_path = Path(args.checkpoint)
@@ -1395,6 +1535,30 @@ def main() -> int:
                 allow_reinitialize=allow_reinitialize,
             )
             model.eval()
+        if args.evaluator == "bot":
+            bot_replay_tmp = tempfile.TemporaryDirectory(prefix="tribes_mcts_profile_bot_replay_")
+            bot = HybridRLBot(
+                cfg,
+                Path(args.checkpoint) if args.checkpoint is not None else Path(),
+                Path(bot_replay_tmp.name),
+                model=model,
+                device=device,
+                native_available=True,
+                warmup=False,
+            )
+            checkpoint_status = f"bot:{checkpoint_status}"
+    elif args.evaluator == "static-bot":
+        bot_replay_tmp = tempfile.TemporaryDirectory(prefix="tribes_mcts_profile_static_bot_replay_")
+        bot = HybridRLBot(
+            cfg,
+            Path(args.checkpoint) if args.checkpoint is not None else Path(),
+            Path(bot_replay_tmp.name),
+            device=torch.device("cpu"),
+            native_available=True,
+            warmup=False,
+            static_only_bootstrap=True,
+        )
+        checkpoint_status = "static_bot"
     else:
         checkpoint_status = "static_eval"
 
@@ -1404,9 +1568,10 @@ def main() -> int:
 
     collector = TimingCollector()
     branching = BranchingCollector()
-    original_evaluator = _install_timed_evaluator(collector, branching) if args.evaluator == "nn" else None
-    original_static_evaluator = _install_timed_static_evaluator(collector, branching) if args.evaluator == "static" else None
-    original_tree_cls = _install_timed_tree(extension, collector, device)
+    original_evaluator = _install_timed_evaluator(collector, branching) if args.evaluator in {"nn", "bot"} else None
+    original_static_evaluator = _install_timed_static_evaluator(collector, branching) if args.evaluator in {"static", "static-bot"} else None
+    profile_device = bot.device if bot is not None else device
+    original_tree_cls = _install_timed_tree(extension, collector, profile_device)
     profile = cProfile.Profile()
     per_position_rows: list[dict[str, Any]] = []
     last_result: native_mcts.SearchResult | None = None
@@ -1417,6 +1582,12 @@ def main() -> int:
             print(f"[warmup] {args.warmup} run(s) per payload; not included in benchmark timing", flush=True)
         for case in cases:
             for _ in range(max(0, int(args.warmup))):
+                if args.evaluator in {"bot", "static-bot"}:
+                    if bot is None:
+                        raise RuntimeError("Bot evaluator mode requires a HybridRLBot instance.")
+                    bot.reset_episode()
+                    bot.choose_action(case.payload)
+                    continue
                 if using_walltime:
                     if args.evaluator == "static":
                         native_static_mcts.run_native_static_mcts(
@@ -1444,9 +1615,9 @@ def main() -> int:
         if original_static_evaluator is not None:
             native_static_mcts._evaluate_static_messages = original_static_evaluator
         extension.NativeMCTS = original_tree_cls
-        original_evaluator = _install_timed_evaluator(collector, branching) if args.evaluator == "nn" else None
-        original_static_evaluator = _install_timed_static_evaluator(collector, branching) if args.evaluator == "static" else None
-        _install_timed_tree(extension, collector, device)
+        original_evaluator = _install_timed_evaluator(collector, branching) if args.evaluator in {"nn", "bot"} else None
+        original_static_evaluator = _install_timed_static_evaluator(collector, branching) if args.evaluator in {"static", "static-bot"} else None
+        _install_timed_tree(extension, collector, profile_device)
 
         _sync_if_needed(device)
         benchmark_started_at = time.perf_counter()
@@ -1464,6 +1635,8 @@ def main() -> int:
                 case,
                 evaluator_mode=args.evaluator,
                 model=model,
+                bot=bot,
+                collector=collector,
                 cfg=cfg,
                 device=device,
                 using_walltime=using_walltime,
@@ -1503,6 +1676,8 @@ def main() -> int:
         if original_static_evaluator is not None:
             native_static_mcts._evaluate_static_messages = original_static_evaluator
         extension.NativeMCTS = original_tree_cls
+        if bot_replay_tmp is not None:
+            bot_replay_tmp.cleanup()
 
     print(
         f"MCTS profile: positions={len(cases)} repeats_per_position={max(1, int(args.repeats))} "
