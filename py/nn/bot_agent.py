@@ -350,6 +350,8 @@ class HybridRLBot:
             "turn_index": self.turn_index,
             "turn_step_index": self.turn_step_index,
         }
+        if self.static_only_bootstrap:
+            record_kwargs["static_value_target"] = float(result.value)
         if "encoded_observation" in getattr(StepRecord, "__dataclass_fields__", {}):
             record_kwargs["encoded_observation"] = None
         self.records.append(StepRecord(**record_kwargs))
