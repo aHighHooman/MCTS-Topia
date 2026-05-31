@@ -13,11 +13,11 @@ class ModelConfig:
     city_feature_dim: int = 29
     action_feature_dim: int = 267
     scalar_dim: int = 94
-    cnn_channels: int = 128
-    board_res_blocks: int = 4
-    d_model: int = 256
-    n_heads: int = 8
-    n_layers: int = 6
+    cnn_channels: int = 64
+    board_res_blocks: int = 2
+    d_model: int = 128
+    n_heads: int = 4
+    n_layers: int = 3
     ff_mult: int = 4
     dropout: float = 0.0
     max_units: int = 256

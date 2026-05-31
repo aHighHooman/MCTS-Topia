@@ -76,20 +76,37 @@ def _action_type(action: Dict[str, Any]) -> str:
     return str(action.get("type") or payload.get("type") or "")
 
 
+def _move_signature(action: Dict[str, Any]) -> tuple[Any, Any, Any] | None:
+    if _action_type(action) != "MOVE":
+        return None
+    payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+    unit_id = action.get("unit_id", payload.get("unit_id", payload.get("unitId")))
+    x = action.get("x", payload.get("x"))
+    y = action.get("y", payload.get("y"))
+    return unit_id, x, y
+
+
 def _select_root_indexes(root_actions: List[Dict[str, Any]], priors: List[float], top_k_actions: int) -> List[int]:
     indexes = list(range(len(root_actions)))
     if top_k_actions <= 0 or len(indexes) <= top_k_actions:
         return indexes
 
-    forced = {idx for idx, action in enumerate(root_actions) if _action_type(action) in _ROOT_ALWAYS_KEEP_TYPES}
-    budget = max(int(top_k_actions), len(forced))
-    ranked = sorted(indexes, key=lambda idx: priors[idx], reverse=True)
+    forced = [idx for idx, action in enumerate(root_actions) if _action_type(action) in _ROOT_ALWAYS_KEEP_TYPES]
     selected = set(forced)
+    budget = max(int(top_k_actions), len(selected))
+    ranked = sorted(indexes, key=lambda idx: priors[idx], reverse=True)
+    seen_moves: set[tuple[Any, Any, Any]] = set()
     for idx in ranked:
         if len(selected) >= budget:
             break
+        signature = _move_signature(root_actions[idx])
+        if signature is not None:
+            if signature in seen_moves:
+                continue
+            seen_moves.add(signature)
         selected.add(idx)
-    return sorted(selected)
+    ordered = forced + [idx for idx in ranked if idx in selected and idx not in set(forced)]
+    return ordered[:budget]
 
 
 def _root_static_priors(
@@ -164,6 +181,10 @@ def run_native_static_mcts(
     deadline = time.perf_counter() + wall_time_budget if wall_time_budget > 0.0 else None
     simulation_budget = max(0, int(search_cfg.num_simulations))
     batch_size = max(1, int(search_cfg.batch_size))
+    reserve_tree_capacity = getattr(tree, "reserve_tree_capacity", None)
+    if reserve_tree_capacity is not None:
+        reserve_target = simulation_budget + 1 if deadline is None else max(4096, batch_size * 4096)
+        _native_call(reserve_tree_capacity, int(reserve_target))
     eval_cache: Dict[Any, _Evaluation] = {}
     selected_paths = 0
     expanded_node_ids: set[int] = set()

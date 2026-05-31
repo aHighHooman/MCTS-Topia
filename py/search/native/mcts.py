@@ -153,7 +153,7 @@ def _evaluate_messages(
         return []
     if belief_snapshot is not None:
         messages = [belief_snapshot.annotate_without_update(message) for message in messages]
-    encoded_items = [encode_observation(message, model_cfg, compact=True) for message in messages]
+    encoded_items = [encode_observation(message, model_cfg, compact=True, normalized=True) for message in messages]
     batch = encoded_items[0] if len(encoded_items) == 1 else _stack_encoded(encoded_items)
     batch = batch.to(device)
     with torch.inference_mode():
@@ -224,6 +224,64 @@ def _visit_entropy_bits(visit_distribution: Dict[str, float]) -> float:
     )
 
 
+_ROOT_TACTICAL_KEEP_TYPES = {
+    "CAPTURE",
+    "MAKE_VETERAN",
+    "ATTACK",
+    "CONVERT",
+    "EXAMINE",
+    "RESOURCE_GATHERING",
+    "LEVEL_UP",
+    "RESEARCH_TECH",
+    "BUILD",
+    "SPAWN",
+    "BUILD_ROAD",
+    "HEAL_OTHERS",
+    "UPGRADE_SHIP",
+    "UPGRADE_BOAT",
+    "UPGRADE_RAMMER",
+    "UPGRADE_SCOUT",
+    "UPGRADE_BOMBER",
+}
+
+
+def _action_type(action: Dict[str, Any]) -> str:
+    payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+    return str(action.get("type") or payload.get("type") or "")
+
+
+def _move_signature(action: Dict[str, Any]) -> tuple[Any, Any, Any] | None:
+    if _action_type(action) != "MOVE":
+        return None
+    payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+    unit_id = action.get("unit_id", payload.get("unit_id", payload.get("unitId")))
+    x = action.get("x", payload.get("x"))
+    y = action.get("y", payload.get("y"))
+    return unit_id, x, y
+
+
+def _select_heuristic_root_indexes(root_actions: List[Dict[str, Any]], top_k_actions: int) -> List[int]:
+    indexes = list(range(len(root_actions)))
+    if top_k_actions <= 0 or len(indexes) <= top_k_actions:
+        return indexes
+
+    selected: set[int] = {
+        index for index, action in enumerate(root_actions) if _action_type(action) in _ROOT_TACTICAL_KEEP_TYPES
+    }
+    budget = max(int(top_k_actions), len(selected))
+    seen_moves: set[tuple[Any, Any, Any]] = set()
+    for index, action in enumerate(root_actions):
+        if len(selected) >= budget:
+            break
+        signature = _move_signature(action)
+        if signature is not None:
+            if signature in seen_moves:
+                continue
+            seen_moves.add(signature)
+        selected.add(index)
+    return sorted(selected)
+
+
 def _root_priors(
     message: Dict[str, Any],
     model: HybridPolicyValueNet,
@@ -254,10 +312,7 @@ def _root_priors(
         else:
             value = float(root_value)
         root_eval = _Evaluation([float(prob) for prob in priors], value)
-    indexes = list(range(len(root_actions)))
-    if len(indexes) > search_cfg.top_k_actions:
-        ranked = sorted(indexes, key=lambda idx: root_eval.priors[idx], reverse=True)[: search_cfg.top_k_actions]
-        indexes = sorted(ranked)
+    indexes = _select_heuristic_root_indexes(root_actions, int(search_cfg.top_k_actions))
     action_ids = [str(root_actions[index].get("id")) for index in indexes]
     priors = [root_eval.priors[index] for index in indexes]
     total = sum(max(0.0, prior) for prior in priors)
@@ -339,6 +394,10 @@ def run_native_mcts(
     deadline = time.perf_counter() + wall_time_budget if wall_time_budget > 0.0 else None
     simulation_budget = max(0, int(search_cfg.num_simulations))
     batch_size = max(1, int(search_cfg.batch_size))
+    reserve_tree_capacity = getattr(tree, "reserve_tree_capacity", None)
+    if reserve_tree_capacity is not None:
+        reserve_target = simulation_budget + 1 if deadline is None else max(4096, batch_size * 1024)
+        _native_call(reserve_tree_capacity, int(reserve_target))
     select_sec = 0.0
     eval_sec = 0.0
     expand_sec = 0.0
@@ -353,10 +412,11 @@ def run_native_mcts(
     telemetry = _SearchTelemetry()
 
     while (deadline is not None and time.perf_counter() < deadline) or (deadline is None and len(expanded_node_ids) < simulation_budget):
+        selection_frontier = batch_size * 2 if deadline is not None else batch_size
         if deadline is not None:
-            frontier = batch_size
+            frontier = selection_frontier
         else:
-            frontier = min(batch_size, max(1, simulation_budget - len(expanded_node_ids)))
+            frontier = min(selection_frontier, max(1, simulation_budget - len(expanded_node_ids)))
         selections: List[Any] = []
         eval_messages: List[Dict[str, Any]] = []
         eval_index_by_key: Dict[Any, int] = {}
