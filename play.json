@@ -17,20 +17,26 @@
   "Max Actions Per Turn comment": "0 disables this per-player turn action cap; code default is 80",
   "Max Actions Per Game": 99999,
   "Max Actions Per Game comment": "0 disables this total match action cap; code default is 512",
-  "Frame Delay": 250,
-  "Frame Delay comment": "Milliseconds between GUI action updates; 0 = fastest",
+  "Frame Delay": 1000,
+  "Frame Delay comment": "Milliseconds between GUI action updates; 1000 = watch at about 1 second per applied action",
   "Follow Active Tribe": true,
   "Verbose": false,
   "Replay File Name": "save/1590072023986/0_0/game.json",
   "Level File": "levels/SampleLevel2p.csv",
-  "gui_nn_selfplay_comment": "From repo root (after build): $env:PYTHONPATH=\"$PWD\\py\"; & \"$env:JAVA_HOME\\bin\\java.exe\" -cp \"out;lib/json.jar\" Play",
+  "gui_static_vs_hybrid_static_comment": "From repo root (after build): $env:PYTHONPATH=\"$PWD\\py\"; & \"$env:JAVA_HOME\\bin\\java.exe\" -cp \"out;lib/json.jar\" Play",
   "Participants": [
     {
       "Type": "External",
       "Tribe": "Xin Xi",
       "External Command": [
         "python",
-        "py/bots/simple_bot.py"
+        "py/bots/native_static_mcts_bot.py",
+        "--wall-clock-per-action-seconds",
+        "1",
+        "--search-batch-size",
+        "64",
+        "--static-eval-variant",
+        "tuned"
       ]
     },
     {
@@ -39,12 +45,13 @@
       "External Command": [
         "python",
         "py/bots/hybrid_nn_bot.py",
-        "--checkpoint",
-        "py/rl/checkpoints/latest_iter_0006.pt",
+        "--static-only-bootstrap",
         "--wall-clock-per-action-seconds",
         "1",
         "--search-batch-size",
-        "64"
+        "64",
+        "--static-eval-variant",
+        "tuned"
       ]
     }
   ]

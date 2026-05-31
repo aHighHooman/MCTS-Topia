@@ -73,3 +73,48 @@ def test_compact_tiles_without_visible_treat_explored_as_visible() -> None:
 
     assert len(view.visible_tiles) == 3
     assert len(view.explored_tiles) == 3
+
+
+def test_normalize_message_expands_java_compact_payload() -> None:
+    message = normalize_message(
+        {
+            "type": "action_request",
+            "player_id": 1,
+            "obs": {
+                "tick": 2,
+                "active": 1,
+                "end": True,
+                "lvlup": False,
+                "tribes": [{"id": 1, "stars": 7, "score": 3, "tech": ["RIDING"], "cap": 10}],
+                "cities": [{"id": 10, "p": 1, "x": 0, "y": 0, "lvl": 2, "pop": 1, "need": 3, "prod": 2, "cap": True, "b": [{"t": "SAWMILL", "x": 0, "y": 0}]}],
+                "units": [{"id": 20, "p": 1, "c": 10, "t": "RIDER", "x": 1, "y": 0, "hp": 10, "mhp": 10, "k": 0, "v": False, "s": "FRESH", "atk": 2, "def": 1, "mov": 2, "r": 1}],
+                "board": {
+                    "size": 2,
+                    "terrain": [["CITY", "PLAIN"], ["FOREST", "MOUNTAIN"]],
+                    "resource": [[None, None], [None, None]],
+                    "building": [[None, None], [None, None]],
+                    "city": [[10, 0], [0, 0]],
+                    "unit": [[0, 20], [0, 0]],
+                    "exp": [[True, True], [False, True]],
+                    "road": [[False, True], [False, False]],
+                },
+                "rank": [1],
+                "rel": [["NEUTRAL"]],
+            },
+            "actions": [{"i": 0, "t": "MOVE", "u": 20, "x": 1, "y": 1}],
+            "fm": {"root": "root"},
+        }
+    )
+
+    assert message["observation"]["active_player_id"] == 1
+    assert message["observation"]["can_end_turn"] is True
+    assert message["observation"]["tribes"][0]["researched_tech_ids"] == ["RIDING"]
+    assert message["observation"]["cities"][0]["tribe_id"] == 1
+    assert message["observation"]["cities"][0]["buildings"][0]["type"] == "SAWMILL"
+    assert message["observation"]["units"][0]["type"] == "RIDER"
+    assert message["observation"]["board"]["tiles"][0][1]["unit_id"] == 20
+    assert message["observation"]["board"]["tiles"][0][1]["visible"] is True
+    assert message["actions"][0]["id"] == "A0"
+    assert message["actions"][0]["type"] == "MOVE"
+    assert message["actions"][0]["unit_id"] == 20
+    assert message["forward_model"]["root"] == "root"

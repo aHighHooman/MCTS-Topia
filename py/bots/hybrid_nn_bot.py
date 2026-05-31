@@ -37,11 +37,6 @@ def main() -> None:
         action="store_true",
         help="Use native static-eval MCTS while keeping HybridRLBot replay recording; skips NN init/warmup/forward passes.",
     )
-    parser.add_argument(
-        "--static-only-hybrid-nn",
-        action="store_true",
-        help="Alias for --static-only-bootstrap. Runs the HybridRLBot protocol/replay path with static-eval MCTS and no NN work.",
-    )
     args = parser.parse_args()
 
     cfg = HybridAgentConfig()
@@ -82,8 +77,8 @@ def main() -> None:
         cfg,
         args.checkpoint,
         args.replay_dir,
-        warmup=not (args.static_only_bootstrap or args.static_only_hybrid_nn),
-        static_only_bootstrap=args.static_only_bootstrap or args.static_only_hybrid_nn,
+        warmup=not args.static_only_bootstrap,
+        static_only_bootstrap=args.static_only_bootstrap,
     )
     while True:
         try:

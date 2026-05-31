@@ -170,6 +170,11 @@ RELATIONSHIP_TO_INDEX = {name: idx for idx, name in enumerate(RELATIONSHIP_TYPES
 UNIT_STATUS_TO_INDEX = {name: idx for idx, name in enumerate(UNIT_STATUS_TYPES)}
 LEVEL_UP_BONUS_TO_INDEX = {name: idx for idx, name in enumerate(LEVEL_UP_BONUS_TYPES)}
 _BOARD_COORD_CACHE: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+_FEATURE_LIST_CACHE_MAX = 8192
+_UNIT_ACTION_SUMMARY_CACHE: dict[tuple[Any, ...], list[float]] = {}
+_CITY_ACTION_SUMMARY_CACHE: dict[tuple[Any, ...], list[float]] = {}
+_TILE_ACTION_SUMMARY_CACHE: dict[tuple[Any, ...], list[float]] = {}
+_TYPED_ACTION_FEATURE_CACHE: dict[tuple[Any, ...], list[float]] = {}
 
 BOARD_SCHEMA = (
     "valid",
@@ -506,6 +511,17 @@ def _put_feature(row: np.ndarray, values: list[float]) -> None:
         row[:] = values[: row.shape[0]]
 
 
+def _cached_feature_list(cache: dict[tuple[Any, ...], list[float]], key: tuple[Any, ...], factory: Any) -> list[float]:
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    values = factory()
+    if len(cache) >= _FEATURE_LIST_CACHE_MAX:
+        cache.clear()
+    cache[key] = values
+    return values
+
+
 def _board_coordinate_planes(board_size: int) -> tuple[np.ndarray, np.ndarray]:
     cached = _BOARD_COORD_CACHE.get(board_size)
     if cached is not None:
@@ -704,41 +720,77 @@ def _hp_fraction(unit: dict[str, Any] | None) -> float:
 def _unit_action_summary(unit: dict[str, Any] | None, my_player_id: int, coord_scale: float) -> list[float]:
     if not unit:
         return [0.0] * (1 + len(UNIT_TYPES) + 3 + 9 + len(UNIT_STATUS_TYPES))
-    return (
-        [1.0]
-        + _one_hot(unit.get("type"), UNIT_TYPES)
-        + _owner_relation_flags(unit, my_player_id)
-        + [
-            _norm(unit.get("x", 0), coord_scale),
-            _norm(unit.get("y", 0), coord_scale),
-            _clamped_norm(unit.get("current_hp", 0), 40.0),
-            _hp_fraction(unit),
-            _clamped_norm(unit.get("max_hp", 0), 40.0),
-            _clamped_norm(unit.get("kills", 0), 16.0),
-            1.0 if unit.get("is_veteran") else 0.0,
-            1.0 if unit.get("is_hidden") else 0.0,
-            _clamped_norm(unit.get("range", 0), 8.0),
-        ]
-        + _unit_status_flags(unit.get("status"))
+    key = (
+        my_player_id,
+        float(coord_scale),
+        unit.get("type"),
+        unit.get("tribe_id"),
+        unit.get("x"),
+        unit.get("y"),
+        unit.get("current_hp"),
+        unit.get("max_hp"),
+        unit.get("kills"),
+        bool(unit.get("is_veteran")),
+        bool(unit.get("is_hidden")),
+        unit.get("range"),
+        unit.get("status"),
+    )
+    return _cached_feature_list(
+        _UNIT_ACTION_SUMMARY_CACHE,
+        key,
+        lambda: (
+            [1.0]
+            + _one_hot(unit.get("type"), UNIT_TYPES)
+            + _owner_relation_flags(unit, my_player_id)
+            + [
+                _norm(unit.get("x", 0), coord_scale),
+                _norm(unit.get("y", 0), coord_scale),
+                _clamped_norm(unit.get("current_hp", 0), 40.0),
+                _hp_fraction(unit),
+                _clamped_norm(unit.get("max_hp", 0), 40.0),
+                _clamped_norm(unit.get("kills", 0), 16.0),
+                1.0 if unit.get("is_veteran") else 0.0,
+                1.0 if unit.get("is_hidden") else 0.0,
+                _clamped_norm(unit.get("range", 0), 8.0),
+            ]
+            + _unit_status_flags(unit.get("status"))
+        ),
     )
 
 
 def _city_action_summary(city: dict[str, Any] | None, my_player_id: int, coord_scale: float) -> list[float]:
     if not city:
         return [0.0] * 12
-    return (
-        [1.0]
-        + _owner_relation_flags(city, my_player_id)
-        + [
-            _norm(city.get("x", 0), coord_scale),
-            _norm(city.get("y", 0), coord_scale),
-            _clamped_norm(city.get("level", 0), 10.0),
-            _clamped_norm(city.get("population", 0), 32.0),
-            _clamped_norm(city.get("population_need", 0), 32.0),
-            _clamped_norm(city.get("production", 0), 32.0),
-            1.0 if city.get("is_capital") else 0.0,
-            1.0 if city.get("has_walls") else 0.0,
-        ]
+    key = (
+        my_player_id,
+        float(coord_scale),
+        city.get("tribe_id"),
+        city.get("x"),
+        city.get("y"),
+        city.get("level"),
+        city.get("population"),
+        city.get("population_need"),
+        city.get("production"),
+        bool(city.get("is_capital")),
+        bool(city.get("has_walls")),
+    )
+    return _cached_feature_list(
+        _CITY_ACTION_SUMMARY_CACHE,
+        key,
+        lambda: (
+            [1.0]
+            + _owner_relation_flags(city, my_player_id)
+            + [
+                _norm(city.get("x", 0), coord_scale),
+                _norm(city.get("y", 0), coord_scale),
+                _clamped_norm(city.get("level", 0), 10.0),
+                _clamped_norm(city.get("population", 0), 32.0),
+                _clamped_norm(city.get("population_need", 0), 32.0),
+                _clamped_norm(city.get("production", 0), 32.0),
+                1.0 if city.get("is_capital") else 0.0,
+                1.0 if city.get("has_walls") else 0.0,
+            ]
+        ),
     )
 
 
@@ -758,23 +810,64 @@ def _tile_at(board: dict[str, Any], x_value: Any, y_value: Any) -> dict[str, Any
 def _tile_action_summary(tile: dict[str, Any] | None) -> list[float]:
     if not tile:
         return [0.0] * (5 + len(TERRAIN_TYPES) + len(RESOURCE_TYPES) + len(BUILDING_TYPES))
-    return (
-        [
-            1.0,
-            1.0 if tile.get("explored") else 0.0,
-            1.0 if tile.get("road") else 0.0,
-            1.0 if _as_int(tile.get("unit_id")) > 0 else 0.0,
-            1.0 if _as_int(tile.get("city_id")) > 0 else 0.0,
-        ]
-        + _one_hot(tile.get("terrain"), TERRAIN_TYPES)
-        + _one_hot(tile.get("resource"), RESOURCE_TYPES)
-        + _one_hot(tile.get("building"), BUILDING_TYPES)
+    key = (
+        bool(tile.get("explored")),
+        bool(tile.get("road")),
+        _as_int(tile.get("unit_id")) > 0,
+        _as_int(tile.get("city_id")) > 0,
+        tile.get("terrain"),
+        tile.get("resource"),
+        tile.get("building"),
+    )
+    return _cached_feature_list(
+        _TILE_ACTION_SUMMARY_CACHE,
+        key,
+        lambda: (
+            [
+                1.0,
+                1.0 if tile.get("explored") else 0.0,
+                1.0 if tile.get("road") else 0.0,
+                1.0 if _as_int(tile.get("unit_id")) > 0 else 0.0,
+                1.0 if _as_int(tile.get("city_id")) > 0 else 0.0,
+            ]
+            + _one_hot(tile.get("terrain"), TERRAIN_TYPES)
+            + _one_hot(tile.get("resource"), RESOURCE_TYPES)
+            + _one_hot(tile.get("building"), BUILDING_TYPES)
+        ),
     )
 
 
 def _normalize_board(board: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(board)
     size = int(out.get("size", 0) or 0)
+    if "tiles" not in out and size > 0:
+        fields = {
+            "terrain": out.get("terrain", []),
+            "resource": out.get("resource", []),
+            "building": out.get("building", []),
+            "city_id": out.get("city", []),
+            "unit_id": out.get("unit", []),
+            "explored": out.get("exp", []),
+            "road": out.get("road", []),
+        }
+        rows: list[list[dict[str, Any]]] = []
+        for y in range(size):
+            row: list[dict[str, Any]] = []
+            for x in range(size):
+                tile: dict[str, Any] = {"x": x, "y": y}
+                for key, matrix in fields.items():
+                    value = None
+                    if isinstance(matrix, list) and y < len(matrix) and isinstance(matrix[y], list) and x < len(matrix[y]):
+                        value = matrix[y][x]
+                    if key in {"city_id", "unit_id"}:
+                        tile[key] = _as_int(value, 0)
+                    elif key in {"explored", "road"}:
+                        tile[key] = bool(value)
+                    else:
+                        tile[key] = value
+                row.append(tile)
+            rows.append(row)
+        out["tiles"] = rows
     normalized_rows: list[list[dict[str, Any]]] = []
     for y, row in enumerate(out.get("tiles", []) or []):
         normalized_row: list[dict[str, Any]] = []
@@ -801,6 +894,21 @@ def _normalize_board(board: Dict[str, Any]) -> Dict[str, Any]:
 
 def _normalize_unit(unit: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(unit)
+    out.setdefault("tribe_id", out.get("p", -1))
+    out.setdefault("city_id", out.get("c", 0))
+    out.setdefault("type", out.get("t"))
+    out.setdefault("current_hp", out.get("hp", 0))
+    out.setdefault("current_hp_exact", out.get("current_hp", out.get("hp", 0)))
+    out.setdefault("max_hp", out.get("mhp", 0))
+    out.setdefault("kills", out.get("k", 0))
+    out.setdefault("is_veteran", out.get("v", False))
+    out.setdefault("status", out.get("s"))
+    out.setdefault("is_hidden", out.get("h", False))
+    out.setdefault("hidden_enemy_hint", out.get("hint", False))
+    out.setdefault("attack", out.get("atk", 0))
+    out.setdefault("defence", out.get("def", 0))
+    out.setdefault("movement", out.get("mov", 0))
+    out.setdefault("range", out.get("r", 0))
     out.setdefault("tribe_id", -1)
     out.setdefault("city_id", 0)
     out.setdefault("type", None)
@@ -822,6 +930,21 @@ def _normalize_unit(unit: Dict[str, Any]) -> Dict[str, Any]:
 
 def _normalize_city(city: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(city)
+    out.setdefault("tribe_id", out.get("p", -1))
+    out.setdefault("level", out.get("lvl", 0))
+    out.setdefault("population", out.get("pop", 0))
+    out.setdefault("population_need", out.get("need", 0))
+    out.setdefault("production", out.get("prod", 0))
+    out.setdefault("is_capital", out.get("cap", False))
+    out.setdefault("has_walls", out.get("wall", False))
+    out.setdefault("points_worth", out.get("pts", 0))
+    out.setdefault("infiltrated", out.get("inf", False))
+    out.setdefault("buildings", out.get("b", []))
+    out["buildings"] = [
+        {**dict(building), "type": dict(building).get("type", dict(building).get("t"))}
+        for building in out.get("buildings", []) or []
+        if isinstance(building, dict)
+    ]
     out.setdefault("tribe_id", -1)
     out.setdefault("level", 0)
     out.setdefault("population", 0)
@@ -839,6 +962,9 @@ def _normalize_city(city: Dict[str, Any]) -> Dict[str, Any]:
 
 def _normalize_tribe(tribe: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(tribe)
+    out.setdefault("result", out.get("res"))
+    out.setdefault("researched_tech_ids", out.get("tech", []))
+    out.setdefault("capital_id", out.get("cap", 0))
     out.setdefault("researched_tech_ids", [])
     out.setdefault("capital_id", 0)
     out.setdefault("city_ids", [])
@@ -855,21 +981,21 @@ def _normalize_tribe(tribe: Dict[str, Any]) -> Dict[str, Any]:
 
 def _normalize_action(action: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(action)
-    out.setdefault("id", "A0")
-    out.setdefault("type", None)
+    out.setdefault("id", f"A{out.get('i', 0)}")
+    out.setdefault("type", out.get("t"))
     if out.get("type") in ACTION_TYPE_ALIASES:
         out["type"] = ACTION_TYPE_ALIASES[str(out["type"])]
-    out.setdefault("unit_id", 0)
-    out.setdefault("city_id", 0)
-    out.setdefault("tribe_id", 0)
-    out.setdefault("target_unit_id", 0)
-    out.setdefault("target_city_id", 0)
+    out.setdefault("unit_id", out.get("u", 0))
+    out.setdefault("city_id", out.get("c", 0))
+    out.setdefault("tribe_id", out.get("p", 0))
+    out.setdefault("target_unit_id", out.get("tu", 0))
+    out.setdefault("target_city_id", out.get("tc", 0))
     out.setdefault("target_player_id", 0)
-    out.setdefault("unit_type", None)
-    out.setdefault("building_type", None)
-    out.setdefault("resource_type", None)
-    out.setdefault("capture_type", None)
-    out.setdefault("bonus", None)
+    out.setdefault("unit_type", out.get("ut"))
+    out.setdefault("building_type", out.get("bt"))
+    out.setdefault("resource_type", out.get("rt"))
+    out.setdefault("capture_type", out.get("ct"))
+    out.setdefault("bonus", out.get("b"))
     if "x" in out and "y" in out:
         pos = {"x": out.get("x"), "y": out.get("y")}
         if out.get("type") == "MOVE":
@@ -883,12 +1009,16 @@ def _normalize_action(action: Dict[str, Any]) -> Dict[str, Any]:
 
 def normalize_message(message: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(message)
+    if "observation" not in out and "obs" in out:
+        out["observation"] = out["obs"]
+    if "forward_model" not in out and "fm" in out:
+        out["forward_model"] = out["fm"]
     if "observation" in out:
         observation = dict(out["observation"])
-        observation.setdefault("active_player_id", out.get("player_id", 0))
-        observation.setdefault("can_end_turn", False)
-        observation.setdefault("leveling_up", False)
-        observation.setdefault("ranking", [])
+        observation.setdefault("active_player_id", observation.get("active", out.get("player_id", 0)))
+        observation.setdefault("can_end_turn", observation.get("end", False))
+        observation.setdefault("leveling_up", observation.get("lvlup", False))
+        observation.setdefault("ranking", observation.get("rank", []))
         observation["board"] = _normalize_board(dict(observation.get("board", {})))
         observation["units"] = [_normalize_unit(dict(unit)) for unit in observation.get("units", []) or []]
         observation["cities"] = [_normalize_city(dict(city)) for city in observation.get("cities", []) or []]
@@ -898,75 +1028,97 @@ def normalize_message(message: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compact: bool = False) -> EncodedObservation:
-    message = normalize_message(message)
+def encode_observation(
+    message: Dict[str, Any],
+    model_cfg: ModelConfig,
+    *,
+    compact: bool = False,
+    normalized: bool = False,
+) -> EncodedObservation:
+    if not normalized:
+        message = normalize_message(message)
     observation = message["observation"]
     board = observation["board"]
     board_size = int(board["size"])
-    channels = np.zeros((model_cfg.board_channels, board_size, board_size), dtype=np.float32)
     my_player_id = int(message["player_id"])
+    native_board_tensor = message.get("_native_board_tensor")
+    board_tensor: torch.Tensor | None = None
+    if (
+        isinstance(native_board_tensor, torch.Tensor)
+        and native_board_tensor.ndim == 3
+        and int(native_board_tensor.shape[0]) == int(model_cfg.board_channels)
+        and int(native_board_tensor.shape[1]) == board_size
+        and int(native_board_tensor.shape[2]) == board_size
+    ):
+        board_tensor = native_board_tensor.to(dtype=torch.float32)
 
     terrain_offset = 10
     resource_offset = terrain_offset + len(TERRAIN_TYPES)
     building_offset = resource_offset + len(RESOURCE_TYPES)
-    channels[3], channels[4] = _board_coordinate_planes(board_size)
 
     units_raw = observation.get("units", []) or []
     cities_raw = observation.get("cities", []) or []
-    unit_by_id_for_board = {_as_int(unit.get("id")): unit for unit in units_raw}
-    city_by_id_for_board = {_as_int(city.get("id")): city for city in cities_raw}
-    explored_tiles = 0
-    visible_tiles = 0
-    for row in board.get("tiles", []):
-        for tile in row:
-            x = int(tile.get("x", 0) or 0)
-            y = int(tile.get("y", 0) or 0)
-            if not (0 <= x < board_size and 0 <= y < board_size):
-                continue
-            channels[0, y, x] = 1.0
-            explored = bool(tile.get("explored"))
-            visible = bool(tile.get("visible"))
-            if explored:
-                explored_tiles += 1
-                channels[2, y, x] = 1.0
-            if visible:
-                visible_tiles += 1
-            channels[5, y, x] = 1.0 if int(tile.get("unit_id", 0) or 0) > 0 else 0.0
-            channels[6, y, x] = 1.0 if int(tile.get("city_id", 0) or 0) > 0 else 0.0
-            channels[7, y, x] = 1.0 if tile.get("road") else 0.0
-            terrain_idx = TERRAIN_TO_INDEX.get(str(tile.get("terrain")), -1)
-            if terrain_idx >= 0:
-                channels[terrain_offset + terrain_idx, y, x] = 1.0
-            resource_idx = RESOURCE_TO_INDEX.get(str(tile.get("resource")), -1)
-            if resource_idx >= 0:
-                channels[resource_offset + resource_idx, y, x] = 1.0
-            building_idx = BUILDING_TO_INDEX.get(str(tile.get("building")), -1)
-            if building_idx >= 0:
-                channels[building_offset + building_idx, y, x] = 1.0
-            if visible:
-                channels[BOARD_FEATURE_INDEX["visible"], y, x] = 1.0
-            unit_id = _as_int(tile.get("unit_id"))
-            unit = unit_by_id_for_board.get(unit_id)
-            if unit:
-                owner_bucket = _owner_bucket(_as_int(unit.get("tribe_id"), -1), my_player_id)
-                channels[BOARD_FEATURE_INDEX["visible_unit_owner:own"] + owner_bucket, y, x] = 1.0
-                channels[BOARD_FEATURE_INDEX["visible_unit_hp_fraction"], y, x] = _hp_fraction(unit)
-                status = _unit_status_name(unit.get("status"))
-                status_idx = UNIT_STATUS_TO_INDEX.get(status, -1)
-                if status_idx >= 0:
-                    channels[BOARD_FEATURE_INDEX["visible_unit_status:FRESH"] + status_idx, y, x] = 1.0
-            city_id = _as_int(tile.get("city_id"))
-            city = city_by_id_for_board.get(city_id)
-            if city:
-                owner_bucket = _owner_bucket(_as_int(city.get("tribe_id"), -1), my_player_id)
-                channels[BOARD_FEATURE_INDEX["visible_city_owner:own"] + owner_bucket, y, x] = 1.0
-                channels[BOARD_FEATURE_INDEX["visible_city_level"], y, x] = _clamped_norm(city.get("level", 0), 10.0)
-            territory_city_id = _as_int(tile.get("territory_city_id"), city_id)
-            territory_city = city_by_id_for_board.get(territory_city_id)
-            if territory_city:
-                channels[BOARD_FEATURE_INDEX["visible_territory_owner_signed"], y, x] = (
-                    1.0 if _as_int(territory_city.get("tribe_id"), -1) == my_player_id else -1.0
-                )
+    if board_tensor is not None:
+        explored_tiles = int(message.get("_native_explored_tiles", 0) or 0)
+        visible_tiles = int(message.get("_native_visible_tiles", 0) or 0)
+    else:
+        channels = np.zeros((model_cfg.board_channels, board_size, board_size), dtype=np.float32)
+        channels[3], channels[4] = _board_coordinate_planes(board_size)
+        unit_by_id_for_board = {_as_int(unit.get("id")): unit for unit in units_raw}
+        city_by_id_for_board = {_as_int(city.get("id")): city for city in cities_raw}
+        explored_tiles = 0
+        visible_tiles = 0
+        for row in board.get("tiles", []):
+            for tile in row:
+                x = int(tile.get("x", 0) or 0)
+                y = int(tile.get("y", 0) or 0)
+                if not (0 <= x < board_size and 0 <= y < board_size):
+                    continue
+                channels[0, y, x] = 1.0
+                explored = bool(tile.get("explored"))
+                visible = bool(tile.get("visible"))
+                if explored:
+                    explored_tiles += 1
+                    channels[2, y, x] = 1.0
+                if visible:
+                    visible_tiles += 1
+                channels[5, y, x] = 1.0 if int(tile.get("unit_id", 0) or 0) > 0 else 0.0
+                channels[6, y, x] = 1.0 if int(tile.get("city_id", 0) or 0) > 0 else 0.0
+                channels[7, y, x] = 1.0 if tile.get("road") else 0.0
+                terrain_idx = TERRAIN_TO_INDEX.get(str(tile.get("terrain")), -1)
+                if terrain_idx >= 0:
+                    channels[terrain_offset + terrain_idx, y, x] = 1.0
+                resource_idx = RESOURCE_TO_INDEX.get(str(tile.get("resource")), -1)
+                if resource_idx >= 0:
+                    channels[resource_offset + resource_idx, y, x] = 1.0
+                building_idx = BUILDING_TO_INDEX.get(str(tile.get("building")), -1)
+                if building_idx >= 0:
+                    channels[building_offset + building_idx, y, x] = 1.0
+                if visible:
+                    channels[BOARD_FEATURE_INDEX["visible"], y, x] = 1.0
+                unit_id = _as_int(tile.get("unit_id"))
+                unit = unit_by_id_for_board.get(unit_id)
+                if unit:
+                    owner_bucket = _owner_bucket(_as_int(unit.get("tribe_id"), -1), my_player_id)
+                    channels[BOARD_FEATURE_INDEX["visible_unit_owner:own"] + owner_bucket, y, x] = 1.0
+                    channels[BOARD_FEATURE_INDEX["visible_unit_hp_fraction"], y, x] = _hp_fraction(unit)
+                    status = _unit_status_name(unit.get("status"))
+                    status_idx = UNIT_STATUS_TO_INDEX.get(status, -1)
+                    if status_idx >= 0:
+                        channels[BOARD_FEATURE_INDEX["visible_unit_status:FRESH"] + status_idx, y, x] = 1.0
+                city_id = _as_int(tile.get("city_id"))
+                city = city_by_id_for_board.get(city_id)
+                if city:
+                    owner_bucket = _owner_bucket(_as_int(city.get("tribe_id"), -1), my_player_id)
+                    channels[BOARD_FEATURE_INDEX["visible_city_owner:own"] + owner_bucket, y, x] = 1.0
+                    channels[BOARD_FEATURE_INDEX["visible_city_level"], y, x] = _clamped_norm(city.get("level", 0), 10.0)
+                territory_city_id = _as_int(tile.get("territory_city_id"), city_id)
+                territory_city = city_by_id_for_board.get(territory_city_id)
+                if territory_city:
+                    channels[BOARD_FEATURE_INDEX["visible_territory_owner_signed"], y, x] = (
+                        1.0 if _as_int(territory_city.get("tribe_id"), -1) == my_player_id else -1.0
+                    )
+        board_tensor = torch.from_numpy(channels)
 
     units = _sorted_entities(units_raw)
     unit_feature_dim = int(getattr(model_cfg, "unit_feature_dim", getattr(model_cfg, "entity_feature_dim", len(UNIT_FEATURE_SCHEMA))))
@@ -1065,7 +1217,6 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
         if city_id > 0
     }
     tile_action_summary_by_pos: dict[tuple[int, int], list[float]] = {}
-    typed_feature_by_key: dict[tuple[Any, Any, Any, Any], list[float]] = {}
     relationship_feature_by_pair: dict[tuple[int, int], list[float]] = {}
     pending_incoming = 0.0
     pending_outgoing_targets: set[int] = set()
@@ -1173,17 +1324,18 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
             action.get("tech"),
             action.get("bonus"),
         )
-        typed = typed_feature_by_key.get(typed_key)
-        if typed is None:
-            typed = (
+        typed = _cached_feature_list(
+            _TYPED_ACTION_FEATURE_CACHE,
+            typed_key,
+            lambda typed_key=typed_key: (
                 _one_hot(typed_key[0], ACTION_TYPES)
                 + _one_hot(typed_key[1], UNIT_TYPES)
                 + _one_hot(typed_key[2], BUILDING_TYPES)
                 + _one_hot(typed_key[3], RESOURCE_TYPES)
                 + _one_hot(typed_key[4], TECH_TYPES)
                 + _level_up_bonus_flags(typed_key[5])
-            )
-            typed_feature_by_key[typed_key] = typed
+            ),
+        )
         _put_feature(action_features[idx], spatial + intent + semantic + native_context + typed)
 
     tribes = observation.get("tribes", [])
@@ -1246,7 +1398,7 @@ def encode_observation(message: Dict[str, Any], model_cfg: ModelConfig, *, compa
     )
 
     return EncodedObservation(
-        board=torch.from_numpy(channels).unsqueeze(0),
+        board=board_tensor.unsqueeze(0),
         unit_features=torch.from_numpy(unit_features).unsqueeze(0),
         unit_mask=torch.from_numpy(unit_mask).unsqueeze(0),
         city_features=torch.from_numpy(city_features).unsqueeze(0),
