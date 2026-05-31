@@ -1,0 +1,49 @@
+commit	status	eval_pos_per_sec	selected_paths_per_sec	avg_eval_batch	cache_hit_rate	avg_depth	total_seconds	description
+2d1a55e	baseline	42.25	45.64	26.33	NA	0.00	89.75	baseline cpu random_init missing checkpoint override
+bb56753	discard	41.57	44.91	26.33	NA	0.00	91.21	avoid repeated embedding index tensors in model forward; slower on CPU
+2d1a55e	cuda-baseline	195.11	210.75	26.33	NA	0.00	19.44	cuda random_init missing checkpoint override
+b7c550b	discard	154.05	166.40	26.33	NA	0.00	24.62	cuda autocast fp16 inference; slower
+e9877d6	keep	221.00	238.72	26.33	NA	0.00	17.16	enable TF32 for cuda NN-MCTS inference
+90139df	keep	240.12	259.37	26.33	NA	0.00	15.79	avoid cuda sync around CPU profiling phases
+6c881bf	discard	230.99	249.51	26.33	NA	0.00	16.42	cache repeated action encoding features; slower
+f6cd28d	discard	154.01	166.36	26.33	NA	0.00	24.62	enable cudnn benchmark; slower
+551adb6	discard	210.39	227.25	26.33	NA	0.00	18.02	parallelize observation encoding; slower from thread overhead/GIL
+bb14fc8	discard	221.09	238.82	26.33	NA	0.00	17.15	channels-last board tensors on cuda; slower
+c0438df	keep	217.28	271.83	40.92	NA	0.00	15.07	floor cuda NN-MCTS batch size at 64
+34e53bb	keep	202.87	330.00	39.34	NA	0.00	12.41	floor cuda NN-MCTS batch size at 96
+423b81c	keep	188.47	371.15	32.50	NA	0.00	11.04	floor cuda NN-MCTS batch size at 112
+96026e5	keep	177.43	398.44	28.50	NA	0.00	10.28	floor cuda NN-MCTS batch size at 120
+1956361	keep	172.21	449.86	32.67	NA	0.00	9.11	floor cuda NN-MCTS batch size at 128
+f5d066e	keep	174.92	460.74	32.40	NA	0.00	8.89	floor cuda NN-MCTS batch size at 144
+4befdb4	keep	170.68	466.99	31.19	NA	0.00	8.77	floor cuda NN-MCTS batch size at 160
+bfcabf9	keep	156.20	521.85	25.54	NA	0.00	7.85	floor cuda NN-MCTS batch size at 192
+06c510d	keep	111.77	635.83	15.00	NA	0.00	6.44	floor cuda NN-MCTS batch size at 224
+461627a	keep	82.04	724.19	9.67	NA	0.00	5.66	floor cuda NN-MCTS batch size at 240
+fe56eae	keep	42.79	842.62	6.50	NA	0.00	4.86	floor cuda NN-MCTS batch size at 256
+9b8d1d7	keep	55.47	1092.27	6.50	NA	0.00	3.75	faster native MCTS compiler flags
+3b321bc	keep	55.93	1101.37	6.50	NA	0.00	3.72	enable LTCG for native MCTS extension
+7f2fa5d	discard	55.39	1090.81	6.50	NA	0.00	3.75	medium float32 matmul precision; slower overall
+5f831bb	kept	56.20	1106.68	6.50	0.00	0.00	3.70	hash pending native child states
+b4051e5	kept	57.31	1128.54	6.50	0.00	0.00	3.63	trim empty unit and city slots before inference
+5d803fd	kept	59.24	1166.48	6.50	0.00	0.00	3.51	trim empty action slots before inference
+0e9789a	kept	59.97	1181.01	6.50	0.00	0.00	3.47	disable nested tensor transformer encoder path
+85c076f	kept	72.73	1432.15	6.50	0.00	0.00	2.86	preimport torch symbolic shape checks before first inference
+native-pending-reuse	discarded	71.26	1403.19	6.50	0.00	0.00	2.92	reuse pending child state during eval-only selection; no improvement
+bf16-autocast	discarded	60.83	1198.00	6.50	0.00	0.00	3.42	CUDA BF16 autocast for inference; slower
+b0c97c3	kept	75.94	1495.49	6.50	0.00	0.00	2.74	use /fp:fast and /arch:AVX2 for native mcts extension
+0ba15fd	kept	84.09	1656.84	6.50	0.00	0.00	2.47	compact inference encoding for native nn mcts
+19ff190	kept	80.83	1567.56	6.60	0.00	0.00	1.63	fuse native eval-only multi-batch selection; 10-position fixed-sim run, current baseline included checkpoint init
+7e97e56	kept	83.34	1616.37	6.60	0.00	0.00	1.58	deduplicate native leaf payload serialization within eval batch
+03df284	kept	226.27	4388.51	6.60	0.00	0.00	0.58	group duplicate native selections and complete repeated backups in C++
+direct-token-type	discarded	212.29	4117.00	6.60	0.00	0.00	0.62	direct token type embedding row add; slower model forward
+coord-prior-cache	discarded	211.37	4099.41	6.60	0.00	0.00	0.62	cache coordinate prior planes in model; slower model forward
+4417e4b	kept	498.92	554.65	51.17	NA	3.05	14.77	one-pass board encoding plus cached board coordinate planes and per-observation relationship vectors; sims_per_sec=497.84
+febc925	kept	508.92	565.76	51.17	NA	3.05	14.48	scalar count aggregation during encoding plus profiler post-sync-only CUDA timing; sims_per_sec=507.82
+prealloc-stack	discarded	418.95	465.75	51.17	NA	3.05	17.59	preallocated stack_encoded tensors with slice copies; slower than torch.cat padding path
+natural-cuda-sync	discarded	476.95	530.22	51.17	NA	3.05	15.45	disabled explicit profiler CUDA syncs for transfer/model/postprocess; shifted wait into postprocess and slowed run
+cprofile-optout	kept	829.07	921.66	51.17	NA	3.05	8.89	make cProfile function tracing opt-in; phase timings stay enabled; sims_per_sec=827.27 on charged rerun
+natural-sync-no-cprofile	discarded	674.61	749.95	51.17	NA	3.05	10.92	disabled explicit CUDA syncs without cProfile; slower because wait shifted into postprocess
+channels-last	discarded	640.85	705.11	51.30	NA	3.12	12.81	CUDA channels_last board transfer/layout; slower transfer/model path under node-budget workload
+no-selection-copy	discarded	732.96	806.45	51.30	NA	3.12	11.20	iterate pybind selection list directly in profiler wrapper; slower than copying once to Python list
+timed-mask-cache	discarded	688.12	757.11	51.30	NA	3.12	11.93	reuse production action-count mask cache in timed profiler postprocess; postprocess improved but total run slowed
+cudnn-benchmark	discarded	270.97	298.14	51.30	NA	3.12	30.29	enable cudnn benchmark under clean profiler; model forward became much slower

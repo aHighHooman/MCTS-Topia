@@ -9,24 +9,97 @@ import math
 from pathlib import Path
 import pstats
 import random
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import Counter
 from typing import Any, Callable
 
 import torch
 
+try:
+    import psutil
+except ImportError:  # pragma: no cover - optional profiling dependency
+    psutil = None
+
 PY_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = PY_ROOT.parent
 if str(PY_ROOT) not in sys.path:
     sys.path.insert(0, str(PY_ROOT))
 
 DEFAULT_AUTORESEARCH_CHECKPOINT = PY_ROOT / "profiling" / "mcts_search_profiling_random_init_model.pt"
+DEFAULT_MCTS_SEARCH_CONFIG = PY_ROOT / "profiling" / "configs" / "mcts_search.json"
+
+_MCTS_SEARCH_DEFAULTS: dict[str, Any] = {
+    "evaluator": "nn",
+    "payload": None,
+    "positions": 10,
+    "selfplay_seed_start": 0,
+    "selfplay_seeds": None,
+    "selfplay_run_mode": "PlayLG",
+    "selfplay_level_file": "levels/MinimalLevel2.csv",
+    "selfplay_game_mode": "Capitals",
+    "selfplay_map_type": "Drylands",
+    "selfplay_map_size": "Tiny",
+    "selfplay_seed": 0,
+    "selfplay_tribes": ["Xin Xi", "Imperius"],
+    "capture_max_turns": 1,
+    "capture_max_actions_per_turn": 1,
+    "capture_max_actions": 4,
+    "capture_timeout_sec": 60,
+    "captured_payload_dir": None,
+    "reuse_captured_payloads": False,
+    "workdir": None,
+    "java_executable": None,
+    "java_classpath": None,
+    "java_main_class": None,
+    "checkpoint": str(DEFAULT_AUTORESEARCH_CHECKPOINT),
+    "device": None,
+    "simulations": None,
+    "wall_time_sec": 10.0,
+    "batch_size": 64,
+    "repeats": 1,
+    "warmup": 0,
+    "top_k_actions": None,
+    "no_dirichlet": False,
+    "section_limit": 10,
+    "function_limit": 15,
+    "min_hotspot_ms": 1.0,
+    "min_hotspot_pct": 1.0,
+    "csv": None,
+    "function_profile": False,
+    "profile_csv": None,
+    "position_csv": None,
+    "branching_csv": None,
+    "action_csv": None,
+    "hardware_csv": None,
+    "nn_module_csv": None,
+    "details_json": None,
+    "hardware_profile": False,
+    "hardware_sample_interval_ms": 200,
+    "nn_module_profile": False,
+}
+
+_PATH_CONFIG_KEYS = {
+    "payload",
+    "captured_payload_dir",
+    "workdir",
+    "checkpoint",
+    "csv",
+    "profile_csv",
+    "position_csv",
+    "branching_csv",
+    "action_csv",
+    "hardware_csv",
+    "nn_module_csv",
+    "details_json",
+}
 
 from nn.encoding import EncodedObservation, encode_observation
 from nn.bot_agent import HybridRLBot
 from nn.model import HybridPolicyValueNet
-from profiling.config import load_config_defaults
 from search.config import HybridAgentConfig
 from search.native import mcts as native_mcts
 from search.native import static_mcts as native_static_mcts
@@ -97,18 +170,52 @@ class PayloadCase:
 @dataclass
 class BranchingCollector:
     root_action_counts: list[int] = field(default_factory=list)
+    root_model_capped_counts: list[int] = field(default_factory=list)
+    root_searched_counts: list[int] = field(default_factory=list)
+    root_model_cap_drops: list[int] = field(default_factory=list)
+    root_top_k_drops: list[int] = field(default_factory=list)
     eval_action_counts: list[int] = field(default_factory=list)
+    policy_action_counts: list[int] = field(default_factory=list)
+    policy_padded_action_counts: list[int] = field(default_factory=list)
+    policy_padding_waste_slots: int = 0
+    policy_total_slots: int = 0
+    cpu_to_device_bytes: int = 0
+    device_to_cpu_bytes: int = 0
     root_action_types: Counter[str] = field(default_factory=Counter)
+    root_capped_action_types: Counter[str] = field(default_factory=Counter)
+    root_searched_action_types: Counter[str] = field(default_factory=Counter)
+    root_dropped_action_types: Counter[str] = field(default_factory=Counter)
     eval_action_types: Counter[str] = field(default_factory=Counter)
     root_visit_by_type: Counter[str] = field(default_factory=Counter)
     root_visit_entropy_sum: float = 0.0
     root_visit_samples: int = 0
     selected_action_types: Counter[str] = field(default_factory=Counter)
+    action_rows: list[dict[str, Any]] = field(default_factory=list)
+    branching_rows: list[dict[str, Any]] = field(default_factory=list)
 
-    def add_root(self, payload: dict[str, Any]) -> None:
+    def add_root(self, payload: dict[str, Any], *, label: str = "", model_max_actions: int | None = None) -> None:
         actions = _payload_actions(payload)
-        self.root_action_counts.append(len(actions))
+        raw_count = len(actions)
+        capped_count = _capped_action_count(raw_count, model_max_actions)
+        capped_actions = actions[:capped_count]
+        self.root_action_counts.append(raw_count)
+        self.root_model_capped_counts.append(capped_count)
+        self.root_model_cap_drops.append(max(0, raw_count - capped_count))
         self.root_action_types.update(_action_type(action) for action in actions)
+        self.root_capped_action_types.update(_action_type(action) for action in capped_actions)
+        self.branching_rows.append(
+            {
+                "label": label,
+                "scope": "root",
+                "raw_actions": raw_count,
+                "model_capped_actions": capped_count,
+                "searched_actions": "",
+                "model_cap_dropped": max(0, raw_count - capped_count),
+                "top_k_dropped": "",
+                "visit_entropy_bits": "",
+                "effective_branching": "",
+            }
+        )
 
     def add_eval_messages(self, messages: list[dict[str, Any]]) -> None:
         for message in messages:
@@ -116,13 +223,48 @@ class BranchingCollector:
             self.eval_action_counts.append(len(actions))
             self.eval_action_types.update(_action_type(action) for action in actions)
 
-    def add_result(self, payload: dict[str, Any], result: native_mcts.SearchResult | None) -> None:
+    def add_encoded_batch(self, encoded_items: list[EncodedObservation], batch: EncodedObservation) -> None:
+        action_counts = [len(encoded.action_ids) for encoded in encoded_items]
+        padded_actions = int(batch.action_features.shape[1]) if batch.action_features.ndim >= 2 else 0
+        self.policy_action_counts.extend(action_counts)
+        if action_counts:
+            self.policy_padded_action_counts.extend([padded_actions] * len(action_counts))
+            self.policy_padding_waste_slots += sum(max(0, padded_actions - count) for count in action_counts)
+            self.policy_total_slots += padded_actions * len(action_counts)
+        self.cpu_to_device_bytes += _encoded_nbytes(batch)
+
+    def add_device_to_cpu_bytes(self, *tensors: torch.Tensor) -> None:
+        self.device_to_cpu_bytes += sum(_tensor_nbytes(tensor) for tensor in tensors if torch.is_tensor(tensor))
+
+    def add_result(
+        self,
+        payload: dict[str, Any],
+        result: native_mcts.SearchResult | None,
+        *,
+        label: str = "",
+        model_max_actions: int | None = None,
+    ) -> None:
         if result is None:
             return
-        action_by_id = {str(action.get("id")): action for action in _payload_actions(payload)}
+        actions = _payload_actions(payload)
+        capped_count = _capped_action_count(len(actions), model_max_actions)
+        capped_actions = actions[:capped_count]
+        searched_ids = {str(action_id) for action_id in result.visit_distribution}
+        searched_count = len(searched_ids)
+        top_k_drop_count = max(0, capped_count - searched_count)
+        self.root_searched_counts.append(searched_count)
+        self.root_top_k_drops.append(top_k_drop_count)
+        self.root_searched_action_types.update(
+            _action_type(action) for action in capped_actions if str(action.get("id")) in searched_ids
+        )
+        self.root_dropped_action_types.update(
+            _action_type(action) for action in capped_actions if str(action.get("id")) not in searched_ids
+        )
+        action_by_id = {str(action.get("id")): action for action in actions}
         selected = action_by_id.get(str(result.action_id))
         if selected is not None:
             self.selected_action_types[_action_type(selected)] += 1
+        entropy = 0.0
         for action_id, visit_share in result.visit_distribution.items():
             share = max(0.0, float(visit_share))
             if share <= 0.0:
@@ -137,6 +279,188 @@ class BranchingCollector:
             )
             self.root_visit_entropy_sum += entropy
             self.root_visit_samples += 1
+        effective_branching = 2.0 ** entropy if result.visit_distribution else 0.0
+        self.branching_rows.append(
+            {
+                "label": label,
+                "scope": "root_result",
+                "raw_actions": len(actions),
+                "model_capped_actions": capped_count,
+                "searched_actions": searched_count,
+                "model_cap_dropped": max(0, len(actions) - capped_count),
+                "top_k_dropped": top_k_drop_count,
+                "visit_entropy_bits": f"{entropy:.6f}" if result.visit_distribution else "0.000000",
+                "effective_branching": f"{effective_branching:.6f}",
+            }
+        )
+        for index, action in enumerate(actions):
+            action_id = str(action.get("id"))
+            visit_share = float(result.visit_distribution.get(action_id, 0.0))
+            self.action_rows.append(
+                {
+                    "label": label,
+                    "scope": "root",
+                    "action_index": index,
+                    "action_id": action_id,
+                    "type": _action_type(action),
+                    "category": _action_category(action),
+                    "unit_id": action.get("unit_id", ""),
+                    "city_id": action.get("city_id", ""),
+                    "x": action.get("x", ""),
+                    "y": action.get("y", ""),
+                    "kept_by_model_cap": int(index < capped_count),
+                    "kept_by_search": int(action_id in searched_ids),
+                    "selected": int(action_id == str(result.action_id)),
+                    "visit_share": f"{visit_share:.8f}",
+                }
+            )
+
+
+@dataclass
+class HardwareSample:
+    elapsed_sec: float
+    process_rss_mb: float = 0.0
+    process_cpu_pct: float = 0.0
+    system_cpu_pct: float = 0.0
+    system_ram_pct: float = 0.0
+    threads: int = 0
+    cuda_allocated_mb: float = 0.0
+    cuda_reserved_mb: float = 0.0
+    cuda_peak_allocated_mb: float = 0.0
+    cuda_peak_reserved_mb: float = 0.0
+    gpu_util_pct: float | str = ""
+    gpu_memory_util_pct: float | str = ""
+    gpu_memory_used_mb: float | str = ""
+    gpu_power_watts: float | str = ""
+
+
+class HardwareSampler:
+    def __init__(self, *, device: torch.device, interval_sec: float) -> None:
+        self.device = device
+        self.interval_sec = max(0.05, float(interval_sec))
+        self.samples: list[HardwareSample] = []
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._started_at = 0.0
+        self._process = psutil.Process() if psutil is not None else None
+
+    def __enter__(self) -> "HardwareSampler":
+        if self.device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(self.device)
+        if self._process is not None:
+            self._process.cpu_percent(interval=None)
+            psutil.cpu_percent(interval=None)
+        self._started_at = time.perf_counter()
+        self._thread = threading.Thread(target=self._run, name="mcts-profile-hardware", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(0.2, self.interval_sec * 2.0))
+        self.sample()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_sec):
+            self.sample()
+
+    def sample(self) -> None:
+        elapsed = time.perf_counter() - self._started_at if self._started_at else 0.0
+        sample = HardwareSample(elapsed_sec=elapsed)
+        if self._process is not None and psutil is not None:
+            try:
+                memory = self._process.memory_info()
+                sample.process_rss_mb = memory.rss / (1024.0 * 1024.0)
+                sample.process_cpu_pct = float(self._process.cpu_percent(interval=None))
+                sample.system_cpu_pct = float(psutil.cpu_percent(interval=None))
+                sample.system_ram_pct = float(psutil.virtual_memory().percent)
+                sample.threads = int(self._process.num_threads())
+            except psutil.Error:
+                pass
+        if self.device.type == "cuda" and torch.cuda.is_available():
+            sample.cuda_allocated_mb = torch.cuda.memory_allocated(self.device) / (1024.0 * 1024.0)
+            sample.cuda_reserved_mb = torch.cuda.memory_reserved(self.device) / (1024.0 * 1024.0)
+            sample.cuda_peak_allocated_mb = torch.cuda.max_memory_allocated(self.device) / (1024.0 * 1024.0)
+            sample.cuda_peak_reserved_mb = torch.cuda.max_memory_reserved(self.device) / (1024.0 * 1024.0)
+            nvidia = _query_nvidia_smi()
+            if nvidia:
+                sample.gpu_util_pct = nvidia.get("gpu_util_pct", "")
+                sample.gpu_memory_util_pct = nvidia.get("gpu_memory_util_pct", "")
+                sample.gpu_memory_used_mb = nvidia.get("gpu_memory_used_mb", "")
+                sample.gpu_power_watts = nvidia.get("gpu_power_watts", "")
+        self.samples.append(sample)
+
+    def rows(self) -> list[dict[str, Any]]:
+        has_process_metrics = self._process is not None
+        return [
+            {
+                "elapsed_sec": f"{sample.elapsed_sec:.3f}",
+                "process_rss_mb": f"{sample.process_rss_mb:.3f}" if has_process_metrics else "",
+                "process_cpu_pct": f"{sample.process_cpu_pct:.1f}" if has_process_metrics else "",
+                "system_cpu_pct": f"{sample.system_cpu_pct:.1f}" if has_process_metrics else "",
+                "system_ram_pct": f"{sample.system_ram_pct:.1f}" if has_process_metrics else "",
+                "threads": sample.threads if has_process_metrics else "",
+                "cuda_allocated_mb": f"{sample.cuda_allocated_mb:.3f}",
+                "cuda_reserved_mb": f"{sample.cuda_reserved_mb:.3f}",
+                "cuda_peak_allocated_mb": f"{sample.cuda_peak_allocated_mb:.3f}",
+                "cuda_peak_reserved_mb": f"{sample.cuda_peak_reserved_mb:.3f}",
+                "gpu_util_pct": sample.gpu_util_pct,
+                "gpu_memory_util_pct": sample.gpu_memory_util_pct,
+                "gpu_memory_used_mb": sample.gpu_memory_used_mb,
+                "gpu_power_watts": sample.gpu_power_watts,
+            }
+            for sample in self.samples
+        ]
+
+
+@dataclass
+class NNModuleProfiler:
+    collector: TimingCollector
+    device: torch.device
+    handles: list[Any] = field(default_factory=list)
+    _starts: dict[int, float] = field(default_factory=dict)
+
+    def install(self, model: HybridPolicyValueNet) -> None:
+        modules = {
+            "nn.board_encoder": model.board_encoder,
+            "nn.unit_proj": model.unit_proj,
+            "nn.city_proj": model.city_proj,
+            "nn.action_proj": model.action_proj,
+            "nn.scalar_value_proj": model.scalar_value_proj,
+            "nn.scalar_summary_proj": model.scalar_summary_proj,
+            "nn.transformer_core": model.core,
+            "nn.action_attention": model.action_attention,
+            "nn.value_action_attention": model.value_action_attention,
+            "nn.policy_head": model.policy_head,
+            "nn.value_head": model.value_head,
+        }
+        for name, module in modules.items():
+            self.handles.append(module.register_forward_pre_hook(self._make_pre_hook(name)))
+            self.handles.append(module.register_forward_hook(self._make_post_hook(name)))
+
+    def remove(self) -> None:
+        for handle in self.handles:
+            handle.remove()
+        self.handles.clear()
+        self._starts.clear()
+
+    def _make_pre_hook(self, name: str) -> Callable[..., None]:
+        def hook(module: torch.nn.Module, inputs: tuple[Any, ...]) -> None:
+            _sync_if_needed(self.device)
+            self._starts[id(module)] = time.perf_counter()
+
+        return hook
+
+    def _make_post_hook(self, name: str) -> Callable[..., None]:
+        def hook(module: torch.nn.Module, inputs: tuple[Any, ...], output: Any) -> None:
+            _sync_if_needed(self.device)
+            started_at = self._starts.pop(id(module), None)
+            if started_at is None:
+                return
+            self.collector.add(name, time.perf_counter() - started_at, items=_first_tensor_batch_size(inputs))
+
+        return hook
 
 
 def _result_from_bot_response(payload: dict[str, Any], response: dict[str, Any] | None) -> native_mcts.SearchResult:
@@ -266,7 +590,7 @@ def _install_timed_evaluator(collector: TimingCollector, branching: BranchingCol
             encoded, elapsed = _time_call(
                 collector,
                 "nn_eval.encode_observation",
-                lambda message=message: encode_observation(message, model_cfg, compact=True),
+                lambda message=message: encode_observation(message, model_cfg, compact=True, normalized=True),
                 device=device,
                 items=1,
                 sync_cuda=False,
@@ -286,6 +610,7 @@ def _install_timed_evaluator(collector: TimingCollector, branching: BranchingCol
                 sync_cuda=False,
             )
             child_sec += elapsed
+        branching.add_encoded_batch(encoded_items, batch)
         batch, elapsed = _time_call(
             collector,
             "nn_eval.transfer_batch",
@@ -314,6 +639,7 @@ def _install_timed_evaluator(collector: TimingCollector, branching: BranchingCol
                 probs_rows = torch.softmax(logits.masked_fill(mask, float("-inf")), dim=-1).detach().cpu().tolist()
             else:
                 probs_rows = [[] for _ in encoded_items]
+            branching.add_device_to_cpu_bytes(output.policy_logits, output.value)
             values = output.value.detach().flatten().cpu().tolist()
             evaluations: list[native_mcts._Evaluation] = []
             for index, action_count in enumerate(action_counts):
@@ -361,6 +687,8 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
                 device=device,
                 sync_cuda=False,
             )
+            if hasattr(self._tree, "set_static_timing_enabled"):
+                self._tree.set_static_timing_enabled(True)
 
         def add_root_dirichlet_noise(self, *args: Any, **kwargs: Any) -> Any:
             result, _elapsed = _time_call(
@@ -419,6 +747,9 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
             expanded = int(expanded)
             completed = int(completed)
             collector.add("native_tree.run_static_search_batch", time.perf_counter() - started_at, items=completed)
+            if hasattr(self._tree, "last_static_timing"):
+                for name, elapsed_ms in dict(self._tree.last_static_timing()).items():
+                    collector.add(f"native_static.{name}", float(elapsed_ms) / 1000.0, items=completed)
             batch_depth_sum, batch_max_depth = self._tree.last_batch_stats()
             _STATIC_TREE_DEPTH_SUM += int(batch_depth_sum)
             _STATIC_TREE_MAX_DEPTH = max(_STATIC_TREE_MAX_DEPTH, int(batch_max_depth))
@@ -524,65 +855,9 @@ def _load_or_initialize_checkpoint(
     return f"initialized_missing:{checkpoint}"
 
 
-def _synthetic_payload() -> dict[str, Any]:
-    size = 4
-    return {
-        "player_id": 0,
-        "observation": {
-            "active_player_id": 0,
-            "tick": 0,
-            "can_end_turn": True,
-            "board": {
-                "size": size,
-                "tiles": [
-                    [
-                        {
-                            "x": x,
-                            "y": y,
-                            "visible": True,
-                            "explored": True,
-                            "terrain": "PLAIN",
-                            "unit_id": 1 if (x, y) == (1, 1) else 0,
-                        }
-                        for x in range(size)
-                    ]
-                    for y in range(size)
-                ],
-            },
-            "units": [
-                {
-                    "id": 1,
-                    "tribe_id": 0,
-                    "city_id": 10,
-                    "type": "WARRIOR",
-                    "x": 1,
-                    "y": 1,
-                    "current_hp": 10,
-                    "max_hp": 10,
-                    "kills": 0,
-                    "is_veteran": False,
-                    "status": "FRESH",
-                    "is_hidden": False,
-                }
-            ],
-            "cities": [],
-            "tribes": [
-                {"id": 0, "stars": 0, "score": 0, "researched_tech_ids": [], "cities": [], "extra_units": []},
-                {"id": 1, "stars": 0, "score": 0, "researched_tech_ids": [], "cities": [], "extra_units": []},
-            ],
-        },
-        "actions": [
-            {"id": "move_e", "type": "MOVE", "unit_id": 1, "destination": {"x": 2, "y": 1}, "x": 2, "y": 1},
-            {"id": "move_s", "type": "MOVE", "unit_id": 1, "destination": {"x": 1, "y": 2}, "x": 1, "y": 2},
-            {"id": "road", "type": "BUILD_ROAD", "tribe_id": 0, "position": {"x": 1, "y": 2}, "x": 1, "y": 2},
-            {"id": "end", "type": "END_TURN"},
-        ],
-    }
-
-
 def _load_payload(path: Path | None) -> dict[str, Any]:
     if path is None:
-        return _synthetic_payload()
+        raise ValueError("payload path is required when profiling an explicit payload")
     with path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
     if isinstance(payload, list):
@@ -597,7 +872,6 @@ def _load_payload(path: Path | None) -> dict[str, Any]:
 
 _CAPTURE_BOT_SOURCE = 'from __future__ import annotations\n\nimport argparse\nimport json\nimport sys\nfrom pathlib import Path\nfrom typing import Any\n\n\ndef _pick_action_id(actions: list[dict[str, Any]]) -> str | None:\n    if not actions:\n        return None\n    for action in actions:\n        action_type = str(action.get("type") or "").upper()\n        if action_type == "END_TURN":\n            return str(action.get("id"))\n    return str(actions[0].get("id"))\n\n\ndef main() -> int:\n    parser = argparse.ArgumentParser(description="Capture the first real self-play action_request payload.")\n    parser.add_argument("--output", type=Path, required=True)\n    parser.add_argument("--py-root", type=Path, required=True)\n    args = parser.parse_args()\n\n    py_root = str(args.py_root.resolve())\n    if py_root not in sys.path:\n        sys.path.insert(0, py_root)\n\n    from nn.belief import BeliefTracker\n    from nn.encoding import normalize_message\n\n    tracker = BeliefTracker()\n    wrote_payload = False\n    args.output.parent.mkdir(parents=True, exist_ok=True)\n\n    for raw_line in sys.stdin:\n        line = raw_line.strip()\n        if not line:\n            continue\n        try:\n            message = json.loads(line)\n        except json.JSONDecodeError:\n            continue\n\n        msg_type = message.get("type")\n        if msg_type == "action_request":\n            normalized = tracker.annotate(normalize_message(message))\n            payload = {\n                "player_id": int(normalized.get("player_id", 0) or 0),\n                "observation": normalized["observation"],\n                "actions": list(normalized.get("actions", []) or []),\n            }\n            if not wrote_payload:\n                tmp = args.output.with_suffix(args.output.suffix + ".tmp")\n                tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")\n                tmp.replace(args.output)\n                wrote_payload = True\n\n            action_ids = [str(action.get("id")) for action in payload["actions"]]\n            selected = _pick_action_id(payload["actions"])\n            print(json.dumps({"actionId": selected, "rankedActionIds": action_ids}), flush=True)\n            continue\n\n        if msg_type == "game_over":\n            print(json.dumps({"ok": True}), flush=True)\n            break\n\n        print(json.dumps({"error": f"unsupported message type: {msg_type}"}), flush=True)\n\n    return 0\n\n\nif __name__ == "__main__":\n    raise SystemExit(main())\n'
 
-
 def _write_capture_bot(script_path: Path) -> None:
     script_path.parent.mkdir(parents=True, exist_ok=True)
     script_path.write_text(_CAPTURE_BOT_SOURCE, encoding="utf-8")
@@ -607,8 +881,8 @@ def _capture_selfplay_start_payload(args: argparse.Namespace, seed: int | None =
     """Ask the real Java self-play environment for its first action_request.
 
     Defaults to PlayLG so the payload comes from the Java level generator rather
-    than the old synthetic 4x4 payload or a fixed CSV file. The Java side treats
-    PlayLG as the generated-map path; Map Type/Map Size are optional because the
+    than a fixed CSV file. The Java side treats PlayLG as the generated-map path;
+    Map Type/Map Size are optional because the
     Java runner has defaults, but we set them when the Python wrapper supports
     these dynamic attributes.
     """
@@ -755,6 +1029,10 @@ def _run_native_mcts_walltime(
     stats = SearchStats(mode, 0.0, expanded_nodes=0)
     max_depth = -1 if int(search_cfg.max_depth) <= 0 else int(search_cfg.max_depth)
     batch_size = max(1, int(search_cfg.batch_size))
+    reserve_tree_capacity = getattr(tree, "reserve_tree_capacity", None)
+    if reserve_tree_capacity is not None:
+        reserve_target = (int(node_budget) + 1) if node_budget is not None else max(4096, batch_size * 1024)
+        reserve_tree_capacity(int(reserve_target))
     eval_cache: dict[Any, native_mcts._Evaluation] = {}
     expanded_node_ids: set[int] = set()
     node_depths: dict[int, int] = {0: 0}
@@ -766,7 +1044,8 @@ def _run_native_mcts_walltime(
         remaining_nodes = None if node_budget is None else max(0, node_budget - len(expanded_node_ids))
         if remaining_nodes == 0:
             break
-        frontier = batch_size if remaining_nodes is None else min(batch_size, remaining_nodes)
+        selection_frontier = batch_size * 2 if remaining_nodes is None else batch_size
+        frontier = selection_frontier if remaining_nodes is None else min(selection_frontier, remaining_nodes)
         selections: list[Any] = []
         eval_messages: list[dict[str, Any]] = []
         eval_index_by_key: dict[Any, int] = {}
@@ -1147,6 +1426,37 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _load_mcts_search_config(path: Path = DEFAULT_MCTS_SEARCH_CONFIG) -> argparse.Namespace:
+    if not path.exists():
+        raise FileNotFoundError(f"MCTS search profiler config not found: {path}")
+    with path.open("r", encoding="utf-8") as handle:
+        raw = json.load(handle)
+    if not isinstance(raw, dict):
+        raise TypeError(f"MCTS search profiler config must be a JSON object: {path}")
+    normalized = {str(key).replace("-", "_"): value for key, value in raw.items()}
+    unknown = sorted(set(normalized) - set(_MCTS_SEARCH_DEFAULTS))
+    if unknown:
+        raise ValueError(f"Unknown mcts_search config key(s): {', '.join(unknown)}")
+    values = dict(_MCTS_SEARCH_DEFAULTS)
+    values.update(normalized)
+    input_mode = "payload" if values.get("payload") is not None else "selfplay"
+    values["input_mode"] = input_mode
+    values["synthetic"] = False
+    if str(values.get("evaluator")) not in {"nn", "static", "bot"}:
+        raise ValueError("mcts_search config evaluator must be one of: nn, static, bot")
+    for key in _PATH_CONFIG_KEYS:
+        value = values.get(key)
+        if isinstance(value, str) and value:
+            parsed_path = Path(value)
+            values[key] = parsed_path if parsed_path.is_absolute() else PROJECT_ROOT / parsed_path
+    return argparse.Namespace(**values)
+
+
 def _add_stats(total: SearchStats, item: SearchStats) -> None:
     total.simulations += int(item.simulations)
     total.selected_paths += int(item.selected_paths)
@@ -1164,8 +1474,122 @@ def _payload_actions(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [action for action in actions if isinstance(action, dict)]
 
 
+def _capped_action_count(raw_count: int, model_max_actions: int | None) -> int:
+    if model_max_actions is None or int(model_max_actions) < 0:
+        return int(raw_count)
+    return min(int(raw_count), int(model_max_actions))
+
+
 def _action_type(action: dict[str, Any]) -> str:
     return str(action.get("type") or "UNKNOWN").upper()
+
+
+def _action_category(action: dict[str, Any]) -> str:
+    action_type = _action_type(action)
+    if action.get("unit_id") not in (None, "") or action_type in {
+        "MOVE",
+        "STEP_MOVE",
+        "ATTACK",
+        "CAPTURE",
+        "CONVERT",
+        "RECOVER",
+        "HEAL_OTHERS",
+        "MAKE_VETERAN",
+        "INFILTRATE",
+        "DISBAND",
+        "UPGRADE_RAMMER",
+        "UPGRADE_SCOUT",
+        "UPGRADE_BOMBER",
+    }:
+        return "unit"
+    if action.get("city_id") not in (None, "") or action_type in {"SPAWN", "LEVEL_UP"}:
+        return "city"
+    if action_type in {"RESEARCH", "RESEARCH_TECH"}:
+        return "tech"
+    if action_type in {
+        "BUILD",
+        "RESOURCE_GATHERING",
+        "BUILD_ROAD",
+        "BUILD_EMBASSY",
+        "BURN_FOREST",
+        "CLEAR_FOREST",
+        "GROW_FOREST",
+        "DESTROY",
+    }:
+        return "economy"
+    if action_type in {"PROPOSE_PEACE", "ACCEPT_PEACE", "PROPOSE_TREATY", "ACCEPT_TREATY", "CANCEL_TREATY"}:
+        return "diplomacy"
+    if action_type == "END_TURN":
+        return "turn"
+    return "other"
+
+
+def _tensor_nbytes(tensor: torch.Tensor) -> int:
+    return int(tensor.numel() * tensor.element_size())
+
+
+def _encoded_nbytes(encoded: EncodedObservation) -> int:
+    return sum(
+        _tensor_nbytes(tensor)
+        for tensor in (
+            encoded.board,
+            encoded.unit_features,
+            encoded.unit_mask,
+            encoded.city_features,
+            encoded.city_mask,
+            encoded.action_features,
+            encoded.action_mask,
+            encoded.scalar_features,
+        )
+    )
+
+
+def _first_tensor_batch_size(value: Any) -> int:
+    if torch.is_tensor(value):
+        return int(value.shape[0]) if value.ndim else 1
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            size = _first_tensor_batch_size(item)
+            if size:
+                return size
+    if isinstance(value, dict):
+        for item in value.values():
+            size = _first_tensor_batch_size(item)
+            if size:
+                return size
+    return 0
+
+
+def _query_nvidia_smi() -> dict[str, float] | None:
+    try:
+        completed = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu,utilization.memory,memory.used,power.draw",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    line = completed.stdout.strip().splitlines()[0] if completed.stdout.strip() else ""
+    parts = [part.strip() for part in line.split(",")]
+    if len(parts) < 4:
+        return None
+    try:
+        return {
+            "gpu_util_pct": float(parts[0]),
+            "gpu_memory_util_pct": float(parts[1]),
+            "gpu_memory_used_mb": float(parts[2]),
+            "gpu_power_watts": float(parts[3]),
+        }
+    except ValueError:
+        return None
 
 
 def _percentile(values: list[int], percentile: float) -> float:
@@ -1188,16 +1612,74 @@ def _branching_summary(values: list[int]) -> dict[str, str]:
     }
 
 
+def _branching_pressure_rows(branching: BranchingCollector) -> list[dict[str, Any]]:
+    rows = [
+        {
+            "scope": "root raw legal",
+            **_branching_summary(branching.root_action_counts),
+        },
+        {
+            "scope": "root model-capped",
+            **_branching_summary(branching.root_model_capped_counts),
+        },
+        {
+            "scope": "root searched",
+            **_branching_summary(branching.root_searched_counts),
+        },
+        {
+            "scope": "evaluated leaf legal",
+            **_branching_summary(branching.eval_action_counts),
+        },
+        {
+            "scope": "policy action slots",
+            **_branching_summary(branching.policy_action_counts),
+        },
+        {
+            "scope": "policy padded width",
+            **_branching_summary(branching.policy_padded_action_counts),
+        },
+    ]
+    return rows
+
+
+def _branching_key_stats(branching: BranchingCollector) -> dict[str, str]:
+    entropy = branching.root_visit_entropy_sum / max(1, branching.root_visit_samples)
+    padding_waste_pct = (
+        branching.policy_padding_waste_slots / float(branching.policy_total_slots) * 100.0
+        if branching.policy_total_slots
+        else 0.0
+    )
+    return {
+        "model_cap_dropped_avg": f"{(sum(branching.root_model_cap_drops) / len(branching.root_model_cap_drops)) if branching.root_model_cap_drops else 0.0:.2f}",
+        "top_k_dropped_avg": f"{(sum(branching.root_top_k_drops) / len(branching.root_top_k_drops)) if branching.root_top_k_drops else 0.0:.2f}",
+        "avg_root_visit_entropy_bits": f"{entropy:.3f}",
+        "avg_effective_root_branching": f"{(2.0 ** entropy) if branching.root_visit_samples else 0.0:.2f}",
+        "policy_padding_waste_slots": str(branching.policy_padding_waste_slots),
+        "policy_padding_waste_pct": f"{padding_waste_pct:.1f}%",
+        "cpu_to_device_mb_est": f"{branching.cpu_to_device_bytes / (1024.0 * 1024.0):.3f}",
+        "device_to_cpu_mb_est": f"{branching.device_to_cpu_bytes / (1024.0 * 1024.0):.3f}",
+    }
+
+
 def _action_breadth_rows(branching: BranchingCollector, *, limit: int = 12) -> list[dict[str, Any]]:
     root_total = sum(branching.root_action_types.values())
     leaf_total = sum(branching.eval_action_types.values())
+    searched_total = sum(branching.root_searched_action_types.values())
+    dropped_total = sum(branching.root_dropped_action_types.values())
     visit_total = max(1, branching.root_visit_samples)
-    names = set(branching.root_action_types) | set(branching.eval_action_types) | set(branching.root_visit_by_type)
+    names = (
+        set(branching.root_action_types)
+        | set(branching.eval_action_types)
+        | set(branching.root_searched_action_types)
+        | set(branching.root_dropped_action_types)
+        | set(branching.root_visit_by_type)
+    )
 
     def rank(name: str) -> float:
         return (
             float(branching.root_action_types.get(name, 0))
             + float(branching.eval_action_types.get(name, 0))
+            + float(branching.root_dropped_action_types.get(name, 0))
             + float(branching.root_visit_by_type.get(name, 0)) * 100.0
         )
 
@@ -1205,6 +1687,8 @@ def _action_breadth_rows(branching: BranchingCollector, *, limit: int = 12) -> l
     for name in sorted(names, key=rank, reverse=True)[:limit]:
         root_count = int(branching.root_action_types.get(name, 0))
         leaf_count = int(branching.eval_action_types.get(name, 0))
+        searched_count = int(branching.root_searched_action_types.get(name, 0))
+        dropped_count = int(branching.root_dropped_action_types.get(name, 0))
         visit_share = float(branching.root_visit_by_type.get(name, 0.0)) / float(visit_total)
         rows.append(
             {
@@ -1213,10 +1697,55 @@ def _action_breadth_rows(branching: BranchingCollector, *, limit: int = 12) -> l
                 "root_share": f"{(root_count / root_total * 100.0) if root_total else 0.0:.1f}%",
                 "leaf_count": leaf_count,
                 "leaf_share": f"{(leaf_count / leaf_total * 100.0) if leaf_total else 0.0:.1f}%",
+                "searched_share": f"{(searched_count / searched_total * 100.0) if searched_total else 0.0:.1f}%",
+                "dropped_top_k_share": f"{(dropped_count / dropped_total * 100.0) if dropped_total else 0.0:.1f}%",
                 "visit_share": f"{visit_share * 100.0:.1f}%",
             }
         )
     return rows
+
+
+def _hardware_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    metrics = [
+        "process_rss_mb",
+        "process_cpu_pct",
+        "system_cpu_pct",
+        "system_ram_pct",
+        "cuda_allocated_mb",
+        "cuda_reserved_mb",
+        "cuda_peak_allocated_mb",
+        "cuda_peak_reserved_mb",
+        "gpu_util_pct",
+        "gpu_memory_util_pct",
+        "gpu_memory_used_mb",
+        "gpu_power_watts",
+    ]
+    out = []
+    for metric in metrics:
+        values = []
+        for row in rows:
+            try:
+                values.append(float(row.get(metric, "")))
+            except (TypeError, ValueError):
+                continue
+        if not values:
+            continue
+        out.append(
+            {
+                "metric": metric,
+                "avg": f"{sum(values) / len(values):.2f}",
+                "max": f"{max(values):.2f}",
+                "min": f"{min(values):.2f}",
+            }
+        )
+    return out
+
+
+def _nn_module_rows(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    nn_rows = [row for row in rows if str(row["name"]).startswith("nn.")]
+    return sorted(nn_rows, key=lambda row: float(row["total_ms"]), reverse=True)[:limit]
 
 
 def _top_root_action_rows(
@@ -1264,7 +1793,7 @@ def _format_rate(numerator: float, elapsed_sec: float) -> str:
 
 def _build_payload_cases(args: argparse.Namespace) -> list[PayloadCase]:
     if args.payload is not None and args.synthetic:
-        raise ValueError("Use either --payload or --synthetic, not both.")
+        raise ValueError("Use either payload input or synthetic input, not both.")
     if args.payload is not None:
         return [PayloadCase(label=f"payload:{args.payload}", payload=_load_payload(args.payload), path=args.payload)]
     if args.synthetic:
@@ -1294,7 +1823,7 @@ def _build_payload_cases(args: argparse.Namespace) -> list[PayloadCase]:
 
 
 def _default_mcts_search_output_path(args: argparse.Namespace, filename: str) -> Path:
-    return Path("debug-logs") / f"mcts-search-{args.evaluator}" / filename
+    return PROJECT_ROOT / "debug-logs" / f"mcts-search-{args.evaluator}" / filename
 
 
 def _run_bot_profile_case(
@@ -1353,7 +1882,7 @@ def _run_one_profile_case(
     repeats: int,
 ) -> tuple[native_mcts.SearchResult | None, SearchStats, float]:
     global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_SELECTED_PATHS, _STATIC_TREE_EXPANDED_NODE_IDS
-    if evaluator_mode in {"bot", "static-bot"}:
+    if evaluator_mode in {"bot", "static"}:
         if bot is None:
             raise RuntimeError("Bot evaluator mode requires a HybridRLBot instance.")
         return _run_bot_profile_case(
@@ -1366,32 +1895,8 @@ def _run_one_profile_case(
 
     last_result: native_mcts.SearchResult | None = None
     stats = SearchStats("walltime" if using_walltime else "simulations", 0.0)
-    if evaluator_mode == "static":
-        _STATIC_TREE_DEPTH_SUM = 0
-        _STATIC_TREE_MAX_DEPTH = 0
-        _STATIC_TREE_SELECTED_PATHS = 0
-        _STATIC_TREE_EXPANDED_NODE_IDS = set()
     started_at = time.perf_counter()
     for _ in range(max(1, int(repeats))):
-        if evaluator_mode == "static":
-            depth_sum_before = _STATIC_TREE_DEPTH_SUM
-            max_depth_before = _STATIC_TREE_MAX_DEPTH
-            selected_paths_before = _STATIC_TREE_SELECTED_PATHS
-            expanded_before = len(_STATIC_TREE_EXPANDED_NODE_IDS)
-            last_result = native_static_mcts.run_native_static_mcts(
-                case.payload,
-                cfg.search,
-                cfg.model,
-                wall_time_seconds=wall_time_sec if using_walltime else None,
-            )
-            selected_delta = max(0, _STATIC_TREE_SELECTED_PATHS - selected_paths_before)
-            expanded_delta = max(0, len(_STATIC_TREE_EXPANDED_NODE_IDS) - expanded_before)
-            stats.depth_sum += max(0, _STATIC_TREE_DEPTH_SUM - depth_sum_before)
-            stats.max_depth = max(stats.max_depth, _STATIC_TREE_MAX_DEPTH)
-            stats.selected_paths += selected_delta
-            stats.expanded_nodes += expanded_delta
-            stats.simulations += expanded_delta
-            continue
         if model is None:
             raise RuntimeError("NN evaluator mode requires a model.")
         if using_walltime:
@@ -1422,79 +1927,27 @@ def _run_one_profile_case(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Profile native MCTS tree search with neural-network or native static evaluation. "
-            "By default this captures generated PlayLG self-play starts and benchmarks 10 positions x 10 sec."
+    if len(sys.argv) > 1:
+        raise SystemExit(
+            "mcts_search is config-only. Edit py/profiling/configs/mcts_search.json, "
+            "then run: python -m profiling.mcts_search"
         )
-    )
-    parser.add_argument(
-        "--evaluator",
-        choices=["nn", "static", "bot", "static-bot"],
-        default="nn",
-        help=(
-            "Evaluator backend to profile. Use bot for HybridRLBot.choose_action, "
-            "or static-bot for the static-only bootstrap HybridRLBot path. Default: nn."
-        ),
-    )
-    parser.add_argument(
-        "--static-only-hybrid-nn",
-        action="store_true",
-        help="Profile HybridRLBot.choose_action with static-eval MCTS and no NN work. Equivalent to --evaluator static-bot.",
-    )
-    parser.add_argument("--payload", type=Path, default=None, help="Profile one existing JSON root payload instead of generated self-play starts.")
-    parser.add_argument("--synthetic", action="store_true", help="Use the old tiny synthetic 4x4 root instead of real generated starts.")
-
-    parser.add_argument("--positions", type=int, default=10, help="Number of generated starting positions to capture/profile by default.")
-    parser.add_argument("--selfplay-seed-start", type=int, default=0, help="First seed for generated starting positions.")
-    parser.add_argument("--selfplay-seeds", nargs="*", type=int, default=None, help="Explicit generated-map seeds. Overrides --positions/--selfplay-seed-start.")
-    parser.add_argument("--selfplay-run-mode", default="PlayLG", help="Java run mode for capture. Default: PlayLG generated maps.")
-    parser.add_argument("--selfplay-level-file", default="levels/MinimalLevel2.csv", help="Level CSV used only when --selfplay-run-mode=PlayFile.")
-    parser.add_argument("--selfplay-game-mode", default="Capitals", help="Game mode used for capture.")
-    parser.add_argument("--selfplay-map-type", default="Drylands", help="Generated map type for PlayLG when supported by the Python Java wrapper.")
-    parser.add_argument("--selfplay-map-size", default="Tiny", help="Generated map size for PlayLG when supported by the Python Java wrapper.")
-    parser.add_argument("--selfplay-seed", type=int, default=0, help="Compatibility alias for single-start capture helpers; normally use --selfplay-seed-start or --selfplay-seeds.")
-    parser.add_argument("--selfplay-tribes", nargs=2, default=["Xin Xi", "Imperius"], help="Two tribes used for capture.")
-    parser.add_argument("--capture-max-turns", type=int, default=1, help="Short cap for the temporary capture game.")
-    parser.add_argument("--capture-max-actions-per-turn", type=int, default=1, help="Short cap for the temporary capture game.")
-    parser.add_argument("--capture-max-actions", type=int, default=4, help="Short cap for the temporary capture game.")
-    parser.add_argument("--capture-timeout-sec", type=int, default=60, help="Timeout for each temporary capture game.")
-    parser.add_argument("--captured-payload-dir", type=Path, default=None, help="Directory for captured generated-start payload JSON files.")
-    parser.add_argument("--reuse-captured-payloads", action="store_true", help="Reuse captured payload files if they already exist.")
-    parser.add_argument("--workdir", type=Path, default=None, help="Repo root/workdir for Java self-play. Defaults to parent of this script directory.")
-    parser.add_argument("--java-executable", default=None, help="Optional Java executable override for self-play capture.")
-    parser.add_argument("--java-classpath", default=None, help="Optional Java classpath override for self-play capture.")
-    parser.add_argument("--java-main-class", default=None, help="Optional Java main class override for self-play capture.")
-
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_AUTORESEARCH_CHECKPOINT, help="Model checkpoint used by the NN evaluator.")
-    parser.add_argument("--device", default=None, help="Torch device, for example cpu or cuda. Defaults to cuda when available, otherwise cpu.")
-    parser.add_argument(
-        "--simulations",
-        type=int,
-        default=None,
-        help="Fixed node-addition budget per position. If omitted, use wall-clock mode.",
-    )
-    parser.add_argument("--wall-time-sec", "--walltime", type=float, default=10.0, help="Wall-clock budget per starting position. Default: 10 sec.")
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--repeats", type=int, default=1, help="Repeats per position. In walltime mode, each repeat gets --wall-time-sec.")
-    parser.add_argument("--warmup", type=int, default=0, help="Warmup runs per captured payload; not included in reported benchmark time.")
-    parser.add_argument("--top-k-actions", type=int, default=None)
-    parser.add_argument("--no-dirichlet", action="store_true", help="Disable root Dirichlet noise for deterministic profiling.")
-    parser.add_argument("--function-limit", type=int, default=15, help="Maximum hotspot rows printed to the console.")
-    parser.add_argument("--min-hotspot-ms", type=float, default=1.0, help="Hide timing/function rows below this cumulative millisecond threshold.")
-    parser.add_argument("--min-hotspot-pct", type=float, default=1.0, help="Hide timing/function rows below this percent-of-run threshold.")
-    parser.add_argument("--csv", type=Path, default=None, help="Optional CSV path for custom timing rows.")
-    parser.add_argument("--function-profile", action="store_true", help="Enable cProfile function tracing. Disabled by default to avoid distorting throughput.")
-    parser.add_argument("--profile-csv", type=Path, default=None, help="Optional CSV path for cProfile rows.")
-    parser.add_argument("--position-csv", type=Path, default=None, help="Optional CSV path for per-position search throughput rows.")
-    args = load_config_defaults(parser)
-    if args.static_only_hybrid_nn:
-        args.evaluator = "static-bot"
+    args = _load_mcts_search_config()
 
     if args.position_csv is None:
         args.position_csv = _default_mcts_search_output_path(args, "positions.csv")
     if args.csv is None:
         args.csv = _default_mcts_search_output_path(args, "timing.csv")
+    if args.branching_csv is None:
+        args.branching_csv = _default_mcts_search_output_path(args, "branching.csv")
+    if args.action_csv is None:
+        args.action_csv = _default_mcts_search_output_path(args, "actions.csv")
+    if args.hardware_csv is None:
+        args.hardware_csv = _default_mcts_search_output_path(args, "hardware.csv")
+    if args.nn_module_csv is None:
+        args.nn_module_csv = _default_mcts_search_output_path(args, "nn_modules.csv")
+    if args.details_json is None:
+        args.details_json = _default_mcts_search_output_path(args, "profile.json")
     if not args.function_profile:
         args.profile_csv = None
     elif args.profile_csv is None:
@@ -1547,8 +2000,8 @@ def main() -> int:
                 warmup=False,
             )
             checkpoint_status = f"bot:{checkpoint_status}"
-    elif args.evaluator == "static-bot":
-        bot_replay_tmp = tempfile.TemporaryDirectory(prefix="tribes_mcts_profile_static_bot_replay_")
+    elif args.evaluator == "static":
+        bot_replay_tmp = tempfile.TemporaryDirectory(prefix="tribes_mcts_profile_static_replay_")
         bot = HybridRLBot(
             cfg,
             Path(args.checkpoint) if args.checkpoint is not None else Path(),
@@ -1558,9 +2011,9 @@ def main() -> int:
             warmup=False,
             static_only_bootstrap=True,
         )
-        checkpoint_status = "static_bot"
-    else:
         checkpoint_status = "static_eval"
+    else:
+        checkpoint_status = "unknown"
 
     cases = _build_payload_cases(args)
     if not cases:
@@ -1569,44 +2022,35 @@ def main() -> int:
     collector = TimingCollector()
     branching = BranchingCollector()
     original_evaluator = _install_timed_evaluator(collector, branching) if args.evaluator in {"nn", "bot"} else None
-    original_static_evaluator = _install_timed_static_evaluator(collector, branching) if args.evaluator in {"static", "static-bot"} else None
+    original_static_evaluator = _install_timed_static_evaluator(collector, branching) if args.evaluator == "static" else None
     profile_device = bot.device if bot is not None else device
     original_tree_cls = _install_timed_tree(extension, collector, profile_device)
     profile = cProfile.Profile()
     per_position_rows: list[dict[str, Any]] = []
     last_result: native_mcts.SearchResult | None = None
     total_stats = SearchStats("walltime" if using_walltime else "simulations", 0.0)
+    nn_profiler: NNModuleProfiler | None = None
+    hardware_sampler: HardwareSampler | None = None
 
     try:
         if args.warmup > 0:
             print(f"[warmup] {args.warmup} run(s) per payload; not included in benchmark timing", flush=True)
         for case in cases:
             for _ in range(max(0, int(args.warmup))):
-                if args.evaluator in {"bot", "static-bot"}:
+                if args.evaluator in {"bot", "static"}:
                     if bot is None:
                         raise RuntimeError("Bot evaluator mode requires a HybridRLBot instance.")
                     bot.reset_episode()
                     bot.choose_action(case.payload)
                     continue
                 if using_walltime:
-                    if args.evaluator == "static":
-                        native_static_mcts.run_native_static_mcts(
-                            case.payload,
-                            cfg.search,
-                            cfg.model,
-                            wall_time_seconds=min(float(args.wall_time_sec), 0.2),
-                        )
-                    else:
-                        if model is None:
-                            raise RuntimeError("NN evaluator mode requires a model.")
-                        _run_native_mcts_walltime(case.payload, model, cfg.search, cfg.model, device, min(float(args.wall_time_sec), 0.2))
+                    if model is None:
+                        raise RuntimeError("NN evaluator mode requires a model.")
+                    _run_native_mcts_walltime(case.payload, model, cfg.search, cfg.model, device, min(float(args.wall_time_sec), 0.2))
                 else:
-                    if args.evaluator == "static":
-                        native_static_mcts.run_native_static_mcts(case.payload, cfg.search, cfg.model)
-                    else:
-                        if model is None:
-                            raise RuntimeError("NN evaluator mode requires a model.")
-                        native_mcts.run_native_mcts(case.payload, model, cfg.search, cfg.model, device)
+                    if model is None:
+                        raise RuntimeError("NN evaluator mode requires a model.")
+                    native_mcts.run_native_mcts(case.payload, model, cfg.search, cfg.model, device)
 
         collector = TimingCollector()
         branching = BranchingCollector()
@@ -1616,16 +2060,25 @@ def main() -> int:
             native_static_mcts._evaluate_static_messages = original_static_evaluator
         extension.NativeMCTS = original_tree_cls
         original_evaluator = _install_timed_evaluator(collector, branching) if args.evaluator in {"nn", "bot"} else None
-        original_static_evaluator = _install_timed_static_evaluator(collector, branching) if args.evaluator in {"static", "static-bot"} else None
+        original_static_evaluator = _install_timed_static_evaluator(collector, branching) if args.evaluator == "static" else None
         _install_timed_tree(extension, collector, profile_device)
+        if args.nn_module_profile and model is not None:
+            nn_profiler = NNModuleProfiler(collector, device)
+            nn_profiler.install(model)
 
         _sync_if_needed(device)
         benchmark_started_at = time.perf_counter()
+        if args.hardware_profile:
+            hardware_sampler = HardwareSampler(
+                device=profile_device if isinstance(profile_device, torch.device) else torch.device(profile_device),
+                interval_sec=max(1, int(args.hardware_sample_interval_ms)) / 1000.0,
+            )
+            hardware_sampler.__enter__()
         if args.function_profile:
             profile.enable()
         for index, case in enumerate(cases, start=1):
             summary = _payload_summary(case.payload)
-            branching.add_root(case.payload)
+            branching.add_root(case.payload, label=case.label, model_max_actions=cfg.model.max_actions)
             print(
                 f"[benchmark {index}/{len(cases)}] {case.label} "
                 f"actions={summary['actions']} board_size={summary['board_size']} tick={summary['tick']}",
@@ -1644,7 +2097,7 @@ def main() -> int:
                 repeats=max(1, int(args.repeats)),
             )
             _add_stats(total_stats, run_stats)
-            branching.add_result(case.payload, last_result)
+            branching.add_result(case.payload, last_result, label=case.label, model_max_actions=cfg.model.max_actions)
             row = {
                 "index": index,
                 "label": case.label,
@@ -1668,9 +2121,15 @@ def main() -> int:
         _sync_if_needed(device)
         if args.function_profile:
             profile.disable()
+        if hardware_sampler is not None:
+            hardware_sampler.__exit__(None, None, None)
         elapsed = time.perf_counter() - benchmark_started_at
         total_stats.elapsed_sec = elapsed
     finally:
+        if nn_profiler is not None:
+            nn_profiler.remove()
+        if hardware_sampler is not None and not hardware_sampler._stop.is_set():
+            hardware_sampler.__exit__(None, None, None)
         if original_evaluator is not None:
             native_mcts._evaluate_messages = original_evaluator
         if original_static_evaluator is not None:
@@ -1685,7 +2144,7 @@ def main() -> int:
         f"node_budget={'walltime' if using_walltime else cfg.search.num_simulations} "
         f"wall_time_sec_per_position={args.wall_time_sec if using_walltime else 'n/a'} "
         f"batch={cfg.search.batch_size} evaluator={args.evaluator} device={device} checkpoint={checkpoint_status} "
-        f"source={'synthetic' if args.synthetic else 'payload' if args.payload else args.selfplay_run_mode} "
+        f"source={'payload' if args.payload else args.selfplay_run_mode} "
         f"map={args.selfplay_map_type}/{args.selfplay_map_size} "
         f"total_ms={elapsed * 1000.0:.3f}"
     )
@@ -1726,16 +2185,32 @@ def main() -> int:
             f"eval_cache_hits={total_stats.eval_cache_hits}"
         )
 
-    print("\nBranching and action breadth")
-    branching_rows = [
-        {"scope": "root legal actions", **_branching_summary(branching.root_action_counts)},
-        {"scope": "evaluated leaf actions", **_branching_summary(branching.eval_action_counts)},
-    ]
-    print(_format_table(branching_rows, [("scope", "scope"), ("samples", "samples"), ("avg", "avg"), ("p50", "p50"), ("p90", "p90"), ("max", "max")]))
-    if branching.root_visit_samples:
-        print(f"Average root visit entropy: {branching.root_visit_entropy_sum / branching.root_visit_samples:.3f} bits")
+    print("\nTree search efficiency")
+    eval_batch_fill = (
+        total_stats.eval_positions / float(total_stats.eval_batches * max(1, int(cfg.search.batch_size)))
+        if total_stats.eval_batches
+        else 0.0
+    )
+    cache_total = total_stats.eval_positions + total_stats.eval_cache_hits
+    cache_hit_rate = total_stats.eval_cache_hits / float(cache_total) * 100.0 if cache_total else 0.0
+    print(
+        f"expanded_nodes={total_stats.expanded_nodes} "
+        f"expanded_nodes_per_sec={_format_rate(total_stats.expanded_nodes, elapsed)} "
+        f"expanded_per_selected_path={(total_stats.expanded_nodes / max(1, total_stats.selected_paths)):.3f} "
+        f"eval_cache_hit_rate={cache_hit_rate:.1f}% "
+        f"eval_batch_fill={eval_batch_fill * 100.0:.1f}%"
+    )
 
-    action_breadth_rows = _action_breadth_rows(branching, limit=10)
+    print("\nBranching and action-space pressure")
+    branching_rows = _branching_pressure_rows(branching)
+    print(_format_table(branching_rows, [("scope", "scope"), ("samples", "samples"), ("avg", "avg"), ("p50", "p50"), ("p90", "p90"), ("max", "max")]))
+    key_stats = _branching_key_stats(branching)
+    print(
+        "Key pressure: "
+        + " ".join(f"{name}={value}" for name, value in key_stats.items())
+    )
+
+    action_breadth_rows = _action_breadth_rows(branching, limit=max(1, int(args.section_limit)))
     if action_breadth_rows:
         print("\nAction type breadth")
         print(
@@ -1747,12 +2222,14 @@ def main() -> int:
                     ("root_share", "root_%"),
                     ("leaf_count", "leaf"),
                     ("leaf_share", "leaf_%"),
+                    ("searched_share", "searched_%"),
+                    ("dropped_top_k_share", "dropped_%"),
                     ("visit_share", "root_visit_%"),
                 ],
             )
         )
 
-    top_action_rows = _top_root_action_rows(cases[-1].payload, last_result, limit=10)
+    top_action_rows = _top_root_action_rows(cases[-1].payload, last_result, limit=max(1, int(args.section_limit)))
     if top_action_rows:
         print("\nTop root actions in final position")
         print(
@@ -1765,6 +2242,20 @@ def main() -> int:
     rows = _timing_rows(collector, elapsed)
     if args.csv is not None:
         _write_csv(args.csv, rows)
+    nn_module_rows = _nn_module_rows(rows, limit=max(1, int(args.section_limit)))
+    if args.nn_module_csv is not None:
+        _write_csv(args.nn_module_csv, [row for row in rows if str(row["name"]).startswith("nn.")])
+    if nn_module_rows:
+        print("\nNN module time")
+        print(_format_table(nn_module_rows, [("name", "module"), ("calls", "calls"), ("items", "items"), ("total_ms", "total_ms"), ("avg_ms", "avg_ms"), ("pct", "%")]))
+
+    hardware_rows = hardware_sampler.rows() if hardware_sampler is not None else []
+    hardware_summary_rows = _hardware_summary_rows(hardware_rows)
+    if args.hardware_csv is not None and args.hardware_profile:
+        _write_csv(args.hardware_csv, hardware_rows)
+    if hardware_summary_rows:
+        print("\nHardware utilization")
+        print(_format_table(hardware_summary_rows[: max(1, int(args.section_limit))], [("metric", "metric"), ("avg", "avg"), ("max", "max"), ("min", "min")]))
 
     profile_table = _profile_rows(profile, root=PY_ROOT.parent) if args.function_profile else []
     if args.profile_csv is not None:
@@ -1791,10 +2282,62 @@ def main() -> int:
     if args.position_csv is not None:
         _write_csv(args.position_csv, per_position_rows)
         written.append(f"positions={args.position_csv}")
+    if args.branching_csv is not None:
+        _write_csv(args.branching_csv, branching.branching_rows)
+        written.append(f"branching={args.branching_csv}")
+    if args.action_csv is not None:
+        _write_csv(args.action_csv, branching.action_rows)
+        written.append(f"actions={args.action_csv}")
     if args.csv is not None:
         written.append(f"timing={args.csv}")
     if args.profile_csv is not None:
         written.append(f"functions={args.profile_csv}")
+    if args.nn_module_csv is not None and nn_module_rows:
+        written.append(f"nn_modules={args.nn_module_csv}")
+    if args.hardware_csv is not None and args.hardware_profile:
+        written.append(f"hardware={args.hardware_csv}")
+    if args.details_json is not None:
+        details = {
+            "run": {
+                "positions": len(cases),
+                "repeats_per_position": max(1, int(args.repeats)),
+                "mode": "walltime" if using_walltime else "fixed_nodes",
+                "node_budget": "walltime" if using_walltime else cfg.search.num_simulations,
+                "wall_time_sec_per_position": args.wall_time_sec if using_walltime else None,
+                "batch_size": cfg.search.batch_size,
+                "evaluator": args.evaluator,
+                "device": str(device),
+                "checkpoint": checkpoint_status,
+                "elapsed_sec": elapsed,
+            },
+            "tree_efficiency": {
+                "simulations": total_stats.simulations,
+                "simulations_per_sec": _format_rate(total_stats.simulations, elapsed),
+                "selected_paths": total_stats.selected_paths,
+                "selected_paths_per_sec": _format_rate(total_stats.selected_paths, elapsed),
+                "expanded_nodes": total_stats.expanded_nodes,
+                "expanded_nodes_per_sec": _format_rate(total_stats.expanded_nodes, elapsed),
+                "avg_depth": f"{total_stats.average_depth:.3f}",
+                "max_depth": total_stats.max_depth,
+                "eval_batches": total_stats.eval_batches,
+                "eval_positions": total_stats.eval_positions,
+                "eval_cache_hits": total_stats.eval_cache_hits,
+                "eval_cache_hit_rate_pct": f"{cache_hit_rate:.3f}",
+                "eval_batch_fill_pct": f"{eval_batch_fill * 100.0:.3f}",
+            },
+            "branching": {
+                "summary_rows": branching_rows,
+                "key_stats": key_stats,
+            },
+            "action_type_breadth": action_breadth_rows,
+            "top_root_actions": top_action_rows,
+            "hotspots": hotspot_rows,
+            "nn_module_time": nn_module_rows,
+            "hardware": hardware_summary_rows,
+            "csv": written,
+        }
+        _write_json(args.details_json, details)
+        written.append(f"details={args.details_json}")
     if written:
         print("\nCSV: " + " ".join(written))
     return 0
