@@ -949,6 +949,27 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(splash_target["current_hp"], 8)
 
+    def test_native_lethal_attack_increments_attacker_tribe_kills(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message_with_unit_move()
+        message["observation"]["tribes"][0]["kills"] = 0
+        message["observation"]["units"][0]["type"] = "KNIGHT"
+        message["observation"]["units"][0]["attack"] = 3.5
+        message["observation"]["units"][0]["movement"] = 3
+        message["observation"]["units"].append(
+            {"id": 2, "tribe_id": 1, "city_id": 0, "type": "WARRIOR", "x": 2, "y": 1, "current_hp": 1, "max_hp": 10, "kills": 0, "is_veteran": False, "status": "FRESH", "is_hidden": False}
+        )
+        message["observation"]["board"]["tiles"][1][2]["unit_id"] = 2
+        message["actions"] = [{"id": "attack", "type": "ATTACK", "unit_id": 1, "u": 1, "target_unit_id": 2, "tu": 2}]
+        tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
+
+        selection = dict(tree.select_leaf(4, 1.5))
+        leaf_payload = dict(selection["leaf_payload"])
+        attacker_tribe = next(tribe for tribe in leaf_payload["observation"]["tribes"] if tribe["id"] == 0)
+
+        self.assertEqual(attacker_tribe["kills"], 1)
+
     def test_native_infiltrate_transition_spawns_daggers(self) -> None:
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)

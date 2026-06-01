@@ -400,6 +400,32 @@ void set_tribe_payload_field(NativeGameState& state, int tribe_id, const char* k
   }
 }
 
+void increment_tribe_kills(NativeGameState& state, int tribe_id) {
+  NativeTribe* tribe = tribe_by_id(state, tribe_id);
+  if (tribe == nullptr) {
+    return;
+  }
+  tribe->kills += 1;
+  if (!state.observation.contains("tribes") || !py::isinstance<py::list>(state.observation["tribes"])) {
+    return;
+  }
+  py::list tribes = py::reinterpret_borrow<py::list>(state.observation["tribes"]);
+  for (const auto& item : tribes) {
+    if (!py::isinstance<py::dict>(item)) {
+      continue;
+    }
+    py::dict payload = py::reinterpret_borrow<py::dict>(item);
+    if (read_int(payload, "id", 0) != tribe_id) {
+      continue;
+    }
+    if (payload.contains("kills")) {
+      py::handle actual_value = tribe_id == state.root_player_id ? py::int_(tribe->kills) : py::int_(0);
+      payload["kills"] = actual_value;
+    }
+    return;
+  }
+}
+
 void sync_tile_to_payload(NativeGameState& state, const NativeTile& tile) {
   if (!state.observation.contains("board") || !py::isinstance<py::dict>(state.observation["board"])) {
     return;
@@ -1504,6 +1530,7 @@ bool apply_attack(NativeGameState& next, const NativeAction& action) {
           mark_unit_removed(next, *splash_target);
           attacker->kills += 1;
           set_unit_payload_field(next, attacker->id, "kills", "k", py::int_(attacker->kills));
+          increment_tribe_kills(next, attacker->tribe_id);
         } else {
           splash_target->current_hp_exact = splash_hp - splash_damage;
           splash_target->current_hp = static_cast<int>(std::floor(splash_target->current_hp_exact));
@@ -1519,6 +1546,7 @@ bool apply_attack(NativeGameState& next, const NativeAction& action) {
     mark_unit_removed(next, *target);
     attacker->kills += 1;
     set_unit_payload_field(next, attacker->id, "kills", "k", py::int_(attacker->kills));
+    increment_tribe_kills(next, attacker->tribe_id);
     try_push_after_lethal_attack(next, *attacker, target_x, target_y);
   } else {
     const int distance = std::max(std::abs(attacker->x - target->x), std::abs(attacker->y - target->y));
