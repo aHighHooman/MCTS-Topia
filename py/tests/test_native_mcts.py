@@ -922,6 +922,33 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(target["current_hp"], 3)
 
+    def test_native_bomber_attack_applies_splash_damage(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message_with_upgrade("BUILD_ROAD", "BOMBER", 0, [])
+        message["observation"]["cities"].append(
+            {"id": 20, "tribe_id": 1, "x": 2, "y": 2, "level": 3, "population": 2, "population_need": 5, "production": 4, "is_capital": True, "has_walls": True}
+        )
+        message["observation"]["tribes"][1]["cities"] = [20]
+        message["observation"]["units"].append(
+            {"id": 2, "tribe_id": 1, "city_id": 0, "type": "WARRIOR", "x": 2, "y": 1, "current_hp": 10, "max_hp": 10, "kills": 0, "is_veteran": False, "status": "FRESH", "is_hidden": False}
+        )
+        message["observation"]["units"].append(
+            {"id": 3, "tribe_id": 1, "city_id": 20, "type": "WARRIOR", "x": 2, "y": 2, "current_hp": 10, "max_hp": 10, "kills": 0, "is_veteran": False, "status": "FRESH", "is_hidden": False}
+        )
+        message["observation"]["board"]["tiles"][1][2]["unit_id"] = 2
+        message["observation"]["board"]["tiles"][2][2]["terrain"] = "CITY"
+        message["observation"]["board"]["tiles"][2][2]["city_id"] = 20
+        message["observation"]["board"]["tiles"][2][2]["unit_id"] = 3
+        message["actions"] = [{"id": "attack", "type": "ATTACK", "unit_id": 1, "u": 1, "target_unit_id": 2, "tu": 2}]
+        tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
+
+        selection = dict(tree.select_leaf(4, 1.5))
+        leaf_payload = dict(selection["leaf_payload"])
+        splash_target = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 3)
+
+        self.assertEqual(splash_target["current_hp"], 8)
+
     def test_native_infiltrate_transition_spawns_daggers(self) -> None:
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)

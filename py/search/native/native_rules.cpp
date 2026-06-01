@@ -1403,6 +1403,20 @@ double terrain_defence_multiplier(NativeGameState& state, const NativeUnit& targ
   return 1.0;
 }
 
+int attack_damage_against(NativeGameState& state, const NativeUnit& attacker, const NativeUnit& target) {
+  const double attacker_hp = attacker.current_hp_exact > 0.0 ? attacker.current_hp_exact : static_cast<double>(attacker.current_hp);
+  const double target_hp = target.current_hp_exact > 0.0 ? target.current_hp_exact : static_cast<double>(target.current_hp);
+  const double attacker_attack = attacker.attack > 0.0 ? attacker.attack : unit_attack(attacker.type);
+  const double target_defence = target.defence > 0.0 ? target.defence : unit_defence(target.type);
+  const double attack_force = attacker_attack * (attacker_hp / std::max(1, attacker.max_hp));
+  const double defence_force =
+      target_defence * (target_hp / std::max(1, target.max_hp)) * terrain_defence_multiplier(state, target);
+  const double total_damage = attack_force + defence_force;
+  return total_damage <= 0.0
+      ? 0
+      : static_cast<int>(std::round((attack_force / total_damage) * attacker_attack * 4.5));
+}
+
 bool try_push_after_lethal_attack(NativeGameState& next, NativeUnit& attacker, int target_x, int target_y) {
   if (!melee_push_unit_type(attacker.type)) {
     return false;
@@ -1455,9 +1469,7 @@ bool apply_attack(NativeGameState& next, const NativeAction& action) {
   const double defence_force =
       target_defence * (target_hp / std::max(1, target->max_hp)) * terrain_defence_multiplier(next, *target);
   const double total_damage = attack_force + defence_force;
-  const int attack_damage = total_damage <= 0.0
-      ? 0
-      : static_cast<int>(std::round((attack_force / total_damage) * attacker_attack * 4.5));
+  const int attack_damage = attack_damage_against(next, *attacker, *target);
   const int defence_damage = total_damage <= 0.0
       ? 0
       : static_cast<int>(std::round((defence_force / total_damage) * target_defence * 4.5));
@@ -1465,6 +1477,42 @@ bool apply_attack(NativeGameState& next, const NativeAction& action) {
   target->current_hp_exact = static_cast<double>(target->current_hp);
   set_unit_payload_field(next, target->id, "current_hp", "hp", py::int_(target->current_hp));
   set_unit_payload_field(next, target->id, "current_hp_exact", "hpx", py::float_(target->current_hp_exact));
+  if (attacker->type == "BOMBER") {
+    for (int dy = -1; dy <= 1; ++dy) {
+      for (int dx = -1; dx <= 1; ++dx) {
+        if (dx == 0 && dy == 0) {
+          continue;
+        }
+        NativeTile* splash_tile = tile_at(next, target_x + dx, target_y + dy);
+        if (splash_tile == nullptr || splash_tile->unit_id <= 0) {
+          continue;
+        }
+        NativeUnit* splash_target = unit_by_id(next, splash_tile->unit_id);
+        if (splash_target == nullptr || splash_target->tribe_id == attacker->tribe_id || splash_target->id == attacker->id) {
+          continue;
+        }
+        const double splash_damage = attack_damage_against(next, *attacker, *splash_target) / 2.0;
+        if (splash_damage <= 0.0) {
+          continue;
+        }
+        const double splash_hp = splash_target->current_hp_exact > 0.0
+            ? splash_target->current_hp_exact
+            : static_cast<double>(splash_target->current_hp);
+        if (splash_hp <= splash_damage) {
+          update_tribe_economy(next, splash_target->tribe_id, 0, -unit_points(splash_target->type));
+          remove_unit_ownership_payload(next, *splash_target);
+          mark_unit_removed(next, *splash_target);
+          attacker->kills += 1;
+          set_unit_payload_field(next, attacker->id, "kills", "k", py::int_(attacker->kills));
+        } else {
+          splash_target->current_hp_exact = splash_hp - splash_damage;
+          splash_target->current_hp = static_cast<int>(std::floor(splash_target->current_hp_exact));
+          set_unit_payload_field(next, splash_target->id, "current_hp", "hp", py::int_(splash_target->current_hp));
+          set_unit_payload_field(next, splash_target->id, "current_hp_exact", "hpx", py::float_(splash_target->current_hp_exact));
+        }
+      }
+    }
+  }
   if (target->current_hp <= 0) {
     update_tribe_economy(next, target->tribe_id, 0, -unit_points(target->type));
     remove_unit_ownership_payload(next, *target);
