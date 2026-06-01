@@ -907,6 +907,19 @@ std::string attacked_status_after(const NativeUnit& unit, bool dealt_kill = fals
 bool unit_is_fresh(const NativeUnit& unit);
 bool city_payload_contains(const NativeGameState& state, int city_id);
 bool water_unit_type(const std::string& type);
+void preserve_hidden_enemy_action_state(
+    const NativeGameState& previous,
+    const std::vector<NativeAction>& previous_actions,
+    NativeGameState& next);
+void infer_hidden_enemy_action_state_from_actions(
+    NativeGameState& state,
+    const std::vector<NativeAction>& actions);
+void preserve_hidden_enemy_visible_actions(
+    const NativeGameState& previous,
+    const std::vector<NativeAction>& previous_actions,
+    NativeGameState& next,
+    std::vector<NativeAction>& actions,
+    int max_actions);
 
 std::string unit_required_tech(const std::string& type) {
   static const std::map<std::string, std::string> requirements = {
@@ -2079,6 +2092,127 @@ int reveal_from_current_assets(NativeGameState& state) {
     }
   }
   return newly_explored;
+}
+
+void preserve_hidden_enemy_action_state(
+    const NativeGameState& previous,
+    const std::vector<NativeAction>& previous_actions,
+    NativeGameState& next) {
+  if (previous.active_player_id == previous.root_player_id || next.active_player_id != previous.active_player_id) {
+    return;
+  }
+  NativeTribe* next_active_tribe = tribe_by_id(next, next.active_player_id);
+  if (next_active_tribe == nullptr) {
+    return;
+  }
+
+  int minimum_stars_for_known_research = next_active_tribe->stars;
+  for (int action_index : previous.legal_action_indexes) {
+    if (action_index < 0 || action_index >= static_cast<int>(previous_actions.size())) {
+      continue;
+    }
+    const NativeAction& prior = previous_actions[action_index];
+    const std::string type = canonical_action_type(prior);
+    if (type == "SPAWN") {
+      const int city_id = prior.city_id > 0 ? prior.city_id : action_int(prior, "city_id", "c", 0);
+      if (city_id <= 0 || city_by_id(next, city_id) != nullptr) {
+        continue;
+      }
+      const int city_x = action_int(prior, "x", nullptr, 0);
+      const int city_y = action_int(prior, "y", nullptr, 0);
+      if (tile_at(next, city_x, city_y) == nullptr) {
+        continue;
+      }
+      NativeCity city;
+      city.id = city_id;
+      city.tribe_id = next.active_player_id;
+      city.x = city_x;
+      city.y = city_y;
+      city.level = 1;
+      city.population = 0;
+      city.population_need = 2;
+      city.production = 2;
+      city.capital = next_active_tribe->capital_id == city_id;
+      city.walls = false;
+      city.infiltrated = false;
+      city.bound = city.capital ? 0 : 1;
+      city.points_worth = city.capital ? 180 : 0;
+      next.cities.push_back(city);
+      if (std::find(next_active_tribe->city_ids.begin(), next_active_tribe->city_ids.end(), city_id) ==
+          next_active_tribe->city_ids.end()) {
+        next_active_tribe->city_ids.push_back(city_id);
+      }
+      continue;
+    }
+    if (type == "RESEARCH_TECH") {
+      const std::string tech = action_string(prior, "tech");
+      if (tech.empty() || has_tech(*next_active_tribe, tech)) {
+        continue;
+      }
+      minimum_stars_for_known_research = std::max(minimum_stars_for_known_research, tech_cost_for(*next_active_tribe, tech));
+    }
+  }
+
+  if (minimum_stars_for_known_research > next_active_tribe->stars) {
+    next_active_tribe->stars = minimum_stars_for_known_research;
+  }
+}
+
+void infer_hidden_enemy_action_state_from_actions(
+    NativeGameState& state,
+    const std::vector<NativeAction>& actions) {
+  preserve_hidden_enemy_action_state(state, actions, state);
+}
+
+bool actions_match_for_visibility(const NativeAction& left, const NativeAction& right) {
+  const std::string left_type = canonical_action_type(left);
+  const std::string right_type = canonical_action_type(right);
+  if (left_type != right_type) {
+    return false;
+  }
+  if (left_type == "RESEARCH_TECH") {
+    return action_string(left, "tech") == action_string(right, "tech");
+  }
+  if (left_type == "SPAWN") {
+    return action_int(left, "city_id", "c", 0) == action_int(right, "city_id", "c", 0) &&
+        action_string(left, "unit_type", "ut") == action_string(right, "unit_type", "ut");
+  }
+  return left.id == right.id;
+}
+
+void preserve_hidden_enemy_visible_actions(
+    const NativeGameState& previous,
+    const std::vector<NativeAction>& previous_actions,
+    NativeGameState& next,
+    std::vector<NativeAction>& actions,
+    int max_actions) {
+  if (previous.active_player_id == previous.root_player_id || next.active_player_id != previous.active_player_id) {
+    return;
+  }
+  for (int action_index : previous.legal_action_indexes) {
+    if (action_index < 0 || action_index >= static_cast<int>(previous_actions.size())) {
+      continue;
+    }
+    const NativeAction& prior = previous_actions[action_index];
+    const std::string type = canonical_action_type(prior);
+    if (type != "RESEARCH_TECH" && type != "SPAWN") {
+      continue;
+    }
+    bool already_present = false;
+    for (int legal_index : next.legal_action_indexes) {
+      if (legal_index < 0 || legal_index >= static_cast<int>(actions.size())) {
+        continue;
+      }
+      if (actions_match_for_visibility(actions[legal_index], prior)) {
+        already_present = true;
+        break;
+      }
+    }
+    if (already_present) {
+      continue;
+    }
+    append_generated_action(next, actions, max_actions, prior);
+  }
 }
 
 void sync_observation_turn_flags(NativeGameState& state);
@@ -4697,6 +4831,7 @@ NativeRoot parse_root_payload(const py::dict& payload, int max_actions) {
     root.state.terminal_reason = "no_legal_actions";
   }
   infer_pending_offers_from_actions(root.state, root.actions);
+  infer_hidden_enemy_action_state_from_actions(root.state, root.actions);
   return root;
 }
 
@@ -4810,8 +4945,14 @@ NativeGameState apply_action_strict(
   if (type == "MOVE" || type == "STEP_MOVE" || type == "ATTACK") {
     update_tribe_economy(next, next.active_player_id, 0, newly_explored * 5);
   }
+  if (type == "ATTACK") {
+    preserve_hidden_enemy_action_state(state, actions, next);
+  }
   sync_all_tiles_to_payload(next);
   regenerate_actions(next, actions, max_actions);
+  if (type == "ATTACK") {
+    preserve_hidden_enemy_visible_actions(state, actions, next, actions, max_actions);
+  }
   next.terminal = next.legal_action_indexes.empty();
   if (next.terminal) {
     next.terminal_reason = "no_regenerated_actions";

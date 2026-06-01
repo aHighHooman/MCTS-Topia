@@ -1676,6 +1676,28 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(status, 0)
 
+    def test_java_parity_milestone4_enemy_attack_regenerates_visible_actions(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "milestone4:units",
+                    "--depth",
+                    "2",
+                    "--max-states",
+                    "12",
+                    "--max-actions-per-state",
+                    "12",
+                    "--action-id",
+                    "s9_A6",
+                    "--max-actions",
+                    "256",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
