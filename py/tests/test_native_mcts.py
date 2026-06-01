@@ -826,6 +826,7 @@ class NativeMCTSTest(unittest.TestCase):
         spawned = [unit for unit in leaf_payload["observation"]["units"] if unit["tribe_id"] == 0 and unit["type"] == "DAGGER"]
         self.assertEqual(len(spawned), 3)
         self.assertEqual([(unit["x"], unit["y"]) for unit in spawned], [(1, 0), (1, 2), (2, 0)])
+        self.assertTrue(all(unit["defence"] == 2 for unit in spawned))
 
     def test_native_tree_applies_unit_upgrades(self) -> None:
         extension = load_native_mcts_extension()

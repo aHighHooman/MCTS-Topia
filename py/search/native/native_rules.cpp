@@ -773,7 +773,7 @@ int unit_defence(const std::string& type) {
   static const std::map<std::string, int> values = {
       {"WARRIOR", 2}, {"RIDER", 1}, {"DEFENDER", 3}, {"SWORDMAN", 3}, {"SWORDSMAN", 3},
       {"ARCHER", 1}, {"CATAPULT", 0}, {"KNIGHT", 1}, {"MIND_BENDER", 1}, {"CLOAK", 0},
-      {"DAGGER", 1}, {"RAMMER", 3}, {"SCOUT", 1}, {"BOMBER", 2}, {"SUPERUNIT", 4},
+      {"DAGGER", 2}, {"RAMMER", 3}, {"SCOUT", 1}, {"BOMBER", 2}, {"SUPERUNIT", 4},
       {"JUGGERNAUT", 4}, {"PIRATE", 2}};
   auto it = values.find(type);
   return it == values.end() ? 1 : it->second;
