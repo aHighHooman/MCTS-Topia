@@ -2138,6 +2138,29 @@ bool tile_revealed_by_tribe_assets(
   return false;
 }
 
+void prune_invisible_enemy_units_payload(NativeGameState& state) {
+  if (!state.observation.contains("units") || !py::isinstance<py::list>(state.observation["units"])) {
+    return;
+  }
+  py::list input = py::reinterpret_borrow<py::list>(state.observation["units"]);
+  py::list output;
+  for (const auto& item : input) {
+    if (!py::isinstance<py::dict>(item)) {
+      output.append(item);
+      continue;
+    }
+    py::dict payload = py::reinterpret_borrow<py::dict>(item);
+    const int unit_id = read_int(payload, "id", -1);
+    const NativeUnit* unit = unit_by_id_const(state, unit_id);
+    if (unit == nullptr || unit->tribe_id == state.root_player_id ||
+        (!unit->hidden &&
+         tile_revealed_by_tribe_assets(state, state.root_player_id, unit->x, unit->y, -1))) {
+      output.append(item);
+    }
+  }
+  state.observation["units"] = output;
+}
+
 int estimate_hidden_enemy_move_exploration_score(
     const NativeGameState& previous,
     const NativeGameState& next,
@@ -5025,6 +5048,9 @@ NativeGameState apply_action_strict(
     const int hidden_enemy_score = estimate_hidden_enemy_move_exploration_score(state, next, applied);
     if (hidden_enemy_score != 0) {
       update_tribe_economy(next, next.active_player_id, 0, hidden_enemy_score);
+    }
+    if (state.active_player_id != state.root_player_id) {
+      prune_invisible_enemy_units_payload(next);
     }
   }
   if (type == "ATTACK") {
