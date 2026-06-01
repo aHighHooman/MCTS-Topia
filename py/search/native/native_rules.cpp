@@ -438,8 +438,17 @@ void sync_tile_to_payload(NativeGameState& state, const NativeTile& tile) {
   set_matrix_cell(board, "resource", tile.x, tile.y, resource_value);
   set_matrix_cell(board, "building", tile.x, tile.y, building_value);
   const int visible_city_id = tile.city_id > 0 ? tile.city_id : (tile.explored ? -1 : 0);
+  int visible_unit_id = tile.unit_id;
+  if (tile.unit_id > 0) {
+    const NativeUnit* occupant = unit_by_id(state, tile.unit_id);
+    if (occupant != nullptr &&
+        occupant->tribe_id != state.root_player_id &&
+        (occupant->hidden || !tile.visible)) {
+      visible_unit_id = 0;
+    }
+  }
   set_matrix_cell(board, "city", tile.x, tile.y, py::int_(visible_city_id));
-  set_matrix_cell(board, "unit", tile.x, tile.y, py::int_(tile.unit_id));
+  set_matrix_cell(board, "unit", tile.x, tile.y, py::int_(visible_unit_id));
   set_matrix_cell(board, "road", tile.x, tile.y, py::int_(tile.road ? 1 : 0));
   set_matrix_cell(board, "exp", tile.x, tile.y, py::int_(tile.explored ? 1 : 0));
   if (board.contains("tiles") && py::isinstance<py::list>(board["tiles"])) {
@@ -452,7 +461,7 @@ void sync_tile_to_payload(NativeGameState& state, const NativeTile& tile) {
         out["resource"] = resource_value;
         out["building"] = building_value;
         out["city_id"] = visible_city_id;
-        out["unit_id"] = tile.unit_id;
+        out["unit_id"] = visible_unit_id;
         out["road"] = tile.road;
         out["explored"] = tile.explored;
         if (out.contains("visible")) {
@@ -2021,6 +2030,15 @@ void append_visible_unit_payload(NativeGameState& state, const NativeUnit& unit)
   py::reinterpret_borrow<py::list>(state.observation["units"]).append(out);
 }
 
+bool tile_visible_for_asset(const NativeGameState& state, int x, int y);
+
+bool unit_visible_to_root(const NativeGameState& state, const NativeUnit& unit) {
+  if (unit.tribe_id == state.root_player_id) {
+    return true;
+  }
+  return !unit.hidden && tile_visible_for_asset(state, unit.x, unit.y);
+}
+
 int reveal_from_current_assets(NativeGameState& state) {
   int newly_explored = 0;
   auto reveal_square = [&](int cx, int cy, int radius) {
@@ -3210,10 +3228,14 @@ bool apply_spawn(NativeGameState& next, const NativeAction& action) {
   unit.cost = unit_cost(type);
   next.units.insert(next.units.begin(), unit);
   city->unit_ids.push_back(unit.id);
-  append_city_payload_unit(next, city->id, unit.id);
   tile->unit_id = unit.id;
+  const bool visible_to_root = unit_visible_to_root(next, unit);
+  if (visible_to_root) {
+    append_city_payload_unit(next, city->id, unit.id);
+  }
   sync_tile_to_payload(next, *tile);
-  if (next.observation.contains("units") && py::isinstance<py::list>(next.observation["units"])) {
+  if (visible_to_root &&
+      next.observation.contains("units") && py::isinstance<py::list>(next.observation["units"])) {
     py::dict out;
     out["id"] = unit.id;
     out["p"] = unit.tribe_id;
