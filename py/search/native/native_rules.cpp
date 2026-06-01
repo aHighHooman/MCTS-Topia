@@ -3879,7 +3879,6 @@ bool apply_clear_or_burn_forest(NativeGameState& next, const NativeAction& actio
   if (burn) {
     tile->resource = "CROPS";
   }
-  tile->building.clear();
   sync_tile_to_payload(next, *tile);
   update_tribe_economy(next, tribe_id, burn ? -5 : 1, 0);
   return true;

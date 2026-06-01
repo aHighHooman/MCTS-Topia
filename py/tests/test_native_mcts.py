@@ -1786,6 +1786,50 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(status, 0)
 
+    def test_java_parity_milestone3_city_burn_forest_preserves_building_actions(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "milestone3:city",
+                    "--depth",
+                    "2",
+                    "--max-states",
+                    "12",
+                    "--max-actions-per-state",
+                    "16",
+                    "--action-id",
+                    "s11_A12",
+                    "--max-actions",
+                    "256",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
+    def test_java_parity_milestone3_city_clear_forest_preserves_building_actions(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "milestone3:city",
+                    "--depth",
+                    "2",
+                    "--max-states",
+                    "12",
+                    "--max-actions-per-state",
+                    "16",
+                    "--action-id",
+                    "s11_A13",
+                    "--max-actions",
+                    "256",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
     def test_java_parity_milestone3_tribe_war_end_turn_regenerates_enemy_actions(self) -> None:
         status = run_parity(
             parse_args(
