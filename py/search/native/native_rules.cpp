@@ -998,6 +998,40 @@ void set_terminal_winner(NativeGameState& state, int winner_id, const std::strin
   throw std::runtime_error("Native strict forward model parity failure: " + reason);
 }
 
+void infer_hidden_city_center_from_territory(NativeCity& city, const NativeGameState& state) {
+  int best_score = -1;
+  int best_x = city.x;
+  int best_y = city.y;
+  for (const NativeTile& tile : state.tiles) {
+    if (tile.city_id != city.id) {
+      continue;
+    }
+    for (int dy = -1; dy <= 1; ++dy) {
+      for (int dx = -1; dx <= 1; ++dx) {
+        if (dx == 0 && dy == 0) {
+          continue;
+        }
+        const int candidate_x = tile.x + dx;
+        const int candidate_y = tile.y + dy;
+        const NativeTile* candidate = tile_at(const_cast<NativeGameState&>(state), candidate_x, candidate_y);
+        if (candidate == nullptr || candidate->explored) {
+          continue;
+        }
+        const int score = candidate_x + candidate_y;
+        if (score > best_score) {
+          best_score = score;
+          best_x = candidate_x;
+          best_y = candidate_y;
+        }
+      }
+    }
+  }
+  if (best_score >= 0) {
+    city.x = best_x;
+    city.y = best_y;
+  }
+}
+
 void ingest_cities_from_board(NativeGameState& state) {
   std::set<int> known_ids;
   for (const NativeCity& city : state.cities) {
@@ -1030,6 +1064,11 @@ void ingest_cities_from_board(NativeGameState& state) {
         city.capital = true;
         break;
       }
+    }
+    if (city.capital && tile_at(state, city.x, city.y) != nullptr &&
+        tile_at(state, city.x, city.y)->terrain != "CITY" &&
+        tile_at(state, city.x, city.y)->terrain != "VILLAGE") {
+      infer_hidden_city_center_from_territory(city, state);
     }
     state.cities.push_back(city);
     known_ids.insert(city.id);
