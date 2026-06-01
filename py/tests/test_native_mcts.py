@@ -1764,6 +1764,28 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(status, 0)
 
+    def test_java_parity_milestone3_tribe_war_end_turn_regenerates_enemy_actions(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "milestone3:tribe-war",
+                    "--depth",
+                    "1",
+                    "--max-states",
+                    "1",
+                    "--max-actions-per-state",
+                    "16",
+                    "--action-id",
+                    "A15",
+                    "--max-actions",
+                    "256",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
     def test_java_parity_milestone3_level_up_hidden_enemy_spawn_unit_id(self) -> None:
         status = run_parity(
             parse_args(

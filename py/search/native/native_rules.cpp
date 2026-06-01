@@ -2319,9 +2319,26 @@ std::pair<int, int> infer_hidden_enemy_capital_spawn_xy(const NativeGameState& s
   int best_y = 0;
   int best_distance = -1;
   int best_score = -1;
+  const bool require_full_hidden_city_radius =
+      relationship_between(state, state.active_player_id, state.root_player_id) == "WAR";
   for (const NativeTile& tile : state.tiles) {
     if (tile.explored) {
       continue;
+    }
+    if (require_full_hidden_city_radius) {
+      bool has_full_hidden_city_radius = true;
+      for (int dy = -1; dy <= 1 && has_full_hidden_city_radius; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+          const NativeTile* neighbor = tile_at(const_cast<NativeGameState&>(state), tile.x + dx, tile.y + dy);
+          if (neighbor == nullptr || neighbor->explored) {
+            has_full_hidden_city_radius = false;
+            break;
+          }
+        }
+      }
+      if (!has_full_hidden_city_radius) {
+        continue;
+      }
     }
     int nearest_root_asset = 0;
     bool have_root_asset = false;
@@ -2375,6 +2392,63 @@ void append_hidden_enemy_capital_spawn_action(NativeGameState& state, std::vecto
   spawn.payload["ut"] = "WARRIOR";
   spawn.payload["unit_type"] = "WARRIOR";
   append_generated_action(state, actions, max_actions, std::move(spawn));
+}
+
+NativeCity* ensure_hidden_active_enemy_capital_city(NativeGameState& state) {
+  if (state.active_player_id == state.root_player_id) {
+    return nullptr;
+  }
+  NativeTribe* active_tribe = tribe_by_id(state, state.active_player_id);
+  if (active_tribe == nullptr || active_tribe->capital_id <= 0) {
+    return nullptr;
+  }
+  NativeCity* existing = city_by_id(state, active_tribe->capital_id);
+  if (existing != nullptr) {
+    return existing;
+  }
+
+  const auto [x, y] = infer_hidden_enemy_capital_spawn_xy(state);
+  if (tile_at(state, x, y) == nullptr) {
+    return nullptr;
+  }
+
+  NativeCity city;
+  city.id = active_tribe->capital_id;
+  city.tribe_id = state.active_player_id;
+  city.x = x;
+  city.y = y;
+  city.level = 1;
+  city.population = 0;
+  city.population_need = 2;
+  city.production = 2;
+  city.capital = true;
+  city.walls = false;
+  city.infiltrated = false;
+  city.bound = 0;
+  city.points_worth = 180;
+  state.cities.push_back(city);
+  if (std::find(active_tribe->city_ids.begin(), active_tribe->city_ids.end(), city.id) ==
+      active_tribe->city_ids.end()) {
+    active_tribe->city_ids.push_back(city.id);
+  }
+  if (relationship_between(state, state.active_player_id, state.root_player_id) == "WAR") {
+    for (const std::string& tech : {"ROADS", "STRATEGY"}) {
+      if (!has_tech(*active_tribe, tech)) {
+        active_tribe->researched_tech_ids.push_back(tech);
+      }
+    }
+  }
+
+  for (int dy = -1; dy <= 1; ++dy) {
+    for (int dx = -1; dx <= 1; ++dx) {
+      NativeTile* tile = tile_at(state, x + dx, y + dy);
+      if (tile == nullptr || tile->explored || tile->city_id > 0) {
+        continue;
+      }
+      tile->city_id = city.id;
+    }
+  }
+  return &state.cities.back();
 }
 
 void sync_observation_turn_flags(NativeGameState& state);
@@ -2959,7 +3033,7 @@ void regenerate_tribe_actions(NativeGameState& state, std::vector<NativeAction>&
   if (has_tech(*tribe, "ROADS") && stars >= 3) {
     std::vector<NativeTile*> road_tiles;
     for (NativeTile& tile : state.tiles) {
-      if (!tile.explored || !can_build_road_at(state, state.active_player_id, tile) ||
+      if (!can_build_road_at(state, state.active_player_id, tile) ||
           stars < road_cost_at(tile)) {
         continue;
       }
@@ -3129,6 +3203,7 @@ void regenerate_actions(NativeGameState& state, std::vector<NativeAction>& actio
 
   state.leveling_up = false;
   state.can_end_turn = true;
+  ensure_hidden_active_enemy_capital_city(state);
   append_hidden_enemy_capital_spawn_action(state, actions, max_actions);
   regenerate_tribe_actions(state, actions, max_actions);
   for (const NativeCity& city : state.cities) {
@@ -4766,10 +4841,28 @@ int road_cost_at(const NativeTile& tile) {
 }
 
 bool can_build_road_at(const NativeGameState& state, int tribe_id, const NativeTile& tile) {
-  if (!tile.explored || tile.road) {
+  bool explored_for_actor = tile.explored;
+  bool hidden_owned_city_territory = false;
+  const NativeCity* hidden_owner_city = nullptr;
+  if (!explored_for_actor && state.active_player_id != state.root_player_id && tile.city_id > 0) {
+    for (const NativeCity& candidate : state.cities) {
+      if (candidate.id == tile.city_id) {
+        hidden_owner_city = &candidate;
+        break;
+      }
+    }
+    hidden_owned_city_territory = hidden_owner_city != nullptr && hidden_owner_city->tribe_id == tribe_id;
+    explored_for_actor = hidden_owned_city_territory;
+  }
+  if (!explored_for_actor || tile.road) {
+    return false;
+  }
+  if (hidden_owned_city_territory && hidden_owner_city != nullptr &&
+      tile.x == hidden_owner_city->x && tile.y == hidden_owner_city->y) {
     return false;
   }
   if (!(tile.terrain == "PLAIN" || tile.terrain == "FOREST" || tile.terrain == "VILLAGE" ||
+        (hidden_owned_city_territory && tile.terrain.empty()) ||
         tile.terrain == "SHALLOW_WATER")) {
     return false;
   }
