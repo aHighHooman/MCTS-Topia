@@ -1375,16 +1375,32 @@ bool fortifiable_unit_type(const std::string& type) {
       type == "DEFENDER" || type == "KNIGHT";
 }
 
-double city_defence_multiplier(NativeGameState& state, const NativeUnit& target) {
+double terrain_defence_multiplier(NativeGameState& state, const NativeUnit& target) {
   NativeTile* tile = tile_at(state, target.x, target.y);
-  if (tile == nullptr || tile->terrain != "CITY" || !fortifiable_unit_type(target.type)) {
+  if (tile == nullptr) {
     return 1.0;
   }
-  NativeCity* city = city_by_id(state, tile->city_id);
-  if (city == nullptr || city->tribe_id != target.tribe_id) {
+  NativeTribe* tribe = tribe_by_id(state, target.tribe_id);
+  if (tribe == nullptr) {
     return 1.0;
   }
-  return city->walls ? 4.0 : 1.5;
+  if (tile->terrain == "CITY") {
+    if (!fortifiable_unit_type(target.type)) {
+      return 1.0;
+    }
+    NativeCity* city = city_by_id(state, tile->city_id);
+    if (city == nullptr || city->tribe_id != target.tribe_id) {
+      return 1.0;
+    }
+    return city->walls ? 4.0 : 1.5;
+  }
+  if ((tile->terrain == "MOUNTAIN" && has_tech(*tribe, "CLIMBING")) ||
+      ((tile->terrain == "SHALLOW_WATER" || tile->terrain == "DEEP_WATER" || tile->terrain == "WATER") &&
+       has_tech(*tribe, "AQUATISM")) ||
+      (tile->terrain == "FOREST" && has_tech(*tribe, "ARCHERY"))) {
+    return 1.5;
+  }
+  return 1.0;
 }
 
 bool try_push_after_lethal_attack(NativeGameState& next, NativeUnit& attacker, int target_x, int target_y) {
@@ -1437,7 +1453,7 @@ bool apply_attack(NativeGameState& next, const NativeAction& action) {
   const int target_y = target->y;
   const double attack_force = attacker_attack * (attacker_hp / std::max(1, attacker->max_hp));
   const double defence_force =
-      target_defence * (target_hp / std::max(1, target->max_hp)) * city_defence_multiplier(next, *target);
+      target_defence * (target_hp / std::max(1, target->max_hp)) * terrain_defence_multiplier(next, *target);
   const double total_damage = attack_force + defence_force;
   const int attack_damage = total_damage <= 0.0
       ? 0
