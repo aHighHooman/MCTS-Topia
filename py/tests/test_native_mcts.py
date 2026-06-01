@@ -823,6 +823,35 @@ class NativeMCTSTest(unittest.TestCase):
         target = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 2)
         self.assertLess(target["current_hp"], 10)
 
+    def test_native_attack_applies_city_wall_defence_bonus(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message()
+        message["observation"]["cities"] = [
+            {"id": 10, "tribe_id": 0, "x": 0, "y": 0, "level": 1, "population": 0, "population_need": 2, "production": 1, "is_capital": True, "has_walls": False},
+            {"id": 20, "tribe_id": 1, "x": 2, "y": 1, "level": 3, "population": 2, "population_need": 5, "production": 4, "is_capital": True, "has_walls": True},
+        ]
+        message["observation"]["tribes"][0]["stars"] = 0
+        message["observation"]["tribes"][1]["cities"] = [20]
+        message["observation"]["board"]["tiles"][0][0]["terrain"] = "CITY"
+        message["observation"]["board"]["tiles"][0][0]["city_id"] = 10
+        message["observation"]["board"]["tiles"][1][2]["terrain"] = "CITY"
+        message["observation"]["board"]["tiles"][1][2]["city_id"] = 20
+        message["observation"]["units"] = [
+            {"id": 1, "tribe_id": 0, "city_id": 10, "type": "WARRIOR", "x": 1, "y": 1, "current_hp": 10, "max_hp": 10, "kills": 0, "is_veteran": False, "status": "FRESH", "is_hidden": False},
+            {"id": 2, "tribe_id": 1, "city_id": 20, "type": "WARRIOR", "x": 2, "y": 1, "current_hp": 10, "max_hp": 10, "kills": 0, "is_veteran": False, "status": "FRESH", "is_hidden": False},
+        ]
+        message["observation"]["board"]["tiles"][1][1]["unit_id"] = 1
+        message["observation"]["board"]["tiles"][1][2]["unit_id"] = 2
+        message["actions"] = [{"id": "attack", "type": "ATTACK", "unit_id": 1, "u": 1, "target_unit_id": 2, "tu": 2}]
+        tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
+
+        selection = dict(tree.select_leaf(4, 1.5))
+        leaf_payload = dict(selection["leaf_payload"])
+        target = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 2)
+
+        self.assertEqual(target["current_hp"], 8)
+
     def test_native_infiltrate_transition_spawns_daggers(self) -> None:
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)
