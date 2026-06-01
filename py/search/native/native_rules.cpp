@@ -753,7 +753,7 @@ int unit_points(const std::string& type) {
   static const std::map<std::string, int> points = {
       {"WARRIOR", 10}, {"RIDER", 15}, {"DEFENDER", 15}, {"SWORDMAN", 25}, {"SWORDSMAN", 25},
       {"ARCHER", 15}, {"CATAPULT", 40}, {"KNIGHT", 40}, {"MIND_BENDER", 25}, {"CLOAK", 0},
-      {"DAGGER", 10}, {"RAMMER", 0}, {"SCOUT", 40}, {"BOMBER", 0}, {"SUPERUNIT", 50},
+      {"DAGGER", 10}, {"RAMMER", 0}, {"SCOUT", 0}, {"BOMBER", 0}, {"SUPERUNIT", 50},
       {"PIRATE", 0}};
   auto it = points.find(type);
   return it == points.end() ? 0 : it->second;

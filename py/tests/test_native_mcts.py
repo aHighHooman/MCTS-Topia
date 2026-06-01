@@ -832,13 +832,13 @@ class NativeMCTSTest(unittest.TestCase):
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)
         cases = [
-            ("MAKE_VETERAN", "WARRIOR", 0, [], "WARRIOR", True, 0, 3),
-            ("UPGRADE_RAMMER", "RAFT", 5, ["RAMMING"], "RAMMER", False, 0, 0),
-            ("UPGRADE_SCOUT", "RAFT", 5, ["SAILING"], "SCOUT", False, 0, 0),
-            ("UPGRADE_BOMBER", "RAFT", 15, ["NAVIGATION"], "BOMBER", False, 0, 0),
-            ("UPGRADE_BOMBER", "SCOUT", 15, ["NAVIGATION"], "BOMBER", False, 0, 0),
+            ("MAKE_VETERAN", "WARRIOR", 0, [], "WARRIOR", True, 0, 0, 3),
+            ("UPGRADE_RAMMER", "RAFT", 5, ["RAMMING"], "RAMMER", False, 0, 0, 0),
+            ("UPGRADE_SCOUT", "RAFT", 5, ["SAILING"], "SCOUT", False, 0, 0, 0),
+            ("UPGRADE_BOMBER", "RAFT", 15, ["NAVIGATION"], "BOMBER", False, 0, 0, 0),
+            ("UPGRADE_BOMBER", "SCOUT", 15, ["NAVIGATION"], "BOMBER", False, 0, 0, 0),
         ]
-        for action_type, unit_type, stars, techs, expected_type, expected_veteran, expected_stars, kills in cases:
+        for action_type, unit_type, stars, techs, expected_type, expected_veteran, expected_stars, expected_score, kills in cases:
             with self.subTest(action_type=action_type, unit_type=unit_type):
                 tree = extension.NativeMCTS(
                     _message_with_upgrade(action_type, unit_type, stars, techs, kills=kills),
@@ -859,6 +859,7 @@ class NativeMCTSTest(unittest.TestCase):
                 self.assertFalse(selection["leaf_terminal"])
                 self.assertEqual(unit["is_veteran"], expected_veteran)
                 self.assertEqual(tribe["stars"], expected_stars)
+                self.assertEqual(tribe["score"], expected_score)
                 self.assertIn(unit["id"], city["units"])
 
     def test_native_generated_actions_include_unit_upgrades(self) -> None:
