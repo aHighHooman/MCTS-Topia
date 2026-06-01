@@ -1563,6 +1563,9 @@ bool apply_attack(NativeGameState& next, const NativeAction& action) {
         update_tribe_economy(next, attacker->tribe_id, 0, -unit_points(attacker->type));
         remove_unit_ownership_payload(next, *attacker);
         mark_unit_removed(next, *attacker);
+        target->kills += 1;
+        set_unit_payload_field(next, target->id, "kills", "k", py::int_(target->kills));
+        increment_tribe_kills(next, target->tribe_id);
       }
     }
   }
