@@ -2644,18 +2644,12 @@ void regenerate_tribe_actions(NativeGameState& state, std::vector<NativeAction>&
 
   if (has_tech(*tribe, "ROADS") && stars >= 3) {
     std::vector<NativeTile*> road_tiles;
-    for (const NativeCity& city : state.cities) {
-      if (city.tribe_id != state.active_player_id) {
+    for (NativeTile& tile : state.tiles) {
+      if (!tile.explored || !can_build_road_at(state, state.active_player_id, tile) ||
+          stars < road_cost_at(tile)) {
         continue;
       }
-      for (NativeTile& tile : state.tiles) {
-        if (tile.city_id != city.id || !tile.explored ||
-            !can_build_road_at(state, state.active_player_id, tile) ||
-            stars < road_cost_at(tile)) {
-          continue;
-        }
-        road_tiles.push_back(&tile);
-      }
+      road_tiles.push_back(&tile);
     }
     std::sort(road_tiles.begin(), road_tiles.end(), [](const NativeTile* left, const NativeTile* right) {
       if (left->x != right->x) {
