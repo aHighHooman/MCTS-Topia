@@ -894,7 +894,7 @@ bool has_tech(const NativeTribe& tribe, const std::string& tech);
 void set_relationship(NativeGameState& state, int from_tribe, int to_tribe, const std::string& relationship);
 std::string relationship_between(const NativeGameState& state, int from_tribe, int to_tribe);
 void clear_pending_offer(NativeGameState& state, int from_tribe, int to_tribe);
-std::string attacked_status_after(const NativeUnit& unit);
+std::string attacked_status_after(const NativeUnit& unit, bool dealt_kill = false);
 bool unit_is_fresh(const NativeUnit& unit);
 bool city_payload_contains(const NativeGameState& state, int city_id);
 bool water_unit_type(const std::string& type);
@@ -1570,7 +1570,7 @@ bool apply_attack(NativeGameState& next, const NativeAction& action) {
     }
   }
   if (attacker->current_hp > 0) {
-    attacker->status = attacked_status_after(*attacker);
+    attacker->status = attacked_status_after(*attacker, target->current_hp <= 0);
     set_unit_payload_field(next, attacker->id, "status", "s", py::str(attacker->status));
   }
   return true;
@@ -1803,7 +1803,10 @@ bool water_unit_type(const std::string& type) {
       type == "JUGGERNAUT" || type == "DINGHY" || type == "PIRATE";
 }
 
-std::string attacked_status_after(const NativeUnit& unit) {
+std::string attacked_status_after(const NativeUnit& unit, bool dealt_kill) {
+  if (unit.type == "KNIGHT" && dealt_kill) {
+    return "ATTACKED";
+  }
   if (unit.type == "RIDER") {
     if (unit.status == "FRESH") return "ATTACKED";
     if (unit.status == "MOVED") return "MOVED_AND_ATTACKED";
