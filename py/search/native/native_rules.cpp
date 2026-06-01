@@ -3508,7 +3508,11 @@ bool apply_spawn(NativeGameState& next, const NativeAction& action) {
       ? "WARRIOR"
       : action_string(action, "unit_type", "ut");
   NativeUnit unit;
-  unit.id = next_unit_id(next);
+  int spawn_unit_id = std::max(next_unit_id(next), city_id + 1);
+  for (const NativeTribe& tribe : next.tribes) {
+    spawn_unit_id = std::max(spawn_unit_id, tribe.capital_id + 1);
+  }
+  unit.id = spawn_unit_id;
   unit.tribe_id = city->tribe_id;
   unit.city_id = city_id;
   unit.x = city->x;
