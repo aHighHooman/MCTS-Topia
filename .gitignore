@@ -24,6 +24,7 @@ map/
 map_elites_*
 debug-logs/
 logs/
+*.log
 tmp/
 rl/
 .aider*
