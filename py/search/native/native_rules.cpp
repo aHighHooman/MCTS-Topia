@@ -781,9 +781,16 @@ int unit_defence(const std::string& type) {
 
 int unit_max_hp(const std::string& type) {
   static const std::map<std::string, int> values = {
-      {"DEFENDER", 15}, {"SWORDMAN", 15}, {"SWORDSMAN", 15}, {"SUPERUNIT", 40}};
+      {"DEFENDER", 15}, {"SWORDMAN", 15}, {"SWORDSMAN", 15}, {"CLOAK", 5}, {"SUPERUNIT", 40}};
   auto it = values.find(type);
   return it == values.end() ? 10 : it->second;
+}
+
+int unit_movement(const std::string& type) {
+  static const std::map<std::string, int> values = {
+      {"RIDER", 2}, {"KNIGHT", 3}, {"CLOAK", 2}};
+  auto it = values.find(type);
+  return it == values.end() ? 1 : it->second;
 }
 
 int building_cost(const std::string& type) {
@@ -3048,7 +3055,7 @@ bool apply_spawn(NativeGameState& next, const NativeAction& action) {
   unit.current_hp_exact = static_cast<double>(unit.max_hp);
   unit.attack = unit_attack(type);
   unit.defence = unit_defence(type);
-  unit.movement = type == "RIDER" ? 2 : (type == "KNIGHT" ? 3 : 1);
+  unit.movement = unit_movement(type);
   unit.range = 1;
   unit.cost = unit_cost(type);
   next.units.insert(next.units.begin(), unit);

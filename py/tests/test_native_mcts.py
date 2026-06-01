@@ -602,6 +602,24 @@ class NativeMCTSTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "unsupported_or_failed_transition:SPAWN"):
             tree.select_leaf(4, 1.5)
 
+    def test_native_spawn_cloak_uses_authoritative_stats(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message()
+        message["observation"]["tribes"][0]["researched_tech_ids"] = ["DIPLOMACY"]
+        message["actions"] = [
+            {"id": "spawn_cloak", "type": "SPAWN", "city_id": 10, "c": 10, "unit_type": "CLOAK", "ut": "CLOAK"}
+        ]
+        tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
+
+        selection = dict(tree.select_leaf(4, 1.5))
+        leaf_payload = dict(selection["leaf_payload"])
+        unit = next(unit for unit in leaf_payload["observation"]["units"] if unit["type"] == "CLOAK")
+
+        self.assertEqual(unit["max_hp"], 5)
+        self.assertEqual(unit["current_hp"], 5)
+        self.assertEqual(unit["movement"], 2)
+
     def test_strict_native_tree_rejects_missing_required_tile_field(self) -> None:
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)
