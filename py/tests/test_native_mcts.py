@@ -32,7 +32,7 @@ from search.native import run_native_hybrid_mcts, run_native_mcts, run_native_st
 from search.native.hybrid_mcts import _Evaluation, _mix_evaluation
 from search.native.cpp_extension import load_native_mcts_extension
 from search.native.mcts import NativeSearchParityError, _apply_end_turn_visit_guard, _message_cache_key, _root_priors
-from search.native.parity_runner import _canonical_state
+from search.native.parity_runner import _canonical_state, run_parity, parse_args
 
 
 def _message() -> dict:
@@ -292,6 +292,61 @@ def _message_with_village_capture() -> dict:
     return message
 
 
+def _message_with_unlabeled_village_capture() -> dict:
+    message = _message_with_village_capture()
+    message["actions"] = [{"id": "capture_village", "type": "CAPTURE", "unit_id": 1, "u": 1}]
+    return message
+
+
+def _message_with_territory_labeled_village_capture() -> dict:
+    message = _message_with_village_capture()
+    observation = message["observation"]
+    village_tile = observation["board"]["tiles"][1][1]
+    village_tile["city_id"] = 30
+    message["actions"] = [
+        {
+            "id": "capture_village",
+            "type": "CAPTURE",
+            "unit_id": 1,
+            "u": 1,
+            "target_city_id": 30,
+            "tc": 30,
+            "capture_type": "VILLAGE",
+            "ct": "VILLAGE",
+        }
+    ]
+    return message
+
+
+def _message_with_embassy_actions() -> dict:
+    message = _message()
+    observation = message["observation"]
+    observation["tribes"] = [
+        {"id": 0, "stars": 10, "score": 0, "researched_tech_ids": ["DIPLOMACY"], "cities": [10], "extra_units": [], "met": [1, 2]},
+        {"id": 1, "stars": 10, "score": 0, "researched_tech_ids": [], "cities": [20], "extra_units": [], "met": [0]},
+        {"id": 2, "stars": 10, "score": 0, "researched_tech_ids": [], "cities": [30], "extra_units": [], "met": [0]},
+    ]
+    observation["cities"] = [
+        {"id": 10, "tribe_id": 0, "x": 0, "y": 0, "level": 1, "population": 0, "population_need": 2, "production": 2, "is_capital": True},
+        {"id": 20, "tribe_id": 1, "x": 2, "y": 0, "level": 1, "population": 0, "population_need": 2, "production": 2, "is_capital": True},
+        {"id": 30, "tribe_id": 2, "x": 3, "y": 3, "level": 1, "population": 0, "population_need": 2, "production": 2, "is_capital": True},
+    ]
+    observation["rel"] = [
+        ["PEACE", "PEACE", "PEACE"],
+        ["PEACE", "PEACE", "PEACE"],
+        ["PEACE", "PEACE", "PEACE"],
+    ]
+    for city in observation["cities"]:
+        tile = observation["board"]["tiles"][city["y"]][city["x"]]
+        tile["terrain"] = "CITY"
+        tile["city_id"] = city["id"]
+    message["actions"] = [
+        {"id": "embassy_1", "type": "BUILD_EMBASSY", "tribe_id": 0, "p": 0, "target_player_id": 1, "tp": 1},
+        {"id": "embassy_2", "type": "BUILD_EMBASSY", "tribe_id": 0, "p": 0, "target_player_id": 2, "tp": 2},
+    ]
+    return message
+
+
 def _message_with_upgrade(action_type: str, unit_type: str, stars: int, techs: list[str], kills: int = 0) -> dict:
     message = _message()
     observation = message["observation"]
@@ -455,7 +510,9 @@ def _message_with_capital_capture(
         cities.append(_capital_city(30, extra_capital_owner, 3, 3))
     observation["cities"] = cities
     for city in cities:
-        observation["board"]["tiles"][city["y"]][city["x"]]["city_id"] = city["id"]
+        tile = observation["board"]["tiles"][city["y"]][city["x"]]
+        tile["terrain"] = "CITY"
+        tile["city_id"] = city["id"]
 
     target_city = next(city for city in cities if city["id"] == target_city_id)
     observation["units"] = [
@@ -1078,6 +1135,64 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertGreater(priors[0], priors[2])
         self.assertGreater(priors[1], priors[2])
 
+    def test_static_eval_prefers_parsed_unit_attack_over_type_fallback(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+
+        def attack_message(parsed_attack: int) -> dict:
+            message = _message()
+            observation = message["observation"]
+            observation["units"] = [
+                {
+                    "id": 1,
+                    "tribe_id": 0,
+                    "city_id": 10,
+                    "type": "CLOAK",
+                    "x": 1,
+                    "y": 1,
+                    "current_hp": 10,
+                    "max_hp": 10,
+                    "kills": 0,
+                    "is_veteran": False,
+                    "status": "FRESH",
+                    "is_hidden": False,
+                    "attack": parsed_attack,
+                    "defence": 1,
+                    "range": 1,
+                    "movement": 2,
+                },
+                {
+                    "id": 2,
+                    "tribe_id": 1,
+                    "city_id": 0,
+                    "type": "WARRIOR",
+                    "x": 2,
+                    "y": 1,
+                    "current_hp": 10,
+                    "max_hp": 10,
+                    "kills": 0,
+                    "is_veteran": False,
+                    "status": "FRESH",
+                    "is_hidden": False,
+                    "attack": 2,
+                    "defence": 2,
+                    "range": 1,
+                    "movement": 1,
+                },
+            ]
+            observation["board"]["tiles"][1][1]["unit_id"] = 1
+            observation["board"]["tiles"][1][2]["unit_id"] = 2
+            message["actions"] = [
+                {"id": "attack", "type": "ATTACK", "unit_id": 1, "u": 1, "target_unit_id": 2, "tu": 2},
+                {"id": "end", "type": "END_TURN"},
+            ]
+            return message
+
+        low = dict(extension.evaluate_static(attack_message(0), 64))
+        high = dict(extension.evaluate_static(attack_message(6), 64))
+
+        self.assertGreater(float(high["priors"][0]), float(low["priors"][0]))
+
     def test_hybrid_eval_zero_weights_matches_nn(self) -> None:
         nn_eval = _Evaluation([0.8, 0.2], 0.25)
         static_eval = _Evaluation([0.1, 0.9], -0.75)
@@ -1117,15 +1232,53 @@ class NativeMCTSTest(unittest.TestCase):
     def test_native_tree_simulates_village_capture(self) -> None:
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)
-        tree = extension.NativeMCTS(_message_with_village_capture(), [0], [1.0], 0.1, False, 7, 64)
+        for message in (
+            _message_with_village_capture(),
+            _message_with_unlabeled_village_capture(),
+            _message_with_territory_labeled_village_capture(),
+        ):
+            with self.subTest(action=message["actions"][0]):
+                tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
 
-        raw_selection = tree.select_leaf_batch_evals_only(1, 4, 1.0)[0]
-        leaf_payload = dict(raw_selection[-1])
-        cities = list(leaf_payload["observation"]["cities"])
+                raw_selection = tree.select_leaf_batch_evals_only(1, 4, 1.0)[0]
+                leaf_payload = dict(raw_selection[-1])
+                cities = list(leaf_payload["observation"]["cities"])
 
-        self.assertEqual(leaf_payload.get("native_terminal_reason", ""), "")
-        self.assertEqual(len(cities), 2)
-        self.assertTrue(any(city["x"] == 1 and city["y"] == 1 and city["tribe_id"] == 0 for city in cities))
+                self.assertEqual(leaf_payload.get("native_terminal_reason", ""), "")
+                self.assertEqual(len(cities), 2)
+                self.assertTrue(any(city["x"] == 1 and city["y"] == 1 and city["tribe_id"] == 0 for city in cities))
+
+    def test_native_tree_uses_explicit_build_embassy_targets(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        cases = [
+            (0, [1.0, 0.0], 20),
+            (1, [0.0, 1.0], 30),
+        ]
+        for action_index, priors, target_city_id in cases:
+            with self.subTest(action_index=action_index):
+                tree = extension.NativeMCTS(_message_with_embassy_actions(), [0, 1], priors, 0.1, False, 7, 64)
+
+                raw_selection = tree.select_leaf_batch_evals_only(1, 4, 1.0)[0]
+                leaf_payload = dict(raw_selection[-1])
+                city = next(city for city in leaf_payload["observation"]["cities"] if city["id"] == target_city_id)
+                tribe = next(tribe for tribe in leaf_payload["observation"]["tribes"] if tribe["id"] == 0)
+                buildings = list(city.get("buildings", city.get("b", [])))
+
+                self.assertEqual(raw_selection[2], action_index)
+                self.assertEqual(tribe["stars"], 5)
+                self.assertTrue(any(building.get("type", building.get("t")) == "EMBASSY" and building.get("owner_tribe_id", building.get("owner")) == 0 for building in buildings))
+
+    def test_native_tree_rejects_build_embassy_without_target(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message_with_embassy_actions()
+        del message["actions"][0]["target_player_id"]
+        del message["actions"][0]["tp"]
+        tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
+
+        with self.assertRaisesRegex(RuntimeError, "unsupported_or_failed_transition:BUILD_EMBASSY"):
+            tree.select_leaf(4, 1.5)
 
     def test_native_tree_simulates_ruin_examine_without_parity_crash(self) -> None:
         extension = load_native_mcts_extension()
@@ -1205,6 +1358,26 @@ class NativeMCTSTest(unittest.TestCase):
         cpp_state["observation"]["board"]["tiles"][3][1]["territory_city_id"] = 2
 
         self.assertEqual(_canonical_state(java_state, 0), _canonical_state(cpp_state, 0))
+
+    def test_java_parity_superunit_attack_uses_authoritative_stats(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "unitstats:superunit-attack",
+                    "--depth",
+                    "1",
+                    "--max-states",
+                    "1",
+                    "--max-actions-per-state",
+                    "4",
+                    "--max-actions",
+                    "64",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
 
 
 if __name__ == "__main__":

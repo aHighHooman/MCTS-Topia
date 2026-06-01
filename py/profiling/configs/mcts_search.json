@@ -24,7 +24,7 @@
   "checkpoint": "py/profiling/mcts_search_profiling_random_init_model.pt",
   "device": "cuda",
   "simulations": null,
-  "wall_time_sec": 3,
+  "wall_time_sec": 1,
   "batch_size": 64,
   "repeats": 1,
   "warmup": 0,

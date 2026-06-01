@@ -529,6 +529,8 @@ void append_payload_int_to_list(py::dict owner, const char* key, int value) {
   owner[key] = values;
 }
 
+void append_city_payload_unit(NativeGameState& state, int city_id, int unit_id);
+
 void append_extra_unit_payload(NativeGameState& state, int tribe_id, int unit_id) {
   if (!state.observation.contains("tribes") || !py::isinstance<py::list>(state.observation["tribes"])) {
     return;
@@ -552,6 +554,139 @@ void append_extra_unit_payload(NativeGameState& state, int tribe_id, int unit_id
       tribe["extra_unit_ids"] = copy;
     }
     return;
+  }
+}
+
+void erase_int(std::vector<int>& values, int value) {
+  values.erase(std::remove(values.begin(), values.end(), value), values.end());
+}
+
+void sync_tribe_city_ids_payload(NativeGameState& state, int tribe_id) {
+  NativeTribe* tribe = tribe_by_id(state, tribe_id);
+  if (tribe == nullptr || !state.observation.contains("tribes") ||
+      !py::isinstance<py::list>(state.observation["tribes"])) {
+    return;
+  }
+  py::list ids;
+  for (int city_id : tribe->city_ids) {
+    ids.append(py::int_(city_id));
+  }
+  py::list tribes = py::reinterpret_borrow<py::list>(state.observation["tribes"]);
+  for (const auto& item : tribes) {
+    if (!py::isinstance<py::dict>(item)) {
+      continue;
+    }
+    py::dict payload = py::reinterpret_borrow<py::dict>(item);
+    if (read_int(payload, "id", -1) != tribe_id) {
+      continue;
+    }
+    if (payload.contains("cities")) {
+      payload["cities"] = ids;
+    }
+    if (payload.contains("city_ids")) {
+      payload["city_ids"] = ids;
+    }
+    return;
+  }
+}
+
+void sync_city_units_payload(NativeGameState& state, int city_id) {
+  NativeCity* city = city_by_id(state, city_id);
+  if (city == nullptr || !state.observation.contains("cities") ||
+      !py::isinstance<py::list>(state.observation["cities"])) {
+    return;
+  }
+  py::list ids;
+  for (int unit_id : city->unit_ids) {
+    ids.append(py::int_(unit_id));
+  }
+  py::list cities = py::reinterpret_borrow<py::list>(state.observation["cities"]);
+  for (const auto& item : cities) {
+    if (!py::isinstance<py::dict>(item)) {
+      continue;
+    }
+    py::dict payload = py::reinterpret_borrow<py::dict>(item);
+    if (read_int(payload, "id", -1) != city_id) {
+      continue;
+    }
+    payload["units"] = ids;
+    if (payload.contains("unit_ids")) {
+      payload["unit_ids"] = ids;
+    }
+    return;
+  }
+}
+
+void move_unit_to_city(NativeGameState& state, NativeUnit& unit, NativeCity& target_city) {
+  const int old_city_id = unit.city_id;
+  if (NativeCity* old_city = city_by_id(state, old_city_id); old_city != nullptr) {
+    erase_int(old_city->unit_ids, unit.id);
+    sync_city_units_payload(state, old_city->id);
+  }
+  if (NativeTribe* tribe = tribe_by_id(state, unit.tribe_id); tribe != nullptr) {
+    erase_int(tribe->extra_unit_ids, unit.id);
+  }
+  erase_int(target_city.unit_ids, unit.id);
+  target_city.unit_ids.push_back(unit.id);
+  unit.city_id = target_city.id;
+  remove_unit_from_owner_lists_payload(state, unit);
+  append_city_payload_unit(state, target_city.id, unit.id);
+  set_unit_payload_field(state, unit.id, "city_id", "c", py::int_(target_city.id));
+}
+
+void sync_city_buildings_payload(NativeGameState& state, NativeCity& city) {
+  const bool has_embassy = std::any_of(city.buildings.begin(), city.buildings.end(), [](const NativeBuilding& building) {
+    return building.type == "EMBASSY";
+  });
+  if (!has_embassy) {
+    if (NativeTile* tile = tile_at(state, city.x, city.y); tile != nullptr) {
+      tile->building.clear();
+      sync_tile_to_payload(state, *tile);
+    }
+  }
+  py::list buildings;
+  for (const NativeBuilding& building : city.buildings) {
+    py::dict entry;
+    entry["t"] = building.type;
+    entry["type"] = building.type;
+    entry["x"] = building.x;
+    entry["y"] = building.y;
+    entry["city"] = building.city_id;
+    entry["city_id"] = building.city_id;
+    entry["owner"] = building.owner_tribe_id;
+    entry["owner_tribe_id"] = building.owner_tribe_id;
+    buildings.append(entry);
+  }
+  set_city_payload_field(state, city.id, "buildings", "b", buildings);
+}
+
+void remove_embassies_in_capital(NativeGameState& state, NativeCity& capital) {
+  const size_t before = capital.buildings.size();
+  capital.buildings.erase(
+      std::remove_if(capital.buildings.begin(), capital.buildings.end(), [](const NativeBuilding& building) {
+        return building.type == "EMBASSY";
+      }),
+      capital.buildings.end());
+  if (before != capital.buildings.size()) {
+    sync_city_buildings_payload(state, capital);
+  }
+}
+
+void destroy_embassies_between(NativeGameState& state, int tribe_a, int tribe_b) {
+  for (NativeCity& city : state.cities) {
+    if (!city.capital || (city.tribe_id != tribe_a && city.tribe_id != tribe_b)) {
+      continue;
+    }
+    const int owner_to_remove = city.tribe_id == tribe_a ? tribe_b : tribe_a;
+    const size_t before = city.buildings.size();
+    city.buildings.erase(
+        std::remove_if(city.buildings.begin(), city.buildings.end(), [&](const NativeBuilding& building) {
+          return building.type == "EMBASSY" && building.owner_tribe_id == owner_to_remove;
+        }),
+        city.buildings.end());
+    if (before != city.buildings.size()) {
+      sync_city_buildings_payload(state, city);
+    }
   }
 }
 
@@ -628,7 +763,7 @@ double unit_attack(const std::string& type) {
   static const std::map<std::string, double> values = {
       {"WARRIOR", 2}, {"RIDER", 2}, {"DEFENDER", 1}, {"SWORDMAN", 3}, {"SWORDSMAN", 3},
       {"ARCHER", 2}, {"CATAPULT", 4}, {"KNIGHT", 3.5}, {"MIND_BENDER", 0}, {"CLOAK", 2},
-      {"DAGGER", 2}, {"RAMMER", 3}, {"SCOUT", 2}, {"BOMBER", 3}, {"SUPERUNIT", 4},
+      {"DAGGER", 2}, {"RAMMER", 3}, {"SCOUT", 2}, {"BOMBER", 3}, {"SUPERUNIT", 5},
       {"JUGGERNAUT", 4}, {"DINGHY", 2}, {"PIRATE", 2}};
   auto it = values.find(type);
   return it == values.end() ? 2 : it->second;
@@ -638,7 +773,7 @@ int unit_defence(const std::string& type) {
   static const std::map<std::string, int> values = {
       {"WARRIOR", 2}, {"RIDER", 1}, {"DEFENDER", 3}, {"SWORDMAN", 3}, {"SWORDSMAN", 3},
       {"ARCHER", 1}, {"CATAPULT", 0}, {"KNIGHT", 1}, {"MIND_BENDER", 1}, {"CLOAK", 0},
-      {"DAGGER", 1}, {"RAMMER", 3}, {"SCOUT", 1}, {"BOMBER", 2}, {"SUPERUNIT", 3},
+      {"DAGGER", 1}, {"RAMMER", 3}, {"SCOUT", 1}, {"BOMBER", 2}, {"SUPERUNIT", 4},
       {"JUGGERNAUT", 4}, {"PIRATE", 2}};
   auto it = values.find(type);
   return it == values.end() ? 1 : it->second;
@@ -724,7 +859,10 @@ void update_tribe_economy(NativeGameState& state, int tribe_id, int stars_delta,
 
 bool has_tech(const NativeTribe& tribe, const std::string& tech);
 void set_relationship(NativeGameState& state, int from_tribe, int to_tribe, const std::string& relationship);
+std::string relationship_between(const NativeGameState& state, int from_tribe, int to_tribe);
+void clear_pending_offer(NativeGameState& state, int from_tribe, int to_tribe);
 std::string attacked_status_after(const NativeUnit& unit);
+bool unit_is_fresh(const NativeUnit& unit);
 bool city_payload_contains(const NativeGameState& state, int city_id);
 bool water_unit_type(const std::string& type);
 
@@ -1076,15 +1214,24 @@ bool apply_move(NativeGameState& next, const NativeAction& action) {
 
 bool apply_capture(NativeGameState& next, const NativeAction& action) {
   const int unit_id = action_int(action, "unit_id", "u", 0);
-  const int target_city_id = action_int(action, "target_city_id", "tc", action_int(action, "city_id", "c", 0));
   NativeUnit* unit = unit_by_id(next, unit_id);
-  NativeCity* city = city_by_id(next, target_city_id);
   if (unit == nullptr || unit->tribe_id < 0) {
     return false;
   }
+  if (!unit_is_fresh(*unit)) {
+    return false;
+  }
   const std::string capture_type = action_string(action, "capture_type", "ct");
-  if (city == nullptr && capture_type == "VILLAGE") {
-    NativeTile* tile = tile_at(next, unit->x, unit->y);
+  NativeTile* tile = tile_at(next, unit->x, unit->y);
+  int target_city_id = action_int(action, "target_city_id", "tc", action_int(action, "city_id", "c", 0));
+  if (capture_type == "VILLAGE" || (capture_type.empty() && tile != nullptr && tile->terrain == "VILLAGE")) {
+    target_city_id = -1;
+  }
+  if (target_city_id <= 0 && capture_type == "CITY" && tile != nullptr) {
+    target_city_id = tile->city_id;
+  }
+  NativeCity* city = city_by_id(next, target_city_id);
+  if (capture_type == "VILLAGE" || (capture_type.empty() && tile != nullptr && tile->terrain == "VILLAGE")) {
     if (tile == nullptr || tile->terrain != "VILLAGE") {
       return false;
     }
@@ -1158,6 +1305,7 @@ bool apply_capture(NativeGameState& next, const NativeAction& action) {
       py::reinterpret_borrow<py::list>(next.observation["cities"]).append(out);
     }
     unit->status = "FINISHED";
+    move_unit_to_city(next, *unit, next.cities.back());
     set_unit_payload_field(next, unit->id, "status", "s", py::str("FINISHED"));
     update_tribe_economy(next, unit->tribe_id, 0, 220);
     return true;
@@ -1165,17 +1313,85 @@ bool apply_capture(NativeGameState& next, const NativeAction& action) {
   if (city == nullptr) {
     return false;
   }
-  if (city->tribe_id == unit->tribe_id) {
+  if (tile == nullptr || tile->terrain != "CITY" || city->x != unit->x || city->y != unit->y) {
+    return false;
+  }
+  if (city->tribe_id == unit->tribe_id || relationship_between(next, unit->tribe_id, city->tribe_id) == "TREATY") {
     return false;
   }
   const int old_city_owner = city->tribe_id;
+  const int points = city->points_worth;
+  clear_pending_offer(next, unit->tribe_id, old_city_owner);
+  clear_pending_offer(next, old_city_owner, unit->tribe_id);
   city->tribe_id = unit->tribe_id;
+  city->infiltrated = false;
   unit->status = "FINISHED";
+  if (NativeTribe* old_owner = tribe_by_id(next, old_city_owner); old_owner != nullptr) {
+    erase_int(old_owner->city_ids, city->id);
+  }
+  if (NativeTribe* new_owner = tribe_by_id(next, unit->tribe_id); new_owner != nullptr &&
+      std::find(new_owner->city_ids.begin(), new_owner->city_ids.end(), city->id) == new_owner->city_ids.end()) {
+    new_owner->city_ids.push_back(city->id);
+  }
+  update_tribe_economy(next, old_city_owner, 0, -points);
+  update_tribe_economy(next, unit->tribe_id, 0, points);
   set_relationship(next, unit->tribe_id, old_city_owner, "WAR");
   set_relationship(next, old_city_owner, unit->tribe_id, "WAR");
+  destroy_embassies_between(next, unit->tribe_id, old_city_owner);
+  if (city->capital) {
+    remove_embassies_in_capital(next, *city);
+  }
   set_city_payload_field(next, city->id, "tribe_id", "p", py::int_(city->tribe_id));
+  set_city_payload_field(next, city->id, "infiltrated", "inf", py::bool_(false));
+  sync_tribe_city_ids_payload(next, old_city_owner);
+  sync_tribe_city_ids_payload(next, unit->tribe_id);
+  move_unit_to_city(next, *unit, *city);
   set_unit_payload_field(next, unit->id, "status", "s", py::str("FINISHED"));
+  NativeTribe* previous_owner = tribe_by_id(next, old_city_owner);
+  if (previous_owner != nullptr && previous_owner->city_ids.empty()) {
+    previous_owner->result = "LOSS";
+    set_tribe_payload_field(next, old_city_owner, "res", py::str("LOSS"));
+  }
   evaluate_capital_terminal(next);
+  return true;
+}
+
+bool melee_push_unit_type(const std::string& type) {
+  return type == "DEFENDER" || type == "SWORDMAN" || type == "SWORDSMAN" ||
+      type == "RIDER" || type == "WARRIOR" || type == "DAGGER" ||
+      type == "KNIGHT" || type == "SUPERUNIT" || type == "RAMMER" ||
+      type == "JUGGERNAUT" || type == "PIRATE";
+}
+
+bool try_push_after_lethal_attack(NativeGameState& next, NativeUnit& attacker, int target_x, int target_y) {
+  if (!melee_push_unit_type(attacker.type)) {
+    return false;
+  }
+  NativeTile* from = tile_at(next, attacker.x, attacker.y);
+  NativeTile* to = tile_at(next, target_x, target_y);
+  if (to == nullptr || to->unit_id > 0) {
+    return false;
+  }
+  if (to->terrain == "MOUNTAIN") {
+    NativeTribe* tribe = tribe_by_id(next, attacker.tribe_id);
+    if (tribe == nullptr || !has_tech(*tribe, "CLIMBING")) {
+      return false;
+    }
+  }
+  if ((to->terrain == "SHALLOW_WATER" || to->terrain == "DEEP_WATER" || to->terrain == "WATER") &&
+      !water_unit_type(attacker.type)) {
+    return false;
+  }
+  if (from != nullptr && from->unit_id == attacker.id) {
+    from->unit_id = 0;
+    sync_tile_to_payload(next, *from);
+  }
+  to->unit_id = attacker.id;
+  sync_tile_to_payload(next, *to);
+  attacker.x = target_x;
+  attacker.y = target_y;
+  set_unit_payload_field(next, attacker.id, "x", nullptr, py::int_(target_x));
+  set_unit_payload_field(next, attacker.id, "y", nullptr, py::int_(target_y));
   return true;
 }
 
@@ -1193,6 +1409,8 @@ bool apply_attack(NativeGameState& next, const NativeAction& action) {
   const double target_hp = target->current_hp_exact > 0.0 ? target->current_hp_exact : static_cast<double>(target->current_hp);
   const double attacker_attack = attacker->attack > 0.0 ? attacker->attack : unit_attack(attacker->type);
   const double target_defence = target->defence > 0.0 ? target->defence : unit_defence(target->type);
+  const int target_x = target->x;
+  const int target_y = target->y;
   const double attack_force = attacker_attack * (attacker_hp / std::max(1, attacker->max_hp));
   const double defence_force = target_defence * (target_hp / std::max(1, target->max_hp));
   const double total_damage = attack_force + defence_force;
@@ -1207,10 +1425,12 @@ bool apply_attack(NativeGameState& next, const NativeAction& action) {
   set_unit_payload_field(next, target->id, "current_hp", "hp", py::int_(target->current_hp));
   set_unit_payload_field(next, target->id, "current_hp_exact", "hpx", py::float_(target->current_hp_exact));
   if (target->current_hp <= 0) {
+    update_tribe_economy(next, target->tribe_id, 0, -unit_points(target->type));
     remove_unit_ownership_payload(next, *target);
     mark_unit_removed(next, *target);
     attacker->kills += 1;
     set_unit_payload_field(next, attacker->id, "kills", "k", py::int_(attacker->kills));
+    try_push_after_lethal_attack(next, *attacker, target_x, target_y);
   } else {
     const int distance = std::max(std::abs(attacker->x - target->x), std::abs(attacker->y - target->y));
     const bool stiff = target->type == "RAFT" || target->type == "BOMBER" || target->type == "CATAPULT" ||
@@ -1966,17 +2186,18 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
     NativeCity* city = current_tile->city_id > 0 ? city_by_id(state, current_tile->city_id) : nullptr;
     if (current_tile->terrain == "VILLAGE" || (city != nullptr && city->tribe_id != unit.tribe_id &&
         relationship_between(state, unit.tribe_id, city->tribe_id) != "TREATY")) {
+      const bool village_capture = current_tile->terrain == "VILLAGE";
       NativeAction capture;
       capture.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
           ":u" + std::to_string(unit.id) + ":capture";
       capture.type = "CAPTURE";
       capture.unit_id = unit.id;
-      capture.city_id = city == nullptr ? 0 : city->id;
+      capture.city_id = village_capture || city == nullptr ? 0 : city->id;
       capture.payload = py::dict();
       capture.payload["tribe_id"] = state.active_player_id;
       capture.payload["p"] = state.active_player_id;
-      capture.payload["target_city_id"] = city == nullptr ? -1 : city->id;
-      capture.payload["tc"] = city == nullptr ? -1 : city->id;
+      capture.payload["target_city_id"] = village_capture || city == nullptr ? -1 : city->id;
+      capture.payload["tc"] = village_capture || city == nullptr ? -1 : city->id;
       capture.payload["capture_type"] = current_tile->terrain;
       capture.payload["ct"] = current_tile->terrain;
       append_generated_action(state, actions, max_actions, std::move(capture));
@@ -2646,7 +2867,10 @@ bool apply_cancel_treaty(NativeGameState& next, const NativeAction& action) {
 }
 
 bool apply_build_embassy(NativeGameState& next, const NativeAction& action) {
-  const int target = action_int(action, "target_player_id", "tp", -1);
+  int target = action_int(action, "target_player_id", "tp", -1);
+  if (target < 0) {
+    target = action_int(action, "target_id", "targetID", -1);
+  }
   if (target < 0 || !can_build_embassy(next, next.active_player_id, target)) {
     return false;
   }
@@ -4084,12 +4308,65 @@ bool can_build_embassy(const NativeGameState& state, int owner_id, int host_id) 
   if (capital == nullptr) {
     return false;
   }
+  if (capital->tribe_id != host_id) {
+    return false;
+  }
   for (const NativeBuilding& building : capital->buildings) {
     if (building.type == "EMBASSY" && building.owner_tribe_id == owner_id) {
       return false;
     }
   }
   return true;
+}
+
+std::string build_embassy_failure_reason(const NativeGameState& state, const NativeAction& action) {
+  int target = action_int(action, "target_player_id", "tp", -1);
+  if (target < 0) {
+    target = action_int(action, "target_id", "targetID", -1);
+  }
+  const int owner_id = state.active_player_id;
+  const int action_player = action_int(action, "p", "tribe_id", -1);
+  const int action_index = action_int(action, "i", "index", -1);
+  const std::string action_context =
+      ":active=" + std::to_string(owner_id) +
+      ":target=" + std::to_string(target) +
+      ":p=" + std::to_string(action_player) +
+      ":i=" + std::to_string(action_index);
+  if (target < 0) {
+    return "missing_target" + action_context;
+  }
+  if (owner_id == target) {
+    return "self_target" + action_context;
+  }
+  const NativeTribe* owner = tribe_by_id_const(state, owner_id);
+  if (owner == nullptr) {
+    return "missing_owner:" + std::to_string(owner_id) + action_context;
+  }
+  if (!is_action_unlocked(*owner, "BUILD_EMBASSY")) {
+    return "locked_diplomacy" + action_context;
+  }
+  if (owner->stars < 5) {
+    return "stars:" + std::to_string(owner->stars) + action_context;
+  }
+  if (!tribe_met(*owner, target)) {
+    return "unmet:" + std::to_string(target) + action_context;
+  }
+  if (relationship_between(state, owner_id, target) == "WAR") {
+    return "war:" + std::to_string(target) + action_context;
+  }
+  const NativeCity* capital = capital_city_for_tribe(const_cast<NativeGameState&>(state), target);
+  if (capital == nullptr) {
+    return "missing_capital:" + std::to_string(target) + action_context;
+  }
+  if (capital->tribe_id != target) {
+    return "captured_capital:" + std::to_string(capital->id) + action_context;
+  }
+  for (const NativeBuilding& building : capital->buildings) {
+    if (building.type == "EMBASSY" && building.owner_tribe_id == owner_id) {
+      return "duplicate_embassy:" + std::to_string(capital->id) + action_context;
+    }
+  }
+  return "unknown" + action_context;
 }
 
 bool city_payload_contains(const NativeGameState& state, int city_id) {
@@ -4301,6 +4578,9 @@ NativeGameState apply_action_strict(
   }
 
   if (!applied_ok) {
+    if (type == "BUILD_EMBASSY") {
+      throw_transition_error("unsupported_or_failed_transition:" + type + ":" + build_embassy_failure_reason(next, applied));
+    }
     throw_transition_error("unsupported_or_failed_transition:" + type);
   }
 
@@ -4308,7 +4588,7 @@ NativeGameState apply_action_strict(
     return next;
   }
   const int newly_explored = reveal_from_current_assets(next);
-  if (type == "MOVE" || type == "STEP_MOVE") {
+  if (type == "MOVE" || type == "STEP_MOVE" || type == "ATTACK") {
     update_tribe_economy(next, next.active_player_id, 0, newly_explored * 5);
   }
   sync_all_tiles_to_payload(next);

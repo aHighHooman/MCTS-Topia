@@ -204,6 +204,22 @@ int unit_mobility(const std::string& type) {
   return it == values.end() ? 1 : it->second;
 }
 
+double unit_attack_value(const NativeUnit& unit) {
+  return unit.attack > 0.0 ? unit.attack : static_cast<double>(unit_attack(unit.type));
+}
+
+double unit_defence_value(const NativeUnit& unit) {
+  return unit.defence > 0.0 ? unit.defence : static_cast<double>(unit_defence(unit.type));
+}
+
+int unit_range_value(const NativeUnit& unit) {
+  return unit.range > 0 ? unit.range : unit_range(unit.type);
+}
+
+int unit_mobility_value(const NativeUnit& unit) {
+  return unit.movement > 0 ? unit.movement : unit_mobility(unit.type);
+}
+
 double unit_value(const NativeUnit& unit) {
   static const std::map<std::string, double> values = {
       {"WARRIOR", 2.0}, {"RIDER", 3.0}, {"DEFENDER", 3.0}, {"SWORDMAN", 5.5}, {"SWORDSMAN", 5.5},
@@ -218,18 +234,18 @@ double unit_value(const NativeUnit& unit) {
 
 double unit_power(const NativeUnit& unit) {
   const double hp_scale = unit.max_hp > 0 ? clamp(static_cast<double>(unit.current_hp) / unit.max_hp, 0.15, 1.20) : 1.0;
-  const double attack = unit.attack > 0.0 ? unit.attack : static_cast<double>(unit_attack(unit.type));
-  const double defence = unit.defence > 0.0 ? unit.defence : static_cast<double>(unit_defence(unit.type));
-  const double range = unit.range > 0 ? static_cast<double>(unit.range) : static_cast<double>(unit_range(unit.type));
-  const double mobility = unit.movement > 0 ? static_cast<double>(unit.movement) : static_cast<double>(unit_mobility(unit.type));
+  const double attack = unit_attack_value(unit);
+  const double defence = unit_defence_value(unit);
+  const double range = static_cast<double>(unit_range_value(unit));
+  const double mobility = static_cast<double>(unit_mobility_value(unit));
   return (1.4 * attack + 1.1 * defence + 0.45 * range + 0.30 * mobility) *
              hp_scale +
          (unit.veteran ? 0.8 : 0.0);
 }
 
 bool can_threaten(const NativeUnit& attacker, int x, int y) {
-  const int mobility = attacker.movement > 0 ? attacker.movement : unit_mobility(attacker.type);
-  const int range = attacker.range > 0 ? attacker.range : unit_range(attacker.type);
+  const int mobility = unit_mobility_value(attacker);
+  const int range = unit_range_value(attacker);
   const int threat_reach = mobility + range;
   return chebyshev(attacker.x, attacker.y, x, y) <= threat_reach;
 }
@@ -241,8 +257,8 @@ double enemy_attack_pressure_at(const NativeGameState& state, int player_id, int
       continue;
     }
     const int dist = std::max(1, chebyshev(enemy.x, enemy.y, x, y));
-    const int direct_reach = enemy.range > 0 ? enemy.range : unit_range(enemy.type);
-    const int move_attack_reach = (enemy.movement > 0 ? enemy.movement : unit_mobility(enemy.type)) + direct_reach;
+    const int direct_reach = unit_range_value(enemy);
+    const int move_attack_reach = unit_mobility_value(enemy) + direct_reach;
     double reach_bonus = 0.12;
     if (dist <= direct_reach) {
       reach_bonus = 1.15;
@@ -418,7 +434,7 @@ const NativeUnit* stronger_enemy_near(const NativeGameState& state, const Native
     if (enemy.tribe_id == unit.tribe_id || enemy.hidden || enemy.current_hp <= 0) {
       continue;
     }
-    if (can_threaten(enemy, unit.x, unit.y) && unit_attack(enemy.type) > unit_defence(unit.type)) {
+    if (can_threaten(enemy, unit.x, unit.y) && unit_attack_value(enemy) > unit_defence_value(unit)) {
       return &enemy;
     }
   }
@@ -597,18 +613,74 @@ double capture_score_tuned(const NativeAction& action, const NativeGameState& st
   return clamp(8.2 + 0.5 * city->level + (city->capital ? 2.2 : 0.0), 0.0, 10.0);
 }
 
+struct CombatForecast {
+  int attack_damage = 0;
+  int retaliation_damage = 0;
+  int attacker_hp_after = 0;
+  int defender_hp_after = 0;
+  bool defender_killed = false;
+  bool attacker_killed = false;
+  bool retaliates = false;
+};
+
+bool stiff_unit(const std::string& type) {
+  return type == "RAFT" || type == "BOMBER" || type == "CATAPULT" ||
+      type == "MIND_BENDER" || type == "CLOAK" || type == "DINGHY" ||
+      type == "JUGGERNAUT";
+}
+
+CombatForecast forecast_combat(const NativeUnit& attacker, const NativeUnit& defender) {
+  CombatForecast forecast;
+  const double attacker_hp = attacker.current_hp_exact > 0.0
+      ? attacker.current_hp_exact
+      : static_cast<double>(attacker.current_hp);
+  const double defender_hp = defender.current_hp_exact > 0.0
+      ? defender.current_hp_exact
+      : static_cast<double>(defender.current_hp);
+  const double attacker_attack = unit_attack_value(attacker);
+  const double defender_defence = unit_defence_value(defender);
+  const double attack_force = attacker_attack * (attacker_hp / std::max(1, attacker.max_hp));
+  const double defence_force = defender_defence * (defender_hp / std::max(1, defender.max_hp));
+  const double total_damage = attack_force + defence_force;
+  forecast.attack_damage = total_damage <= 0.0
+      ? 0
+      : static_cast<int>(std::round((attack_force / total_damage) * attacker_attack * 4.5));
+  forecast.retaliation_damage = total_damage <= 0.0
+      ? 0
+      : static_cast<int>(std::round((defence_force / total_damage) * defender_defence * 4.5));
+  forecast.defender_hp_after = std::max(0, defender.current_hp - forecast.attack_damage);
+  forecast.defender_killed = forecast.defender_hp_after <= 0;
+  forecast.attacker_hp_after = attacker.current_hp;
+  if (!forecast.defender_killed) {
+    const int distance = chebyshev(attacker.x, attacker.y, defender.x, defender.y);
+    forecast.retaliates =
+        distance <= std::max(1, unit_range_value(defender)) &&
+        defender_defence > 0.0 &&
+        !stiff_unit(defender.type) &&
+        attacker.type != "DAGGER" &&
+        attacker.type != "PIRATE" &&
+        forecast.retaliation_damage > 0;
+    if (forecast.retaliates) {
+      forecast.attacker_hp_after = std::max(0, attacker.current_hp - forecast.retaliation_damage);
+    }
+  }
+  forecast.attacker_killed = forecast.attacker_hp_after <= 0;
+  return forecast;
+}
+
 double attack_score_baseline(const NativeAction& action, const NativeGameState& state) {
   const NativeUnit* attacker = unit_by_id(state, action.unit_id);
   const NativeUnit* defender = unit_by_id(state, action_int(action, "target_unit_id", "tu"));
   if (attacker == nullptr || defender == nullptr) {
     return 0.0;
   }
-  const int atk = unit_attack(attacker->type);
-  const int def = unit_defence(defender->type);
-  const bool ranged = unit_range(attacker->type) > 1;
+  const double atk = unit_attack_value(*attacker);
+  const double def = unit_defence_value(*defender);
+  const int attacker_range = unit_range_value(*attacker);
+  const bool ranged = attacker_range > 1;
   if (ranged) {
-    if (unit_attack(defender->type) > unit_defence(attacker->type) &&
-        chebyshev(attacker->x, attacker->y, defender->x, defender->y) <= unit_range(defender->type)) {
+    if (unit_attack_value(*defender) > unit_defence_value(*attacker) &&
+        chebyshev(attacker->x, attacker->y, defender->x, defender->y) <= unit_range_value(*defender)) {
       return 0.0;
     }
     if (atk > def && attacker->current_hp >= defender->current_hp) {
@@ -629,32 +701,26 @@ double attack_score_tuned(const NativeAction& action, const NativeGameState& sta
     return 0.0;
   }
 
+  const CombatForecast forecast = forecast_combat(*attacker, *defender);
   const double target_value = unit_value(*defender);
   const double attacker_value = unit_value(*attacker);
-  const bool ranged = unit_range(attacker->type) > 1;
-  const double attack_ratio = static_cast<double>(unit_attack(attacker->type)) /
-      static_cast<double>(std::max(1, unit_defence(defender->type)));
-  const double hp_ratio = static_cast<double>(std::max(1, attacker->current_hp)) /
-      static_cast<double>(std::max(1, defender->current_hp));
+  const bool ranged = unit_range_value(*attacker) > 1;
+  const double defender_hp = static_cast<double>(std::max(1, defender->current_hp));
+  const double attacker_hp = static_cast<double>(std::max(1, attacker->current_hp));
+  const double damage_fraction = clamp(static_cast<double>(forecast.attack_damage) / defender_hp, 0.0, 1.4);
+  const double retaliation_fraction = clamp(static_cast<double>(forecast.retaliation_damage) / attacker_hp, 0.0, 1.4);
 
-  // This is still an approximation; the real rules/combat forecast should replace it when available.
-  const bool likely_kill = unit_attack(attacker->type) * std::max(1, attacker->current_hp) >=
-      unit_defence(defender->type) * std::max(1, defender->current_hp);
-  const double expected_damage_value = target_value * clamp(0.30 * attack_ratio + 0.20 * hp_ratio, 0.15, 1.20);
-  const double retaliation = ranged ? 0.0 : unit_power(*defender) *
-      clamp(static_cast<double>(defender->current_hp) / std::max(1, defender->max_hp), 0.2, 1.0);
-
-  double score = 1.4 + 0.65 * expected_damage_value - 0.16 * attacker_value;
-  if (likely_kill) {
-    score += 3.2 + 0.40 * target_value;
+  double score = 1.1 + 4.3 * damage_fraction + 0.28 * target_value * damage_fraction - 0.10 * attacker_value;
+  if (forecast.defender_killed) {
+    score += 3.2 + 0.45 * target_value;
   }
-  if (ranged) {
+  if (forecast.attacker_killed) {
+    score -= 5.0 + 0.40 * attacker_value;
+  } else if (forecast.retaliates) {
+    score -= 3.0 * retaliation_fraction + 0.20 * attacker_value * retaliation_fraction;
+  }
+  if (ranged && !forecast.retaliates) {
     score += 0.9;
-  } else {
-    score -= 0.42 * retaliation;
-    if (!likely_kill && attacker->current_hp < defender->current_hp) {
-      score -= 1.3;
-    }
   }
 
   const NativeTile* target_tile = tile_at(state, defender->x, defender->y);
@@ -664,9 +730,8 @@ double attack_score_tuned(const NativeAction& action, const NativeGameState& sta
       score += 1.4 + (target_city->capital ? 2.6 : 0.0);
     }
   }
-
   const double post_attack_danger = enemy_attack_pressure_at(state, player_id, defender->x, defender->y);
-  if (!ranged && post_attack_danger > 5.0 && !likely_kill) {
+  if (!ranged && post_attack_danger > 5.0 && !forecast.defender_killed) {
     score -= 1.0;
   }
   return clamp(score, 0.0, 10.0);
@@ -700,7 +765,7 @@ double move_score_baseline(const NativeAction& action, const NativeGameState& st
   for (const NativeUnit& enemy : state.units) {
     if (enemy.tribe_id != player_id && enemy.current_hp > 0 &&
         unit->current_hp >= enemy.current_hp &&
-        unit_attack(unit->type) > unit_defence(enemy.type) &&
+        unit_attack_value(*unit) > unit_defence_value(enemy) &&
         chebyshev(dx, dy, enemy.x, enemy.y) < chebyshev(unit->x, unit->y, enemy.x, enemy.y)) {
       return 3.0;
     }
@@ -746,7 +811,7 @@ double move_score_tuned(const NativeAction& action, const NativeGameState& state
     if (enemy.tribe_id == player_id || enemy.current_hp <= 0 || enemy.hidden) {
       continue;
     }
-    const bool can_fight = unit_attack(unit->type) >= unit_defence(enemy.type) && unit->current_hp >= enemy.current_hp - 2;
+    const bool can_fight = unit_attack_value(*unit) >= unit_defence_value(enemy) && unit->current_hp >= enemy.current_hp - 2;
     if (can_fight && chebyshev(dx, dy, enemy.x, enemy.y) < chebyshev(unit->x, unit->y, enemy.x, enemy.y)) {
       score += 1.1;
     }
@@ -1090,7 +1155,7 @@ double state_value_tuned(const NativeGameState& state) {
         continue;
       }
       if (can_threaten(unit, enemy.x, enemy.y)) {
-        const bool likely_kill = unit_attack(unit.type) * 2 >= enemy.current_hp || unit.current_hp >= enemy.current_hp;
+        const bool likely_kill = unit_attack_value(unit) * 2.0 >= static_cast<double>(enemy.current_hp) || unit.current_hp >= enemy.current_hp;
         attack_opportunity += (likely_kill ? 1.25 : 0.45) * unit_value(enemy);
       }
     }

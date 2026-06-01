@@ -3,6 +3,7 @@
 
 - Mixed Java/Python project for a Polytopia-like engine, bot evaluation, RL self-play, and native MCTS.
 - Java engine/rules are sourced from `C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes\src`; Python code is organized by purpose under `py/bots`, `py/nn`, `py/search`, `py/training`, and `py/profiling`.
+- Use `C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes` as the authoritative external game repo when inspecting the game/source code or running Java game entrypoints such as headless matches and tournaments.
 - Work from the repo root: `C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\Tribes_MCTS`.
 
 ## Setup Gotchas

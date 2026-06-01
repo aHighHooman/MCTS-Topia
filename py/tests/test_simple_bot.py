@@ -101,7 +101,10 @@ def test_normalize_message_expands_java_compact_payload() -> None:
                 "rank": [1],
                 "rel": [["NEUTRAL"]],
             },
-            "actions": [{"i": 0, "t": "MOVE", "u": 20, "x": 1, "y": 1}],
+            "actions": [
+                {"i": 0, "t": "MOVE", "u": 20, "x": 1, "y": 1},
+                {"i": 1, "t": "BUILD_EMBASSY", "p": 1, "tp": 2},
+            ],
             "fm": {"root": "root"},
         }
     )
@@ -117,4 +120,5 @@ def test_normalize_message_expands_java_compact_payload() -> None:
     assert message["actions"][0]["id"] == "A0"
     assert message["actions"][0]["type"] == "MOVE"
     assert message["actions"][0]["unit_id"] == 20
+    assert message["actions"][1]["target_player_id"] == 2
     assert message["forward_model"]["root"] == "root"

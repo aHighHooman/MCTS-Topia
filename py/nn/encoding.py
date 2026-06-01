@@ -990,7 +990,7 @@ def _normalize_action(action: Dict[str, Any]) -> Dict[str, Any]:
     out.setdefault("tribe_id", out.get("p", 0))
     out.setdefault("target_unit_id", out.get("tu", 0))
     out.setdefault("target_city_id", out.get("tc", 0))
-    out.setdefault("target_player_id", 0)
+    out.setdefault("target_player_id", out.get("tp", -1))
     out.setdefault("unit_type", out.get("ut"))
     out.setdefault("building_type", out.get("bt"))
     out.setdefault("resource_type", out.get("rt"))

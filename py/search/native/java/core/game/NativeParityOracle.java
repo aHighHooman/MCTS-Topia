@@ -92,6 +92,9 @@ public final class NativeParityOracle {
         if ("milestone4:units".equals(fixture)) {
             return buildMilestone4UnitFixture();
         }
+        if ("unitstats:superunit-attack".equals(fixture)) {
+            return buildSuperUnitAttackFixture();
+        }
         GameLoader loader = new GameLoader(fixture);
         GameState state = new GameState(
                 new Random(loader.getSeed()),
@@ -273,6 +276,34 @@ public final class NativeParityOracle {
         tribes[0].getTechTree().doResearchInit(Types.TECHNOLOGY.NAVIGATION);
         tribes[0].setStars(50);
         tribes[1].setStars(10);
+        board.setActiveTribeID(0);
+
+        GameState state = new GameState(random, Types.GAME_MODE.MIGHT,
+                GameState.RunDefaults.DEFAULT_GLORY_TARGET_SCORE, tribes, board, 0);
+        state.setMapType(Types.MAP_TYPE.CONTINENTS);
+        board.revealExplorationFromCurrentAssets(random);
+        return state;
+    }
+
+    private static GameState buildSuperUnitAttackFixture() {
+        Random random = new Random(20240601L);
+        Tribe[] tribes = new Tribe[]{
+                new Tribe(Types.TRIBE.IMPERIUS),
+                new Tribe(Types.TRIBE.BARDUR)
+        };
+        Board board = new Board();
+        board.init(5, tribes);
+        fillTerrain(board, 5, Types.TERRAIN.PLAIN);
+
+        City home = addCapital(board, tribes, random, 0, 1, 1);
+        City enemy = addCapital(board, tribes, random, 1, 3, 3);
+        Unit attacker = addUnit(board, home, Types.UNIT.SUPERUNIT, 2, 2);
+        attacker.setStatus(Types.TURN_STATUS.FRESH);
+        Unit defender = addUnit(board, enemy, Types.UNIT.WARRIOR, 2, 3);
+        defender.setStatus(Types.TURN_STATUS.FRESH);
+
+        tribes[0].setStars(0);
+        tribes[1].setStars(0);
         board.setActiveTribeID(0);
 
         GameState state = new GameState(random, Types.GAME_MODE.MIGHT,

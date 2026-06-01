@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 from typing import Optional
 
 from torch.utils.cpp_extension import load
@@ -13,7 +14,39 @@ from torch.utils.cpp_extension import load
 
 _NATIVE_MCTS_MODULE = None
 _MSVC_ENV_READY = False
-_BUILD_FLAGS_VERSION = "mcts-opt-v22-group-duplicate-selections"
+_BUILD_FLAGS_VERSION = "mcts-opt-v23-embassy-target-inference"
+
+
+class _BuildLock:
+    def __init__(self, path: Path, timeout_seconds: float = 120.0) -> None:
+        self.path = path
+        self.timeout_seconds = timeout_seconds
+        self.fd: int | None = None
+
+    def __enter__(self) -> "_BuildLock":
+        deadline = time.monotonic() + self.timeout_seconds
+        while True:
+            try:
+                self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                os.write(self.fd, str(os.getpid()).encode("ascii", errors="ignore"))
+                return self
+            except FileExistsError:
+                if time.monotonic() >= deadline:
+                    try:
+                        self.path.unlink()
+                    except OSError:
+                        pass
+                    continue
+                time.sleep(0.1)
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
 
 
 def _candidate_vsdevcmd_paths() -> list[Path]:
@@ -69,6 +102,20 @@ def _ensure_msvc_env() -> bool:
     return shutil.which("cl") is not None
 
 
+def _import_binary(binary: Path, build_dir: Path) -> object:
+    import_dir = build_dir / "imports"
+    import_dir.mkdir(parents=True, exist_ok=True)
+    suffix = binary.suffix
+    process_binary = import_dir / f"tribes_rl_native_mcts_{os.getpid()}{suffix}"
+    shutil.copy2(binary, process_binary)
+    spec = importlib.util.spec_from_file_location("tribes_rl_native_mcts", process_binary)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to create import spec for {process_binary}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def load_native_mcts_extension() -> Optional[object]:
     global _NATIVE_MCTS_MODULE
     if _NATIVE_MCTS_MODULE is not None:
@@ -103,42 +150,40 @@ def load_native_mcts_extension() -> Optional[object]:
         extra_ldflags = []
     flags_signature = "\n".join([_BUILD_FLAGS_VERSION, *extra_cflags, *extra_ldflags])
 
-    existing_binaries = [
-        path
-        for path in list(build_dir.glob("tribes_rl_native_mcts*.pyd")) + list(build_dir.glob("tribes_rl_native_mcts*.so"))
-        if "debug" not in path.stem
-    ]
-    existing_binary = next(iter(existing_binaries), None)
-    if (
-        existing_binary is not None
-        and existing_binary.stat().st_mtime >= source.stat().st_mtime
-        and existing_binary.stat().st_mtime >= rules_source.stat().st_mtime
-        and existing_binary.stat().st_mtime >= static_eval_source.stat().st_mtime
-        and stamp.exists()
-        and stamp.read_text(encoding="utf-8") == flags_signature
-    ):
-        spec = importlib.util.spec_from_file_location("tribes_rl_native_mcts", existing_binary)
-        if spec is not None and spec.loader is not None:
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            _NATIVE_MCTS_MODULE = module
-            return _NATIVE_MCTS_MODULE
-
-    if os.name == "nt" and not _ensure_msvc_env():
-        _NATIVE_MCTS_MODULE = None
-        return _NATIVE_MCTS_MODULE
-
+    lock_path = build_dir / "tribes_rl_native_mcts.build.lock"
     try:
-        _NATIVE_MCTS_MODULE = load(
-            name="tribes_rl_native_mcts",
-            sources=[str(source), str(rules_source), str(static_eval_source)],
-            extra_cflags=extra_cflags,
-            extra_ldflags=extra_ldflags,
-            build_directory=str(build_dir),
-            verbose=False,
-        )
-        stamp.write_text(flags_signature, encoding="utf-8")
-    except Exception as e:
+        with _BuildLock(lock_path):
+            existing_binaries = [
+                path
+                for path in list(build_dir.glob("tribes_rl_native_mcts*.pyd")) + list(build_dir.glob("tribes_rl_native_mcts*.so"))
+                if "debug" not in path.stem and path.parent == build_dir
+            ]
+            existing_binary = next(iter(existing_binaries), None)
+            if (
+                existing_binary is not None
+                and existing_binary.stat().st_mtime >= source.stat().st_mtime
+                and existing_binary.stat().st_mtime >= rules_source.stat().st_mtime
+                and existing_binary.stat().st_mtime >= static_eval_source.stat().st_mtime
+                and stamp.exists()
+                and stamp.read_text(encoding="utf-8") == flags_signature
+            ):
+                _NATIVE_MCTS_MODULE = _import_binary(existing_binary, build_dir)
+                return _NATIVE_MCTS_MODULE
+
+            if os.name == "nt" and not _ensure_msvc_env():
+                _NATIVE_MCTS_MODULE = None
+                return _NATIVE_MCTS_MODULE
+
+            _NATIVE_MCTS_MODULE = load(
+                name="tribes_rl_native_mcts",
+                sources=[str(source), str(rules_source), str(static_eval_source)],
+                extra_cflags=extra_cflags,
+                extra_ldflags=extra_ldflags,
+                build_directory=str(build_dir),
+                verbose=False,
+            )
+            stamp.write_text(flags_signature, encoding="utf-8")
+    except Exception:
         import traceback
         traceback.print_exc()
         _NATIVE_MCTS_MODULE = None
