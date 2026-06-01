@@ -920,7 +920,7 @@ class NativeMCTSTest(unittest.TestCase):
         leaf_payload = dict(selection["leaf_payload"])
         target = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 2)
 
-        self.assertEqual(target["current_hp"], 6)
+        self.assertEqual(target["current_hp"], 3)
 
     def test_native_infiltrate_transition_spawns_daggers(self) -> None:
         extension = load_native_mcts_extension()
