@@ -2314,6 +2314,69 @@ void preserve_hidden_enemy_visible_actions(
   }
 }
 
+std::pair<int, int> infer_hidden_enemy_capital_spawn_xy(const NativeGameState& state) {
+  int best_x = 0;
+  int best_y = 0;
+  int best_distance = -1;
+  int best_score = -1;
+  for (const NativeTile& tile : state.tiles) {
+    if (tile.explored) {
+      continue;
+    }
+    int nearest_root_asset = 0;
+    bool have_root_asset = false;
+    for (const NativeCity& city : state.cities) {
+      if (city.tribe_id != state.root_player_id) {
+        continue;
+      }
+      const int distance = std::abs(tile.x - city.x) + std::abs(tile.y - city.y);
+      nearest_root_asset = have_root_asset ? std::min(nearest_root_asset, distance) : distance;
+      have_root_asset = true;
+    }
+    for (const NativeUnit& unit : state.units) {
+      if (unit.tribe_id != state.root_player_id) {
+        continue;
+      }
+      const int distance = std::abs(tile.x - unit.x) + std::abs(tile.y - unit.y);
+      nearest_root_asset = have_root_asset ? std::min(nearest_root_asset, distance) : distance;
+      have_root_asset = true;
+    }
+    const int distance_score = have_root_asset ? nearest_root_asset : tile.x + tile.y;
+    const int tie_score = tile.x + tile.y;
+    if (distance_score > best_distance || (distance_score == best_distance && tie_score > best_score)) {
+      best_distance = distance_score;
+      best_score = tie_score;
+      best_x = tile.x;
+      best_y = tile.y;
+    }
+  }
+  return {best_x, best_y};
+}
+
+void append_hidden_enemy_capital_spawn_action(NativeGameState& state, std::vector<NativeAction>& actions, int max_actions) {
+  if (state.active_player_id == state.root_player_id) {
+    return;
+  }
+  NativeTribe* active_tribe = tribe_by_id(state, state.active_player_id);
+  if (active_tribe == nullptr || active_tribe->capital_id <= 0 ||
+      city_by_id(state, active_tribe->capital_id) != nullptr) {
+    return;
+  }
+  if (active_tribe->stars < unit_cost("WARRIOR") || !unit_unlocked(*active_tribe, "WARRIOR")) {
+    return;
+  }
+  const auto [x, y] = infer_hidden_enemy_capital_spawn_xy(state);
+  NativeAction spawn;
+  spawn.type = "SPAWN";
+  spawn.city_id = active_tribe->capital_id;
+  spawn.payload = py::dict();
+  spawn.payload["x"] = x;
+  spawn.payload["y"] = y;
+  spawn.payload["ut"] = "WARRIOR";
+  spawn.payload["unit_type"] = "WARRIOR";
+  append_generated_action(state, actions, max_actions, std::move(spawn));
+}
+
 void sync_observation_turn_flags(NativeGameState& state);
 std::string relationship_between(const NativeGameState& state, int from_tribe, int to_tribe);
 bool has_pending_offer(const NativeGameState& state, int from_tribe, int to_tribe);
@@ -3066,6 +3129,7 @@ void regenerate_actions(NativeGameState& state, std::vector<NativeAction>& actio
 
   state.leveling_up = false;
   state.can_end_turn = true;
+  append_hidden_enemy_capital_spawn_action(state, actions, max_actions);
   regenerate_tribe_actions(state, actions, max_actions);
   for (const NativeCity& city : state.cities) {
     if (city.tribe_id == state.active_player_id) {
