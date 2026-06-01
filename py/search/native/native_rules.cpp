@@ -271,6 +271,15 @@ NativeUnit* unit_by_id(NativeGameState& state, int id) {
   return nullptr;
 }
 
+const NativeUnit* unit_by_id_const(const NativeGameState& state, int id) {
+  for (const NativeUnit& unit : state.units) {
+    if (unit.id == id) {
+      return &unit;
+    }
+  }
+  return nullptr;
+}
+
 NativeCity* city_by_id(NativeGameState& state, int id) {
   for (NativeCity& city : state.cities) {
     if (city.id == id) {
@@ -2092,6 +2101,73 @@ int reveal_from_current_assets(NativeGameState& state) {
     }
   }
   return newly_explored;
+}
+
+int unit_reveal_radius_on_tile(const NativeGameState& state, const NativeUnit& unit, int x, int y) {
+  const NativeTile* tile = tile_at(const_cast<NativeGameState&>(state), x, y);
+  if ((tile != nullptr && tile->terrain == "MOUNTAIN") ||
+      unit.type == "SCOUT" || unit.type == "CLOAK" || unit.type == "DINGHY") {
+    return 2;
+  }
+  return 1;
+}
+
+bool tile_in_reveal_range(int source_x, int source_y, int radius, int x, int y) {
+  return std::max(std::abs(x - source_x), std::abs(y - source_y)) <= radius;
+}
+
+bool tile_revealed_by_tribe_assets(
+    const NativeGameState& state,
+    int tribe_id,
+    int x,
+    int y,
+    int excluded_unit_id) {
+  for (const NativeCity& city : state.cities) {
+    if (city.tribe_id == tribe_id && tile_in_reveal_range(city.x, city.y, 1, x, y)) {
+      return true;
+    }
+  }
+  for (const NativeUnit& unit : state.units) {
+    if (unit.id == excluded_unit_id || unit.tribe_id != tribe_id || unit.current_hp == 0) {
+      continue;
+    }
+    if (tile_in_reveal_range(unit.x, unit.y, unit_reveal_radius_on_tile(state, unit, unit.x, unit.y), x, y)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+int estimate_hidden_enemy_move_exploration_score(
+    const NativeGameState& previous,
+    const NativeGameState& next,
+    const NativeAction& action) {
+  if (previous.active_player_id == previous.root_player_id) {
+    return 0;
+  }
+  const int unit_id = action_int(action, "unit_id", "u", 0);
+  const NativeUnit* previous_unit = unit_by_id_const(previous, unit_id);
+  const NativeUnit* moved_unit = unit_by_id_const(next, unit_id);
+  if (previous_unit == nullptr || moved_unit == nullptr || moved_unit->tribe_id != previous.active_player_id) {
+    return 0;
+  }
+
+  int newly_explored = 0;
+  const int new_radius = unit_reveal_radius_on_tile(next, *moved_unit, moved_unit->x, moved_unit->y);
+  for (const NativeTile& tile : next.tiles) {
+    if (!tile_in_reveal_range(moved_unit->x, moved_unit->y, new_radius, tile.x, tile.y)) {
+      continue;
+    }
+    if (tile_revealed_by_tribe_assets(previous, previous.active_player_id, tile.x, tile.y, unit_id)) {
+      continue;
+    }
+    const int old_radius = unit_reveal_radius_on_tile(previous, *previous_unit, previous_unit->x, previous_unit->y);
+    if (tile_in_reveal_range(previous_unit->x, previous_unit->y, old_radius, tile.x, tile.y)) {
+      continue;
+    }
+    newly_explored += 1;
+  }
+  return newly_explored * 5;
 }
 
 void preserve_hidden_enemy_action_state(
@@ -4944,6 +5020,12 @@ NativeGameState apply_action_strict(
   const int newly_explored = reveal_from_current_assets(next);
   if (type == "MOVE" || type == "STEP_MOVE" || type == "ATTACK") {
     update_tribe_economy(next, next.active_player_id, 0, newly_explored * 5);
+  }
+  if (type == "MOVE" || type == "STEP_MOVE") {
+    const int hidden_enemy_score = estimate_hidden_enemy_move_exploration_score(state, next, applied);
+    if (hidden_enemy_score != 0) {
+      update_tribe_economy(next, next.active_player_id, 0, hidden_enemy_score);
+    }
   }
   if (type == "ATTACK") {
     preserve_hidden_enemy_action_state(state, actions, next);
