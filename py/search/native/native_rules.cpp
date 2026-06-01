@@ -3355,6 +3355,7 @@ void apply_end_turn_transition(NativeGameState& next) {
 
 void append_city_payload_unit(NativeGameState& state, int city_id, int unit_id);
 void append_city_payload_building(NativeGameState& state, int city_id, const NativeBuilding& building);
+void remove_city_payload_building(NativeGameState& state, int city_id, int x, int y);
 void ensure_city_payload_visible(NativeGameState& state, const NativeCity& native_city);
 void append_tribe_payload_city(NativeGameState& state, int tribe_id, int city_id);
 void sync_relationships_payload(NativeGameState& state);
@@ -3899,12 +3900,72 @@ bool apply_grow_forest(NativeGameState& next, const NativeAction& action) {
   return true;
 }
 
+bool is_monument_building(const std::string& building) {
+  static const std::set<std::string> monuments = {
+      "ALTAR_OF_PEACE", "EMPERORS_TOMB", "EYE_OF_GOD", "GATE_OF_POWER",
+      "GRAND_BAZAR", "PARK_OF_FORTUNE", "TOWER_OF_WISDOM"};
+  return monuments.count(building) > 0;
+}
+
+int destroy_population_bonus(const std::string& building) {
+  if (building == "FARM" || building == "MINE") {
+    return 2;
+  }
+  if (building == "LUMBER_HUT" || building == "PORT" ||
+      building == "TEMPLE" || building == "WATER_TEMPLE" ||
+      building == "FOREST_TEMPLE" || building == "MOUNTAIN_TEMPLE") {
+    return 1;
+  }
+  if (is_monument_building(building)) {
+    return 3;
+  }
+  return 0;
+}
+
+int destroy_score_delta(const NativeBuilding& building) {
+  int delta = -destroy_population_bonus(building.type) * 5;
+  if (building.type == "TEMPLE" || building.type == "WATER_TEMPLE" ||
+      building.type == "FOREST_TEMPLE" || building.type == "MOUNTAIN_TEMPLE") {
+    const int level = std::max(1, building.level);
+    delta -= level * 100;
+  } else if (is_monument_building(building.type)) {
+    delta -= 400;
+  }
+  return delta;
+}
+
 bool apply_destroy(NativeGameState& next, const NativeAction& action) {
   const int x = action_int(action, "x", nullptr, -1);
   const int y = action_int(action, "y", nullptr, -1);
   NativeTile* tile = tile_at(next, x, y);
   if (tile == nullptr) {
     return false;
+  }
+  NativeCity* city = city_by_id(next, action_int(action, "city_id", "c", tile->city_id));
+  if (city == nullptr && tile->city_id > 0) {
+    city = city_by_id(next, tile->city_id);
+  }
+  if (tile->resource == "RUINS") {
+    tile->resource.clear();
+    sync_tile_to_payload(next, *tile);
+    return true;
+  }
+  if (city != nullptr) {
+    auto building_it = std::find_if(city->buildings.begin(), city->buildings.end(), [&](const NativeBuilding& building) {
+      return building.x == x && building.y == y && !building.type.empty();
+    });
+    if (building_it != city->buildings.end()) {
+      const NativeBuilding removed = *building_it;
+      const int population_delta = -destroy_population_bonus(removed.type);
+      const int score_delta = destroy_score_delta(removed);
+      city->population += population_delta;
+      city->points_worth += score_delta;
+      set_city_payload_field(next, city->id, "population", "pop", py::int_(city->population));
+      set_city_payload_field(next, city->id, "points_worth", "pts", py::int_(city->points_worth));
+      update_tribe_economy(next, city->tribe_id, 0, score_delta);
+      city->buildings.erase(building_it);
+      remove_city_payload_building(next, city->id, x, y);
+    }
   }
   tile->building.clear();
   sync_tile_to_payload(next, *tile);
@@ -4300,6 +4361,47 @@ void append_city_payload_building(NativeGameState& state, int city_id, const Nat
     city["b"] = buildings;
     if (city.contains("buildings")) {
       city.attr("pop")("buildings");
+    }
+    return;
+  }
+}
+
+py::list remove_building_from_payload_list(const py::handle& value, int x, int y) {
+  py::list output;
+  if (!py::isinstance<py::list>(value)) {
+    return output;
+  }
+  py::list buildings = py::reinterpret_borrow<py::list>(value);
+  for (const auto& item : buildings) {
+    if (py::isinstance<py::dict>(item)) {
+      py::dict building = py::reinterpret_borrow<py::dict>(item);
+      if (read_int(building, "x", 0) == x && read_int(building, "y", 0) == y) {
+        continue;
+      }
+    }
+    output.append(item);
+  }
+  return output;
+}
+
+void remove_city_payload_building(NativeGameState& state, int city_id, int x, int y) {
+  if (!state.observation.contains("cities") || !py::isinstance<py::list>(state.observation["cities"])) {
+    return;
+  }
+  py::list cities = py::reinterpret_borrow<py::list>(state.observation["cities"]);
+  for (const auto& item : cities) {
+    if (!py::isinstance<py::dict>(item)) {
+      continue;
+    }
+    py::dict city = py::reinterpret_borrow<py::dict>(item);
+    if (read_int(city, "id", 0) != city_id) {
+      continue;
+    }
+    if (city.contains("b")) {
+      city["b"] = remove_building_from_payload_list(city["b"], x, y);
+    }
+    if (city.contains("buildings")) {
+      city["buildings"] = remove_building_from_payload_list(city["buildings"], x, y);
     }
     return;
   }
