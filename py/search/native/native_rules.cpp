@@ -2967,6 +2967,7 @@ void append_city_payload_unit(NativeGameState& state, int city_id, int unit_id);
 void append_city_payload_building(NativeGameState& state, int city_id, const NativeBuilding& building);
 void ensure_city_payload_visible(NativeGameState& state, const NativeCity& native_city);
 void append_tribe_payload_city(NativeGameState& state, int tribe_id, int city_id);
+void sync_relationships_payload(NativeGameState& state);
 
 bool apply_propose_peace(NativeGameState& next, const NativeAction& action) {
   const int target = action_int(action, "target_player_id", "tp", -1);
@@ -3305,6 +3306,34 @@ bool apply_resource_gathering(NativeGameState& next, const NativeAction& action)
   return true;
 }
 
+void reveal_known_capital_for_tribe(NativeGameState& state, NativeTribe& observer, int target_tribe_id) {
+  if (target_tribe_id == observer.id) {
+    return;
+  }
+  NativeCity* capital = capital_city_for_tribe(state, target_tribe_id);
+  if (capital == nullptr) {
+    return;
+  }
+  if (std::find(
+          observer.known_capital_tribe_ids.begin(),
+          observer.known_capital_tribe_ids.end(),
+          target_tribe_id) == observer.known_capital_tribe_ids.end()) {
+    observer.known_capital_tribe_ids.push_back(target_tribe_id);
+  }
+  ensure_city_payload_visible(state, *capital);
+  set_city_payload_field(state, capital->id, "bound", nullptr, py::int_(0));
+  NativeTile* tile = tile_at(state, capital->x, capital->y);
+  if (tile == nullptr) {
+    return;
+  }
+  tile->explored = true;
+  tile->city_id = capital->id;
+  tile->territory_city_id = capital->id;
+  tile->terrain = "CITY";
+  tile->road = true;
+  sync_tile_to_payload(state, *tile);
+}
+
 bool apply_research(NativeGameState& next, const NativeAction& action) {
   const int tribe_id = action_int(action, "tribe_id", "p", next.active_player_id);
   const std::string tech = action_string(action, "tech");
@@ -3327,6 +3356,18 @@ bool apply_research(NativeGameState& next, const NativeAction& action) {
   }
   const int cost = 4 + tech_tier(tech) * std::max(1, city_count);
   update_tribe_economy(next, tribe_id, -cost, tech_tier(tech) * 100);
+  if (tech == "DIPLOMACY") {
+    std::vector<int> met_tribes = tribe->met_tribe_ids;
+    for (int met_tribe_id : met_tribes) {
+      reveal_known_capital_for_tribe(next, *tribe, met_tribe_id);
+    }
+    for (size_t index = 0; index < next.relationships.size(); ++index) {
+      if (index < next.relationships[index].size() && next.relationships[index][index].empty()) {
+        next.relationships[index][index] = "PEACE";
+      }
+    }
+    sync_relationships_payload(next);
+  }
   return true;
 }
 
