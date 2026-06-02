@@ -1,259 +1,230 @@
-# TribesTopia for Bots
+# Tribes MCTS
 
-`TribesTopia-for-bots` is a local Java clone of *The Battle of Polytopia* built for bot development, self-play, and tournament evaluation.
+`Tribes_MCTS` is the Python, RL, profiling, and native-search workspace for a Polytopia-like bot stack. It does not own the Java game rules source; Java is compiled from the sibling game checkout and this repo layers bots, neural-network encoding, self-play, profiling, and native MCTS work on top.
 
-The project started from the open-source `Tribes` codebase and has been heavily modified toward current Polytopia parity for regular-tribe play. The main use case is not shipping a game to end users; it is running fast, reproducible games for AI experiments.
+The default local layout is:
 
-## What Is In This Repo
+```text
+C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\Tribes_MCTS
+C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes
+```
 
-- A Java game engine for Polytopia-style turn-based play
-- GUI and headless single-game runners
-- A headless tournament runner with deterministic seeding, retries, and Elo tracking
-- External bot process support for Python/RL agents
-- MCTS+NN profiling entrypoints under `py/profiling/`
-- Regression tests focused on current rules parity
+Set `$env:TRIBES_GAME_ROOT` if the Java game checkout lives somewhere else.
 
-## Current Scope
+## What Is Here
 
-The repo is closest to current Polytopia for regular tribes and standard shared mechanics.
+- Python external bots under `py/bots/`
+- Neural-network model, observation/action encoding, belief state, and augmentation under `py/nn/`
+- Search configuration and native/static/hybrid MCTS under `py/search/`
+- RL self-play, replay handling, static bootstrap generation, and training under `py/training/`
+- MCTS and MCTS+NN profilers under `py/profiling/`
+- Native C++ transition/search code under `py/search/native/`
+- Focused Python tests under `py/tests/`
+- JSON configs for single games, tournaments, profilers, and bot evaluation
+- Docs for the external bot protocol and architecture notes under `docs/`
 
-Important current limitations:
+The Java rules, game runners, tournament runner, and broad regression harness are sourced from:
 
-- special tribes are still not exact/current
-- map generation is closer to live Polytopia than stock Tribes, but not proven exact in every detail
-- this repo intentionally does not implement every official game mode
+```text
+$TRIBES_GAME_ROOT\src
+```
 
-## Repository Layout
+By default, that is:
 
-- Java source comes from `C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes\src` by default
-- `py/bots/`: launchable external bots
-- `py/nn/`: model, observation encoding, belief state, and NN bot agent code
-- `py/search/`: MCTS config plus native/static search implementation
-- `py/training/`: self-play, replay, checkpoint tournaments, and training loop
-- `py/profiling/`: primary MCTS+NN profilers and profiler configs
-- `play.json`: config for a single game
-- `tournament.json`: config for tournaments
-- `levels/`: CSV map files
-- `lib/json.jar`: JSON dependency
-- `terrainProbs.json`: generated-map terrain/resource probabilities
-- external `src/core/game/RegressionHarness.java`: regression suite
-
-Generated directories are ignored by Git:
-
-- `out/`
-- `save/`
-- `logs/`
-- `tmp/`
+```text
+C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes\src
+```
 
 ## Requirements
 
 - Windows with PowerShell
-- JDK 21 installed
-- `JAVA_HOME` set to the JDK 21 install, for example `C:\Users\Umair\AppData\Local\Programs\Java\jdk-21`
+- JDK 21 with `JAVA_HOME` set
+- Python with the project dependencies installed, including PyTorch for NN/native-extension workflows
+- `lib/json.jar` in either `$TRIBES_GAME_ROOT\lib\json.jar` or this repo's `lib/json.jar`
 
-## Standalone RL Repo
+Use explicit Java tools when running commands manually:
 
-This copy is intended to be worked from directly at:
-
-```text
-C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\Tribes_MCTS
+```powershell
+& "$env:JAVA_HOME\bin\javac.exe" ...
+& "$env:JAVA_HOME\bin\java.exe" ...
 ```
 
-The RL workflow keeps the original root-relative layout: Python code lives under
-`py/`, Java headless self-play builds into this repo's `out/`, and local training
-state lives under `rl/`. The Java game source is compiled from:
-
-```text
-C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes
-```
-
-Set `$env:TRIBES_GAME_ROOT` to point at a different game checkout. The `rl/`
-directory is intentionally ignored by Git because it holds large local
-checkpoints, replay shards, metrics, and run logs.
-
-Before running Python commands from a fresh PowerShell session:
+Before Python commands in a fresh shell:
 
 ```powershell
 $env:PYTHONPATH = "$PWD\py"
 ```
 
-Main RL entrypoints:
+## Build Java
 
-```powershell
-python -m training.train --checkpoint rl/checkpoints/latest.pt
-python -m profiling.mcts_search --config py/profiling/configs/mcts_search.json
-python -m profiling.selfplay_mcts_nn --config py/profiling/configs/selfplay_mcts_nn.json
-python -m pytest py/tests
-```
-
-## Build
-
-Run from the repo root:
+Compile the external Java game source into this repo's `out/` directory:
 
 ```powershell
 .\scripts\build_java.ps1
 ```
 
-## Run A Single Game
+The script reads Java sources from `$env:TRIBES_GAME_ROOT` when set, otherwise from the default sibling checkout.
 
-### GUI
+## Run Java Entry Points
 
-Uses `play.json`:
-
-```powershell
-& "$env:JAVA_HOME\bin\java.exe" -cp "out;lib/json.jar" Play
-```
-
-### Headless
-
-Also uses `play.json`:
+Single headless game using `play.json`:
 
 ```powershell
 & "$env:JAVA_HOME\bin\java.exe" -cp "out;lib/json.jar" HeadlessPlay
 ```
 
-You can pass a custom config file to either runner:
+Single headless game with an explicit config:
 
 ```powershell
-& "$env:JAVA_HOME\bin\java.exe" -cp "out;lib/json.jar" HeadlessPlay my_play_config.json
+& "$env:JAVA_HOME\bin\java.exe" -cp "out;lib/json.jar" HeadlessPlay play.json
 ```
 
-## Run A Tournament
-
-Tournaments are headless only.
-
-Default config:
+Tournament:
 
 ```powershell
-& "$env:JAVA_HOME\bin\java.exe" -cp "out;lib/json.jar" Tournament
+& "$env:JAVA_HOME\bin\java.exe" -cp "out;lib/json.jar" Tournament tournament.json
 ```
 
-Custom config:
+Java regression harness:
 
 ```powershell
-& "$env:JAVA_HOME\bin\java.exe" -cp "out;lib/json.jar" Tournament my_tournament.json
+& "$env:JAVA_HOME\bin\java.exe" -cp "out;lib/json.jar" core.game.RegressionHarness
 ```
 
-## MCTS+NN Profiling
-
-The main performance tools live under `py/profiling/`:
+## Python Tests
 
 ```powershell
-python -m profiling.mcts_search --config py/profiling/configs/mcts_search.json --evaluator static
-python -m profiling.mcts_search --config py/profiling/configs/mcts_search.json --evaluator nn
+$env:PYTHONPATH = "$PWD\py"
+python -m pytest py/tests
+```
+
+These tests cover Python bots, self-play config, observation/belief helpers, MCTS profiler behavior, replay augmentation, and focused native MCTS parity.
+
+## Native MCTS
+
+Native sources live in `py/search/native/`. The extension is built through PyTorch C++ extension tooling when `load_native_mcts_extension()` is first used; build caches are intentionally ignored under `py/search/native/.build*/`.
+
+Useful native files:
+
+- `py/search/native/native_rules.cpp`: native transition/rules implementation
+- `py/search/native/native_mcts.cpp`: native MCTS binding/search code
+- `py/search/native/static_mcts.py`: Python static MCTS wrapper
+- `py/search/native/hybrid_mcts.py`: hybrid NN-guided search wrapper
+- `py/search/native/parity_runner.py`: Java-vs-native parity checker
+- `py/search/native/java/core/game/NativeParityOracle.java`: Java oracle used by parity checks
+
+Run a parity check against a saved fixture:
+
+```powershell
+$env:PYTHONPATH = "$PWD\py"
+python -m search.native.parity_runner --fixture debug-logs\some-fixture\game.json --depth 1
+```
+
+Common debug flags:
+
+```powershell
+python -m search.native.parity_runner --fixture debug-logs\some-fixture\game.json --action-id 12 --trace-dir debug-logs\native-traces
+python -m search.native.parity_runner --fixture debug-logs\some-fixture\game.json --depth 2 --keep-going
+```
+
+## Profiling
+
+Profiler entrypoints are config-driven. Edit the JSON files, then run the modules without extra CLI flags.
+
+MCTS search profiler:
+
+```powershell
+$env:PYTHONPATH = "$PWD\py"
+python -m profiling.mcts_search --config py/profiling/configs/mcts_search.json
+```
+
+MCTS+NN self-play profiler:
+
+```powershell
+$env:PYTHONPATH = "$PWD\py"
 python -m profiling.selfplay_mcts_nn --config py/profiling/configs/selfplay_mcts_nn.json
 ```
 
-Config keys use the same names as CLI flags, with dashes written as underscores.
-CLI arguments override config values.
+Important config files:
 
-## `play.json`
+- `py/profiling/configs/mcts_search.json`
+- `py/profiling/configs/selfplay_mcts_nn.json`
 
-The main fields are:
+Profiler output normally goes under `debug-logs/`.
 
-- `Run Mode`: `PlayLG`, `PlayFile`, or `Replay`
-- `Game Mode`: `Perfection`, `Domination`, `Glory`, or `Might`
-- `Map Type`: `Drylands`, `Lakes`, `Continents`, `Pangea`, `Archipelago`, `Water World`
-- `Map Size`: `Tiny`, `Small`, `Normal`, `Large`, `Huge`, `Massive`
-- `Players`: player types for a single game
-- `Tribes`: tribe assignment for those players
+## RL And Training
 
-Player names currently supported by external `src/Run.java`:
+Training state is local and ignored under `rl/`. That directory can contain checkpoints, replay shards, metrics, TensorBoard logs, and generated plots.
 
-- `Human`
-- `External`
-
-## `tournament.json`
-
-The tournament config uses one participant object per bot. Rotation across tribe slots is always enabled.
-
-Example shape:
-
-```json
-{
-  "Game Mode": "Might",
-  "Map Type": "Continents",
-  "Map Size": "Tiny",
-  "Repetitions": 2,
-  "Match Retry Limit": 2,
-  "Elo K Factor": 24.0,
-  "External Log Dir": "logs/tournament",
-  "Verbose": false,
-  "Level Seeds": ["93810", "24592"],
-  "Participants": [
-    {
-      "Type": "External",
-      "Tribe": "Xin Xi",
-      "External Command": ["python", "py/bots/native_static_mcts_bot.py"]
-    },
-    {
-      "Type": "External",
-      "Tribe": "Imperius",
-      "External Command": ["python", "py/bots/simple_bot.py"]
-    }
-  ]
-}
-```
-
-External bot example:
-
-```json
-{
-  "Type": "External",
-  "Tribe": "Xin Xi",
-  "External Command": ["python", "py/bots/my_bot.py"]
-}
-```
-
-Tournament behavior:
-
-- deterministic game and agent seeds per scheduled matchup
-- bounded retries for failed matches
-- optional external-bot logging under `logs/tournament`
-- summary output with win rate, Elo, score, techs, cities, and production
-
-## Regression Tests
-
-Compile and run:
+Main entrypoints:
 
 ```powershell
-$gameRoot = if ($env:TRIBES_GAME_ROOT) { $env:TRIBES_GAME_ROOT } else { 'C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes' }
-$sources = Join-Path (Get-Location) 'sources.txt'
-Get-ChildItem -Recurse (Join-Path $gameRoot 'src') -Filter *.java | % FullName | Set-Content -LiteralPath $sources
-if (Test-Path out) { Remove-Item -LiteralPath out -Recurse -Force }
-mkdir out | Out-Null
-$jsonJar = Join-Path $gameRoot 'lib\json.jar'
-if (-not (Test-Path $jsonJar)) { $jsonJar = 'lib/json.jar' }
-& "$env:JAVA_HOME\bin\javac.exe" -cp $jsonJar -d out @$sources
-& "$env:JAVA_HOME\bin\java.exe" -cp "out;$jsonJar" core.game.RegressionHarness
-Remove-Item -LiteralPath $sources -Force
+$env:PYTHONPATH = "$PWD\py"
+python -m training.generate_static_bootstrap_replay --games 10 --augment-symmetries
+python -m training.pretrain_static
+python -m training.train
+python -m training.checkpoint_tournament
 ```
 
-At the time of writing, the harness passes:
+Core training defaults live in `py/training/config.py`. Model/search defaults live in `py/search/config.py`.
 
-- `67/67`
+When encoded features change, keep these in sync:
 
-## Notes On Parity
+- `py/nn/encoding.py`
+- `py/search/config.py`
+- `py/nn/model.py`
+- tests that assert tensor/action dimensions
 
-This repo is aiming at the newest Polytopia rules for regular tribes.
+## External Bots
 
-Recent parity changes include:
+The Java game talks to Python bots with a JSON stdin/stdout protocol. See:
 
-- current regular tech tree
-- updated tribe starts and starting stars
-- current roads, bridges, ports, markets, and lighthouse behavior
-- current ruin rewards
-- removal of obsolete custom star-sending
-- removal of the non-Polytopia standalone `Declare War` action
+```text
+docs/external-bot-protocol.md
+```
 
-Still worth treating as active parity work:
+Bot scripts currently include:
 
-- exact map generation details
-- special tribes
-- any remaining hidden-information or tournament-quality bot tuning
+- `py/bots/random_bot.py`
+- `py/bots/simple_bot.py`
+- `py/bots/native_static_mcts_bot.py`
+- `py/bots/hybrid_nn_bot.py`
+
+External bot action ids are request-scoped. Do not store an action id and reuse it on a later request.
+
+## Important Configs And Data
+
+- `play.json`: single-game config
+- `tournament.json`: default tournament config
+- `tournament_static_eval_ab.json`: static evaluator A/B tournament config
+- `tournament_static_eval_ab_swapped.json`: swapped-side A/B tournament config
+- `tournament_static_mcts_iterations.json`: static MCTS iteration tournament config
+- `levels/`: CSV levels and test maps
+- `terrainProbs.json`: terrain/resource probability data
+
+## Generated Local State
+
+These directories are intentionally ignored and can be regenerated or treated as local run output:
+
+- `out/`
+- `save/`
+- `logs/`
+- `debug-logs/`
+- `tmp/`
+- `rl/`
+- `.pytest_cache/`
+- `py/search/native/.build*/`
+
+## Development Notes
+
+- Java rules are authoritative; Python bots and RL should consume legal actions from Java.
+- Observation and forward-model states are player-specific hidden-information copies, not omniscient game state.
+- Requested bot/search/training behavior should become the default behavior unless a flag is explicitly needed.
+- Native transition changes should be compared against Java behavior with focused parity coverage.
+- Prefer adding parity fixtures or targeted `py/tests/test_native_mcts.py` coverage when fixing native rules.
 
 ## Credits
 
 This project builds on the `Tribes` research framework:
 
-- Diego Perez Liebana, Yu-Jhen Hsu, Stavros Emmanouilidis, Bobby Khaleque, Raluca Gaina, *Tribes: A New Turn-Based Strategy Game for AI*, AIIDE 2020
+Diego Perez Liebana, Yu-Jhen Hsu, Stavros Emmanouilidis, Bobby Khaleque, Raluca Gaina, *Tribes: A New Turn-Based Strategy Game for AI*, AIIDE 2020.
