@@ -2026,6 +2026,94 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(status, 0)
 
+    def test_java_parity_milestone3_city_build_farm_triggers_level_up_actions(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "milestone3:city",
+                    "--depth",
+                    "2",
+                    "--max-states",
+                    "24",
+                    "--max-actions-per-state",
+                    "24",
+                    "--action-id",
+                    "s15_A9",
+                    "--max-actions",
+                    "512",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
+    def test_java_parity_milestone3_tribe_war_preserves_outgoing_peace_offer(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "milestone3:tribe-war",
+                    "--depth",
+                    "2",
+                    "--max-states",
+                    "24",
+                    "--max-actions-per-state",
+                    "24",
+                    "--action-id",
+                    "s15_A8",
+                    "--max-actions",
+                    "512",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
+    def test_java_parity_milestone3_tribe_war_hidden_offer_preserves_enemy_actions(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "milestone3:tribe-war",
+                    "--depth",
+                    "2",
+                    "--max-states",
+                    "24",
+                    "--max-actions-per-state",
+                    "24",
+                    "--action-id",
+                    "s16_A12",
+                    "--max-actions",
+                    "512",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
+    def test_java_parity_milestone3_tribe_war_hidden_road_stays_masked(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "milestone3:tribe-war",
+                    "--depth",
+                    "2",
+                    "--max-states",
+                    "24",
+                    "--max-actions-per-state",
+                    "24",
+                    "--action-id",
+                    "s16_A0",
+                    "--max-actions",
+                    "512",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
     def test_java_parity_milestone3_tribe_peace_build_embassy_hidden_capital(self) -> None:
         status = run_parity(
             parse_args(

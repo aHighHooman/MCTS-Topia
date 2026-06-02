@@ -458,7 +458,8 @@ void sync_tile_to_payload(NativeGameState& state, const NativeTile& tile) {
   }
   set_matrix_cell(board, "city", tile.x, tile.y, py::int_(visible_city_id));
   set_matrix_cell(board, "unit", tile.x, tile.y, py::int_(visible_unit_id));
-  set_matrix_cell(board, "road", tile.x, tile.y, py::int_(tile.road ? 1 : 0));
+  const bool visible_road = tile.explored && tile.road;
+  set_matrix_cell(board, "road", tile.x, tile.y, py::int_(visible_road ? 1 : 0));
   set_matrix_cell(board, "exp", tile.x, tile.y, py::int_(tile.explored ? 1 : 0));
   if (board.contains("tiles") && py::isinstance<py::list>(board["tiles"])) {
     py::list rows = py::reinterpret_borrow<py::list>(board["tiles"]);
@@ -471,7 +472,7 @@ void sync_tile_to_payload(NativeGameState& state, const NativeTile& tile) {
         out["building"] = building_value;
         out["city_id"] = visible_city_id;
         out["unit_id"] = visible_unit_id;
-        out["road"] = tile.road;
+        out["road"] = visible_road;
         out["explored"] = tile.explored;
         if (out.contains("visible")) {
           out.attr("pop")("visible");
@@ -844,6 +845,18 @@ int building_cost(const std::string& type) {
       {"WATER_TEMPLE", 20}, {"FOREST_TEMPLE", 15}, {"MOUNTAIN_TEMPLE", 20}, {"EMBASSY", 5}};
   auto it = costs.find(type);
   return it == costs.end() ? 0 : it->second;
+}
+
+int building_population_bonus(const std::string& type) {
+  if (type == "FARM" || type == "MINE") {
+    return 2;
+  }
+  if (type == "LUMBER_HUT" || type == "PORT" ||
+      type == "TEMPLE" || type == "WATER_TEMPLE" ||
+      type == "FOREST_TEMPLE" || type == "MOUNTAIN_TEMPLE") {
+    return 1;
+  }
+  return 0;
 }
 
 int resource_cost(const std::string& type) {
@@ -2241,7 +2254,15 @@ void preserve_hidden_enemy_action_state(
     }
     const NativeAction& prior = previous_actions[action_index];
     const std::string type = canonical_action_type(prior);
+    if (type == "BUILD_ROAD" && !has_tech(*next_active_tribe, "ROADS")) {
+      next_active_tribe->researched_tech_ids.push_back(tech_id("ROADS"));
+    }
     if (type == "SPAWN") {
+      const std::string unit_type = action_string(prior, "unit_type", "ut");
+      const std::string required_tech = unit_required_tech(unit_type);
+      if (!required_tech.empty() && !has_tech(*next_active_tribe, required_tech)) {
+        next_active_tribe->researched_tech_ids.push_back(tech_id(required_tech));
+      }
       const int city_id = prior.city_id > 0 ? prior.city_id : action_int(prior, "city_id", "c", 0);
       if (city_id <= 0 || city_by_id(next, city_id) != nullptr) {
         continue;
@@ -2269,6 +2290,16 @@ void preserve_hidden_enemy_action_state(
       if (std::find(next_active_tribe->city_ids.begin(), next_active_tribe->city_ids.end(), city_id) ==
           next_active_tribe->city_ids.end()) {
         next_active_tribe->city_ids.push_back(city_id);
+      }
+      for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+          NativeTile* tile = tile_at(next, city_x + dx, city_y + dy);
+          if (tile == nullptr || tile->explored || tile->city_id > 0) {
+            continue;
+          }
+          tile->city_id = city.id;
+          tile->territory_city_id = city.id;
+        }
       }
       continue;
     }
@@ -3835,13 +3866,13 @@ bool apply_build(NativeGameState& next, const NativeAction& action) {
   city->buildings.push_back(native_building);
   append_city_payload_building(next, city_id, native_building);
   update_tribe_economy(next, city->tribe_id, -building_cost(building), 0);
-  if (building == "LUMBER_HUT" || building == "FOREST_TEMPLE" || building == "TEMPLE" ||
-      building == "WATER_TEMPLE" || building == "MOUNTAIN_TEMPLE") {
-    city->population += 1;
+  const int population_bonus = building_population_bonus(building);
+  if (population_bonus > 0) {
+    city->population += population_bonus;
     set_city_payload_field(next, city_id, "population", "pop", py::int_(city->population));
-    city->points_worth += 5;
+    city->points_worth += population_bonus * 5;
     set_city_payload_field(next, city_id, "points_worth", "pts", py::int_(city->points_worth));
-    update_tribe_economy(next, city->tribe_id, 0, 5);
+    update_tribe_economy(next, city->tribe_id, 0, population_bonus * 5);
   }
   if (building == "FOREST_TEMPLE" || building == "TEMPLE" ||
       building == "WATER_TEMPLE" || building == "MOUNTAIN_TEMPLE") {
@@ -4756,16 +4787,40 @@ void clear_pending_offer(NativeGameState& state, int from_tribe, int to_tribe) {
 }
 
 void infer_pending_offers_from_actions(NativeGameState& state, const std::vector<NativeAction>& actions) {
+  std::set<std::pair<std::string, int>> present_targeted_actions;
   for (const NativeAction& action : actions) {
     const std::string type = canonical_action_type(action);
     const int target = action_int(action, "target_player_id", "tp", -1);
     if (target < 0) {
       continue;
     }
+    present_targeted_actions.insert({type, target});
     if (type == "ACCEPT_PEACE") {
       set_pending_offer(state, target, state.active_player_id, "PEACE");
     } else if (type == "ACCEPT_TREATY") {
       set_pending_offer(state, target, state.active_player_id, "TREATY");
+    }
+  }
+  const NativeTribe* active_tribe = tribe_by_id_const(state, state.active_player_id);
+  if (active_tribe == nullptr) {
+    return;
+  }
+  for (const NativeTribe& target_tribe : state.tribes) {
+    const int target = target_tribe.id;
+    if (target == state.active_player_id) {
+      continue;
+    }
+    if (is_action_unlocked(*active_tribe, "PROPOSE_PEACE") &&
+        relationship_between(state, state.active_player_id, target) == "WAR" &&
+        present_targeted_actions.find({"PROPOSE_PEACE", target}) == present_targeted_actions.end() &&
+        !has_pending_offer(state, target, state.active_player_id)) {
+      set_pending_offer(state, state.active_player_id, target, "PEACE");
+    }
+    if (is_action_unlocked(*active_tribe, "PROPOSE_TREATY") &&
+        relationship_between(state, state.active_player_id, target) == "PEACE" &&
+        present_targeted_actions.find({"PROPOSE_TREATY", target}) == present_targeted_actions.end() &&
+        !has_pending_offer(state, target, state.active_player_id)) {
+      set_pending_offer(state, state.active_player_id, target, "TREATY");
     }
   }
 }
