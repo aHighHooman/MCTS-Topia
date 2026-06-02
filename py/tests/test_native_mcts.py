@@ -184,6 +184,74 @@ def _message_with_infiltrate() -> dict:
     return message
 
 
+def _message_with_research(tech: str, researched_tech_ids: list[str], stars: int, city_positions: list[tuple[int, int]]) -> dict:
+    size = 5
+    tiles = [
+        [
+            {
+                "x": x,
+                "y": y,
+                "visible": True,
+                "explored": True,
+                "terrain": "PLAIN",
+            }
+            for x in range(size)
+        ]
+        for y in range(size)
+    ]
+    cities = []
+    city_ids: list[int] = []
+    for index, (x, y) in enumerate(city_positions):
+        city_id = 10 + index
+        city_ids.append(city_id)
+        cities.append(
+            {
+                "id": city_id,
+                "tribe_id": 0,
+                "x": x,
+                "y": y,
+                "level": 1,
+                "population": 0,
+                "population_need": 2,
+                "production": 2,
+                "is_capital": index == 0,
+                "has_walls": False,
+            }
+        )
+        tiles[y][x]["terrain"] = "CITY"
+        tiles[y][x]["city_id"] = city_id
+
+    return normalize_message(
+        {
+            "player_id": 0,
+            "observation": {
+                "active_player_id": 0,
+                "tick": 0,
+                "can_end_turn": True,
+                "board": {
+                    "size": size,
+                    "tiles": tiles,
+                },
+                "units": [],
+                "cities": cities,
+                "tribes": [
+                    {
+                        "id": 0,
+                        "stars": stars,
+                        "score": 0,
+                        "researched_tech_ids": researched_tech_ids,
+                        "cities": city_ids,
+                        "extra_units": [],
+                    }
+                ],
+            },
+            "actions": [
+                {"id": "research", "type": "RESEARCH", "tribe_id": 0, "p": 0, "tech": tech}
+            ],
+        }
+    )
+
+
 def _message_with_village_and_ruin_choices() -> dict:
     message = _message()
     observation = message["observation"]
@@ -619,6 +687,46 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertEqual(unit["max_hp"], 5)
         self.assertEqual(unit["current_hp"], 5)
         self.assertEqual(unit["movement"], 2)
+
+    def test_native_research_applies_philosophy_discount(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message_with_research(
+            "CLIMBING",
+            ["PHILOSOPHY"],
+            20,
+            [(1, 1), (3, 3)],
+        )
+        tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
+
+        selection = dict(tree.select_leaf(4, 1.5))
+        leaf_payload = dict(selection["leaf_payload"])
+        tribe = next(item for item in leaf_payload["observation"]["tribes"] if item["id"] == 0)
+
+        self.assertEqual(tribe["stars"], 16)
+        self.assertEqual(tribe["score"], 100)
+        self.assertEqual(sorted(tribe["researched_tech_ids"]), ["climbing", "philosophy"])
+
+    def test_native_research_unlocks_tower_of_wisdom_when_tree_is_complete(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        researched = [tech for tech in TECH_TYPES if tech != "PHILOSOPHY"]
+        message = _message_with_research(
+            "PHILOSOPHY",
+            researched,
+            20,
+            [(1, 1)],
+        )
+        tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
+
+        selection = dict(tree.select_leaf(4, 1.5))
+        leaf_payload = dict(selection["leaf_payload"])
+        tribe = next(item for item in leaf_payload["observation"]["tribes"] if item["id"] == 0)
+
+        self.assertEqual(tribe["stars"], 13)
+        self.assertEqual(tribe["score"], 300)
+        self.assertEqual(sorted(tribe["researched_tech_ids"]), sorted(tech.lower() for tech in TECH_TYPES))
+        self.assertEqual(tribe["monuments"]["TOWER_OF_WISDOM"], "AVAILABLE")
 
     def test_strict_native_tree_rejects_missing_required_tile_field(self) -> None:
         extension = load_native_mcts_extension()

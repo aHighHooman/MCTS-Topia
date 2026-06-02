@@ -871,8 +871,37 @@ int tech_tier(const std::string& tech) {
       {"AQUATISM", 3}, {"CHIVALRY", 3}, {"CONSTRUCTION", 3}, {"DIPLOMACY", 3},
       {"MATHEMATICS", 3}, {"NAVIGATION", 3}, {"SMITHERY", 3}, {"SPIRITUALISM", 3},
       {"TRADE", 3}, {"PHILOSOPHY", 3}};
-  auto it = tiers.find(tech);
+  std::string normalized = tech;
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
+    return static_cast<char>(std::toupper(c));
+  });
+  auto it = tiers.find(normalized);
   return it == tiers.end() ? 1 : it->second;
+}
+
+bool has_tech(const NativeTribe& tribe, const std::string& tech);
+
+bool is_everything_researched(const NativeTribe& tribe) {
+  static const std::vector<std::string> all_techs = {
+      "CLIMBING", "FISHING", "HUNTING", "ORGANIZATION", "RIDING", "ARCHERY", "FARMING",
+      "FORESTRY", "FREE_SPIRIT", "MEDITATION", "MINING", "ROADS", "RAMMING", "SAILING",
+      "STRATEGY", "AQUATISM", "CHIVALRY", "CONSTRUCTION", "DIPLOMACY", "MATHEMATICS",
+      "NAVIGATION", "SMITHERY", "SPIRITUALISM", "TRADE", "PHILOSOPHY"};
+  for (const std::string& tech : all_techs) {
+    if (!has_tech(tribe, tech)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void sync_tribe_monuments_payload(NativeGameState& state, const NativeTribe& tribe) {
+  py::dict monuments;
+  for (const auto& entry : tribe.monuments) {
+    monuments[py::str(entry.first)] = py::str(entry.second);
+  }
+  set_tribe_payload_field(state, tribe.id, "monuments", monuments);
+  set_tribe_payload_field(state, tribe.id, "mon", monuments);
 }
 
 int next_unit_id(const NativeGameState& state) {
@@ -3726,6 +3755,7 @@ bool apply_research(NativeGameState& next, const NativeAction& action) {
   if (tribe == nullptr || tech.empty()) {
     return false;
   }
+  const bool had_philosophy = has_tech(*tribe, "PHILOSOPHY");
   if (std::find(tribe->researched_tech_ids.begin(), tribe->researched_tech_ids.end(), tech) == tribe->researched_tech_ids.end()) {
     tribe->researched_tech_ids.push_back(tech);
     std::sort(tribe->researched_tech_ids.begin(), tribe->researched_tech_ids.end(), [](const std::string& left, const std::string& right) {
@@ -3739,7 +3769,10 @@ bool apply_research(NativeGameState& next, const NativeAction& action) {
       city_count += 1;
     }
   }
-  const int cost = 4 + tech_tier(tech) * std::max(1, city_count);
+  int cost = 4 + tech_tier(tech) * std::max(1, city_count);
+  if (had_philosophy) {
+    cost = static_cast<int>(std::ceil(cost * (2.0 / 3.0)));
+  }
   update_tribe_economy(next, tribe_id, -cost, tech_tier(tech) * 100);
   if (tech == "DIPLOMACY") {
     std::vector<int> met_tribes = tribe->met_tribe_ids;
@@ -3752,6 +3785,10 @@ bool apply_research(NativeGameState& next, const NativeAction& action) {
       }
     }
     sync_relationships_payload(next);
+  }
+  if (is_everything_researched(*tribe)) {
+    tribe->monuments["TOWER_OF_WISDOM"] = "AVAILABLE";
+    sync_tribe_monuments_payload(next, *tribe);
   }
   return true;
 }
