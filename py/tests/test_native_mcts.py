@@ -1718,6 +1718,29 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(status, 0)
 
+    def test_java_parity_milestone4_village_capture_matches_java_city_state(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "milestone4:units",
+                    "--depth",
+                    "2",
+                    "--max-states",
+                    "24",
+                    "--max-actions-per-state",
+                    "24",
+                    "--action-id",
+                    "s19_A18",
+                    "--max-actions",
+                    "512",
+                    "--no-compile-java",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
     def test_java_parity_milestone4_research_action_regeneration(self) -> None:
         status = run_parity(
             parse_args(

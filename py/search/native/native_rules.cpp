@@ -1390,7 +1390,7 @@ bool apply_capture(NativeGameState& next, const NativeAction& action) {
     new_city.population_need = 2;
     new_city.production = 1;
     new_city.bound = 1;
-    new_city.points_worth = 120;
+    new_city.points_worth = 220;
     new_city.capital = false;
     new_city.walls = false;
     next.cities.push_back(new_city);
@@ -1435,7 +1435,7 @@ bool apply_capture(NativeGameState& next, const NativeAction& action) {
       out["need"] = new_city.population_need;
       out["production"] = new_city.production;
       out["prod"] = new_city.production;
-      out["bound"] = new_city.bound;
+      out["bound"] = 0;
       out["points_worth"] = new_city.points_worth;
       out["pts"] = new_city.points_worth;
       out["buildings"] = py::list();
@@ -1450,7 +1450,6 @@ bool apply_capture(NativeGameState& next, const NativeAction& action) {
       py::reinterpret_borrow<py::list>(next.observation["cities"]).append(out);
     }
     unit->status = "FINISHED";
-    move_unit_to_city(next, *unit, next.cities.back());
     set_unit_payload_field(next, unit->id, "status", "s", py::str("FINISHED"));
     update_tribe_economy(next, unit->tribe_id, 0, 220);
     return true;
