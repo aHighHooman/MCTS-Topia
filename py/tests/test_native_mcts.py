@@ -1762,6 +1762,94 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(status, 0)
 
+    def test_java_parity_research_applies_philosophy_discount(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "research:philosophy-discount",
+                    "--depth",
+                    "1",
+                    "--max-states",
+                    "1",
+                    "--max-actions-per-state",
+                    "64",
+                    "--action-id",
+                    "A0",
+                    "--max-actions",
+                    "256",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
+    def test_java_parity_research_unlocks_tower_of_wisdom_actions(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "research:tower-unlock",
+                    "--depth",
+                    "1",
+                    "--max-states",
+                    "1",
+                    "--max-actions-per-state",
+                    "64",
+                    "--action-id",
+                    "A8",
+                    "--max-actions",
+                    "512",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
+    def test_java_parity_tower_unlock_cloak_spawn_scores_reveal(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "research:tower-unlock",
+                    "--depth",
+                    "1",
+                    "--max-states",
+                    "1",
+                    "--max-actions-per-state",
+                    "64",
+                    "--action-id",
+                    "A34",
+                    "--max-actions",
+                    "512",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
+    def test_java_parity_hidden_enemy_capital_end_turn_uses_city_center(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "research:tower-unlock",
+                    "--depth",
+                    "1",
+                    "--max-states",
+                    "1",
+                    "--max-actions-per-state",
+                    "64",
+                    "--action-id",
+                    "A10",
+                    "--max-actions",
+                    "512",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
     def test_java_parity_milestone4_hidden_enemy_spawn_masks_unit(self) -> None:
         status = run_parity(
             parse_args(

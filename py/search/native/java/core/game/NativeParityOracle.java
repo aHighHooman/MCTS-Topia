@@ -92,6 +92,12 @@ public final class NativeParityOracle {
         if ("milestone4:units".equals(fixture)) {
             return buildMilestone4UnitFixture();
         }
+        if ("research:philosophy-discount".equals(fixture)) {
+            return buildResearchPhilosophyDiscountFixture();
+        }
+        if ("research:tower-unlock".equals(fixture)) {
+            return buildResearchTowerUnlockFixture();
+        }
         if ("unitstats:superunit-attack".equals(fixture)) {
             return buildSuperUnitAttackFixture();
         }
@@ -313,6 +319,59 @@ public final class NativeParityOracle {
         return state;
     }
 
+    private static GameState buildResearchPhilosophyDiscountFixture() {
+        Random random = new Random(20240602L);
+        Tribe[] tribes = new Tribe[]{
+                new Tribe(Types.TRIBE.IMPERIUS),
+                new Tribe(Types.TRIBE.BARDUR)
+        };
+        Board board = new Board();
+        board.init(7, tribes);
+        fillTerrain(board, 7, Types.TERRAIN.PLAIN);
+
+        addCapital(board, tribes, random, 0, 1, 1);
+        addCity(board, tribes, random, 0, 3, 3);
+        addCapital(board, tribes, random, 1, 5, 5);
+        tribes[0].getTechTree().doResearchInit(Types.TECHNOLOGY.PHILOSOPHY);
+        tribes[0].setStars(20);
+        tribes[1].setStars(0);
+        board.setActiveTribeID(0);
+
+        GameState state = new GameState(random, Types.GAME_MODE.MIGHT,
+                GameState.RunDefaults.DEFAULT_GLORY_TARGET_SCORE, tribes, board, 0);
+        state.setMapType(Types.MAP_TYPE.CONTINENTS);
+        board.revealExplorationFromCurrentAssets(random);
+        return state;
+    }
+
+    private static GameState buildResearchTowerUnlockFixture() {
+        Random random = new Random(20240603L);
+        Tribe[] tribes = new Tribe[]{
+                new Tribe(Types.TRIBE.IMPERIUS),
+                new Tribe(Types.TRIBE.BARDUR)
+        };
+        Board board = new Board();
+        board.init(7, tribes);
+        fillTerrain(board, 7, Types.TERRAIN.PLAIN);
+
+        addCapital(board, tribes, random, 0, 1, 1);
+        addCapital(board, tribes, random, 1, 5, 5);
+        for (Types.TECHNOLOGY technology : Types.TECHNOLOGY.values()) {
+            if (technology != Types.TECHNOLOGY.PHILOSOPHY) {
+                tribes[0].getTechTree().doResearchInit(technology);
+            }
+        }
+        tribes[0].setStars(20);
+        tribes[1].setStars(0);
+        board.setActiveTribeID(0);
+
+        GameState state = new GameState(random, Types.GAME_MODE.MIGHT,
+                GameState.RunDefaults.DEFAULT_GLORY_TARGET_SCORE, tribes, board, 0);
+        state.setMapType(Types.MAP_TYPE.CONTINENTS);
+        board.revealExplorationFromCurrentAssets(random);
+        return state;
+    }
+
     private static void fillTerrain(Board board, int size, Types.TERRAIN terrain) {
         for (int x = 0; x < size; x++) {
             for (int y = 0; y < size; y++) {
@@ -324,6 +383,15 @@ public final class NativeParityOracle {
     private static City addCapital(Board board, Tribe[] tribes, Random random, int tribeId, int x, int y) {
         City city = new City(x, y, tribeId);
         city.setCapital(true);
+        board.setTerrainAt(x, y, Types.TERRAIN.CITY);
+        board.addCityToTribe(city, random);
+        board.assignCityTiles(city, city.getBound());
+        tribes[tribeId].addScore(TribesConfig.CITY_CENTRE_POINTS);
+        return city;
+    }
+
+    private static City addCity(Board board, Tribe[] tribes, Random random, int tribeId, int x, int y) {
+        City city = new City(x, y, tribeId);
         board.setTerrainAt(x, y, Types.TERRAIN.CITY);
         board.addCityToTribe(city, random);
         board.assignCityTiles(city, city.getBound());

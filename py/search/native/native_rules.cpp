@@ -796,7 +796,7 @@ int unit_cost(const std::string& type) {
 int unit_points(const std::string& type) {
   static const std::map<std::string, int> points = {
       {"WARRIOR", 10}, {"RIDER", 15}, {"DEFENDER", 15}, {"SWORDMAN", 25}, {"SWORDSMAN", 25},
-      {"ARCHER", 15}, {"CATAPULT", 40}, {"KNIGHT", 40}, {"MIND_BENDER", 25}, {"CLOAK", 0},
+      {"ARCHER", 15}, {"CATAPULT", 40}, {"KNIGHT", 40}, {"MIND_BENDER", 25}, {"CLOAK", 40},
       {"DAGGER", 10}, {"RAMMER", 0}, {"SCOUT", 0}, {"BOMBER", 0}, {"SUPERUNIT", 50},
       {"PIRATE", 0}};
   auto it = points.find(type);
@@ -2344,29 +2344,26 @@ void preserve_hidden_enemy_visible_actions(
 }
 
 std::pair<int, int> infer_hidden_enemy_capital_spawn_xy(const NativeGameState& state) {
-  int best_x = 0;
-  int best_y = 0;
-  int best_distance = -1;
-  int best_score = -1;
-  const bool require_full_hidden_city_radius =
-      relationship_between(state, state.active_player_id, state.root_player_id) == "WAR";
+  int best_full_x = 0;
+  int best_full_y = 0;
+  int best_full_distance = -1;
+  int best_full_score = -1;
+  int best_any_x = 0;
+  int best_any_y = 0;
+  int best_any_distance = -1;
+  int best_any_score = -1;
   for (const NativeTile& tile : state.tiles) {
     if (tile.explored) {
       continue;
     }
-    if (require_full_hidden_city_radius) {
-      bool has_full_hidden_city_radius = true;
-      for (int dy = -1; dy <= 1 && has_full_hidden_city_radius; ++dy) {
-        for (int dx = -1; dx <= 1; ++dx) {
-          const NativeTile* neighbor = tile_at(const_cast<NativeGameState&>(state), tile.x + dx, tile.y + dy);
-          if (neighbor == nullptr || neighbor->explored) {
-            has_full_hidden_city_radius = false;
-            break;
-          }
+    bool has_full_hidden_city_radius = true;
+    for (int dy = -1; dy <= 1 && has_full_hidden_city_radius; ++dy) {
+      for (int dx = -1; dx <= 1; ++dx) {
+        const NativeTile* neighbor = tile_at(const_cast<NativeGameState&>(state), tile.x + dx, tile.y + dy);
+        if (neighbor == nullptr || neighbor->explored) {
+          has_full_hidden_city_radius = false;
+          break;
         }
-      }
-      if (!has_full_hidden_city_radius) {
-        continue;
       }
     }
     int nearest_root_asset = 0;
@@ -2389,14 +2386,24 @@ std::pair<int, int> infer_hidden_enemy_capital_spawn_xy(const NativeGameState& s
     }
     const int distance_score = have_root_asset ? nearest_root_asset : tile.x + tile.y;
     const int tie_score = tile.x + tile.y;
-    if (distance_score > best_distance || (distance_score == best_distance && tie_score > best_score)) {
-      best_distance = distance_score;
-      best_score = tie_score;
-      best_x = tile.x;
-      best_y = tile.y;
+    if (distance_score > best_any_distance || (distance_score == best_any_distance && tie_score > best_any_score)) {
+      best_any_distance = distance_score;
+      best_any_score = tie_score;
+      best_any_x = tile.x;
+      best_any_y = tile.y;
+    }
+    if (has_full_hidden_city_radius &&
+        (distance_score > best_full_distance || (distance_score == best_full_distance && tie_score > best_full_score))) {
+      best_full_distance = distance_score;
+      best_full_score = tie_score;
+      best_full_x = tile.x;
+      best_full_y = tile.y;
     }
   }
-  return {best_x, best_y};
+  if (best_full_distance >= 0) {
+    return {best_full_x, best_full_y};
+  }
+  return {best_any_x, best_any_y};
 }
 
 void append_hidden_enemy_capital_spawn_action(NativeGameState& state, std::vector<NativeAction>& actions, int max_actions) {
@@ -5469,7 +5476,7 @@ NativeGameState apply_action_strict(
     return next;
   }
   const int newly_explored = reveal_from_current_assets(next);
-  if (type == "MOVE" || type == "STEP_MOVE" || type == "ATTACK") {
+  if (type == "MOVE" || type == "STEP_MOVE" || type == "ATTACK" || type == "SPAWN") {
     update_tribe_economy(next, next.active_player_id, 0, newly_explored * 5);
   }
   if (type == "MOVE" || type == "STEP_MOVE") {
