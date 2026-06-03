@@ -1075,9 +1075,13 @@ void set_terminal_winner(NativeGameState& state, int winner_id, const std::strin
 }
 
 void infer_hidden_city_center_from_territory(NativeCity& city, const NativeGameState& state) {
-  int best_score = -1;
+  int best_support = -1;
+  int best_hidden_neighbors = -1;
+  int best_center_distance = 0;
+  int best_root_distance = 0;
   int best_x = city.x;
   int best_y = city.y;
+  bool have_best = false;
   for (const NativeTile& tile : state.tiles) {
     if (tile.city_id != city.id) {
       continue;
@@ -1093,16 +1097,71 @@ void infer_hidden_city_center_from_territory(NativeCity& city, const NativeGameS
         if (candidate == nullptr || candidate->explored) {
           continue;
         }
-        const int score = candidate_x + candidate_y;
-        if (score > best_score) {
-          best_score = score;
+        int support = 0;
+        int hidden_neighbors = 0;
+        for (int support_dy = -1; support_dy <= 1; ++support_dy) {
+          for (int support_dx = -1; support_dx <= 1; ++support_dx) {
+            if (support_dx == 0 && support_dy == 0) {
+              continue;
+            }
+            const NativeTile* neighbor = tile_at(
+                const_cast<NativeGameState&>(state),
+                candidate_x + support_dx,
+                candidate_y + support_dy);
+            if (neighbor != nullptr &&
+                (neighbor->city_id == city.id || neighbor->territory_city_id == city.id)) {
+              ++support;
+            }
+            if (neighbor != nullptr && !neighbor->explored) {
+              ++hidden_neighbors;
+            }
+          }
+        }
+        int nearest_root_asset = 0;
+        bool have_root_asset = false;
+        for (const NativeCity& root_city : state.cities) {
+          if (root_city.tribe_id != state.root_player_id) {
+            continue;
+          }
+          const int distance = std::abs(candidate_x - root_city.x) + std::abs(candidate_y - root_city.y);
+          nearest_root_asset = have_root_asset ? std::min(nearest_root_asset, distance) : distance;
+          have_root_asset = true;
+        }
+        for (const NativeUnit& root_unit : state.units) {
+          if (root_unit.tribe_id != state.root_player_id) {
+            continue;
+          }
+          const int distance = std::abs(candidate_x - root_unit.x) + std::abs(candidate_y - root_unit.y);
+          nearest_root_asset = have_root_asset ? std::min(nearest_root_asset, distance) : distance;
+          have_root_asset = true;
+        }
+        const int center_distance =
+            std::abs(candidate_x - (state.board_size / 2)) + std::abs(candidate_y - (state.board_size / 2));
+        const int root_distance = have_root_asset ? nearest_root_asset : 0;
+        if (!have_best ||
+            support > best_support ||
+            (support == best_support && hidden_neighbors > best_hidden_neighbors) ||
+            (support == best_support && hidden_neighbors == best_hidden_neighbors &&
+             center_distance < best_center_distance) ||
+            (support == best_support && hidden_neighbors == best_hidden_neighbors &&
+             center_distance == best_center_distance &&
+             root_distance < best_root_distance) ||
+            (support == best_support && hidden_neighbors == best_hidden_neighbors &&
+             center_distance == best_center_distance &&
+             root_distance == best_root_distance &&
+             (candidate_y < best_y || (candidate_y == best_y && candidate_x < best_x)))) {
+          have_best = true;
+          best_support = support;
+          best_hidden_neighbors = hidden_neighbors;
+          best_center_distance = center_distance;
+          best_root_distance = root_distance;
           best_x = candidate_x;
           best_y = candidate_y;
         }
       }
     }
   }
-  if (best_score >= 0) {
+  if (have_best) {
     city.x = best_x;
     city.y = best_y;
   }
@@ -2403,6 +2462,72 @@ std::pair<int, int> infer_hidden_enemy_capital_spawn_xy(const NativeGameState& s
         hidden_capital_id = tribe.capital_id;
         break;
       }
+    }
+  }
+  if (hidden_capital_id > 0) {
+    int best_hint_x = 0;
+    int best_hint_y = 0;
+    int best_hint_support = -1;
+    int best_hint_center_distance = 0;
+    int best_hint_root_distance = 0;
+    bool have_hint = false;
+    for (const NativeTile& tile : state.tiles) {
+      if (tile.explored) {
+        continue;
+      }
+      int support = 0;
+      int nearest_root_asset = 0;
+      bool have_root_asset = false;
+      for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+          if (dx == 0 && dy == 0) {
+            continue;
+          }
+          const NativeTile* neighbor = tile_at(const_cast<NativeGameState&>(state), tile.x + dx, tile.y + dy);
+          if (neighbor != nullptr &&
+              (neighbor->city_id == hidden_capital_id || neighbor->territory_city_id == hidden_capital_id)) {
+            ++support;
+          }
+        }
+      }
+      if (support <= 0) {
+        continue;
+      }
+      for (const NativeCity& city : state.cities) {
+        if (city.tribe_id != state.root_player_id) {
+          continue;
+        }
+        const int distance = std::abs(tile.x - city.x) + std::abs(tile.y - city.y);
+        nearest_root_asset = have_root_asset ? std::min(nearest_root_asset, distance) : distance;
+        have_root_asset = true;
+      }
+      for (const NativeUnit& unit : state.units) {
+        if (unit.tribe_id != state.root_player_id) {
+          continue;
+        }
+        const int distance = std::abs(tile.x - unit.x) + std::abs(tile.y - unit.y);
+        nearest_root_asset = have_root_asset ? std::min(nearest_root_asset, distance) : distance;
+        have_root_asset = true;
+      }
+      const int center_distance = std::abs(tile.x - (state.board_size / 2)) + std::abs(tile.y - (state.board_size / 2));
+      const int root_distance = have_root_asset ? nearest_root_asset : 0;
+      if (!have_hint ||
+          support > best_hint_support ||
+          (support == best_hint_support && center_distance < best_hint_center_distance) ||
+          (support == best_hint_support && center_distance == best_hint_center_distance &&
+           root_distance < best_hint_root_distance) ||
+          (support == best_hint_support && center_distance == best_hint_center_distance &&
+           root_distance == best_hint_root_distance && (tile.y < best_hint_y || (tile.y == best_hint_y && tile.x < best_hint_x)))) {
+        have_hint = true;
+        best_hint_support = support;
+        best_hint_center_distance = center_distance;
+        best_hint_root_distance = root_distance;
+        best_hint_x = tile.x;
+        best_hint_y = tile.y;
+      }
+    }
+    if (have_hint) {
+      return {best_hint_x, best_hint_y};
     }
   }
   if (hidden_capital_id > max_visible_city_id && root_city_count >= 2) {
@@ -4223,9 +4348,9 @@ void parse_tiles(NativeGameState& state) {
       tile.terrain = read_string(tile_payload, "terrain");
       tile.resource = read_string(tile_payload, "resource");
       tile.building = read_string(tile_payload, "building");
-      tile.city_id = read_int(tile_payload, "city_id", 0);
+      tile.city_id = read_int(tile_payload, "city_id", read_int(tile_payload, "city", 0));
       tile.territory_city_id = tile.city_id;
-      tile.unit_id = read_int(tile_payload, "unit_id", 0);
+      tile.unit_id = read_int(tile_payload, "unit_id", read_int(tile_payload, "unit", 0));
       state.tiles.push_back(tile);
     }
   }
