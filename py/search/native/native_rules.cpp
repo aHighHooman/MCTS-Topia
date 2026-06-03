@@ -2510,6 +2510,7 @@ NativeCity* ensure_hidden_active_enemy_capital_city(NativeGameState& state) {
   if (active_tribe == nullptr || active_tribe->capital_id <= 0) {
     return nullptr;
   }
+  const bool capital_was_hidden = city_by_id(state, active_tribe->capital_id) == nullptr;
   NativeCity* capital = capital_city_for_tribe(state, state.active_player_id);
   if (capital == nullptr) {
     return nullptr;
@@ -2518,7 +2519,7 @@ NativeCity* ensure_hidden_active_enemy_capital_city(NativeGameState& state) {
       state.units.begin(),
       state.units.end(),
       [&](const NativeUnit& unit) { return unit.tribe_id == state.active_player_id; });
-  if (!has_active_enemy_units &&
+  if (capital_was_hidden && !has_active_enemy_units &&
       relationship_between(state, state.active_player_id, state.root_player_id) == "WAR") {
     for (const std::string& tech : {"ROADS", "STRATEGY"}) {
       if (!has_tech(*active_tribe, tech)) {
