@@ -856,6 +856,9 @@ int building_population_bonus(const std::string& type) {
       type == "FOREST_TEMPLE" || type == "MOUNTAIN_TEMPLE") {
     return 1;
   }
+  if (type == "TOWER_OF_WISDOM") {
+    return 3;
+  }
   return 0;
 }
 
@@ -3919,6 +3922,11 @@ bool apply_build(NativeGameState& next, const NativeAction& action) {
     city->points_worth += 100;
     set_city_payload_field(next, city_id, "points_worth", "pts", py::int_(city->points_worth));
     update_tribe_economy(next, city->tribe_id, 0, 100);
+  }
+  if (building == "TOWER_OF_WISDOM") {
+    city->points_worth += 400;
+    set_city_payload_field(next, city_id, "points_worth", "pts", py::int_(city->points_worth));
+    update_tribe_economy(next, city->tribe_id, 0, 400);
   }
   return true;
 }
