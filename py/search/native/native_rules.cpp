@@ -4007,6 +4007,14 @@ bool is_monument_building(const std::string& building) {
   return monuments.count(building) > 0;
 }
 
+bool monument_build_available(const NativeTribe& tribe, const std::string& building) {
+  auto it = tribe.monuments.find(building);
+  if (it != tribe.monuments.end()) {
+    return it->second == "AVAILABLE";
+  }
+  return building == "TOWER_OF_WISDOM" && is_everything_researched(tribe);
+}
+
 int destroy_population_bonus(const std::string& building) {
   if (building == "FARM" || building == "MINE") {
     return 2;
@@ -5037,8 +5045,7 @@ bool building_feasible_at(const NativeGameState& state, const NativeTribe& tribe
       "ALTAR_OF_PEACE", "EMPERORS_TOMB", "EYE_OF_GOD", "GATE_OF_POWER",
       "GRAND_BAZAR", "PARK_OF_FORTUNE", "TOWER_OF_WISDOM"};
   if (monuments.count(building) > 0) {
-    auto it = tribe.monuments.find(building);
-    return it != tribe.monuments.end() && it->second == "AVAILABLE";
+    return monument_build_available(tribe, building);
   }
   return true;
 }
