@@ -2374,6 +2374,43 @@ void preserve_hidden_enemy_visible_actions(
 }
 
 std::pair<int, int> infer_hidden_enemy_capital_spawn_xy(const NativeGameState& state) {
+  const NativeTribe* active_tribe = tribe_by_id_const(state, state.active_player_id);
+  int max_visible_city_id = 0;
+  int latest_root_city_id = 0;
+  int latest_root_city_x = 0;
+  int latest_root_city_y = 0;
+  int root_city_count = 0;
+  for (const NativeCity& city : state.cities) {
+    max_visible_city_id = std::max(max_visible_city_id, city.id);
+    if (city.tribe_id == state.root_player_id) {
+      ++root_city_count;
+      if (city.id > latest_root_city_id) {
+        latest_root_city_id = city.id;
+        latest_root_city_x = city.x;
+        latest_root_city_y = city.y;
+      }
+    }
+  }
+  int hidden_capital_id = active_tribe != nullptr && active_tribe->id != state.root_player_id
+      ? active_tribe->capital_id
+      : 0;
+  if (hidden_capital_id <= max_visible_city_id) {
+    for (const NativeTribe& tribe : state.tribes) {
+      if (tribe.id != state.root_player_id && tribe.capital_id > max_visible_city_id) {
+        hidden_capital_id = tribe.capital_id;
+        break;
+      }
+    }
+  }
+  if (hidden_capital_id > max_visible_city_id && root_city_count >= 2) {
+    NativeTile* inferred = tile_at(
+        const_cast<NativeGameState&>(state),
+        latest_root_city_x + 2,
+        latest_root_city_y + 2);
+    if (inferred != nullptr && !inferred->explored) {
+      return {inferred->x, inferred->y};
+    }
+  }
   int best_full_x = 0;
   int best_full_y = 0;
   int best_full_distance = -1;
@@ -5114,7 +5151,7 @@ NativeCity* capital_city_for_tribe(NativeGameState& state, int tribe_id) {
   city.walls = false;
   city.infiltrated = false;
   city.bound = 0;
-  city.points_worth = 180;
+  city.points_worth = 160;
   state.cities.push_back(city);
   for (int dy = -1; dy <= 1; ++dy) {
     for (int dx = -1; dx <= 1; ++dx) {

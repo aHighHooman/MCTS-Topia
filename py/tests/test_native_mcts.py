@@ -1830,6 +1830,50 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(status, 0)
 
+    def test_java_parity_philosophy_discount_hidden_capital_end_turn(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "research:philosophy-discount",
+                    "--depth",
+                    "1",
+                    "--max-states",
+                    "1",
+                    "--max-actions-per-state",
+                    "24",
+                    "--action-id",
+                    "A7",
+                    "--max-actions",
+                    "512",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
+    def test_java_parity_philosophy_discount_preserves_hidden_capital_city_center(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "research:philosophy-discount",
+                    "--depth",
+                    "2",
+                    "--max-states",
+                    "24",
+                    "--max-actions-per-state",
+                    "24",
+                    "--action-id",
+                    "s7_A6",
+                    "--max-actions",
+                    "512",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
     def test_java_parity_research_unlocks_tower_of_wisdom_actions(self) -> None:
         status = run_parity(
             parse_args(
