@@ -1986,6 +1986,29 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(status, 0)
 
+    def test_java_parity_superunit_spawn_clears_city_slot(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "unitstats:superunit-attack",
+                    "--depth",
+                    "2",
+                    "--max-states",
+                    "24",
+                    "--max-actions-per-state",
+                    "24",
+                    "--action-id",
+                    "s1_A5",
+                    "--max-actions",
+                    "512",
+                    "--no-compile-java",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
     def test_java_parity_milestone4_hidden_enemy_spawn_masks_unit(self) -> None:
         status = run_parity(
             parse_args(

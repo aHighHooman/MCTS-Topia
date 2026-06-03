@@ -3686,7 +3686,8 @@ bool apply_spawn(NativeGameState& next, const NativeAction& action) {
   }
   unit.id = spawn_unit_id;
   unit.tribe_id = city->tribe_id;
-  unit.city_id = city_id;
+  const bool root_owned_spawn = city->tribe_id == next.root_player_id;
+  unit.city_id = root_owned_spawn ? city_id : -1;
   unit.x = city->x;
   unit.y = city->y;
   unit.type = type;
@@ -3700,10 +3701,12 @@ bool apply_spawn(NativeGameState& next, const NativeAction& action) {
   unit.range = 1;
   unit.cost = unit_cost(type);
   next.units.insert(next.units.begin(), unit);
-  city->unit_ids.push_back(unit.id);
+  if (root_owned_spawn) {
+    city->unit_ids.push_back(unit.id);
+  }
   tile->unit_id = unit.id;
   const bool visible_to_root = unit_visible_to_root(next, unit);
-  if (visible_to_root) {
+  if (root_owned_spawn && visible_to_root) {
     append_city_payload_unit(next, city->id, unit.id);
   }
   sync_tile_to_payload(next, *tile);
