@@ -2474,14 +2474,18 @@ NativeCity* ensure_hidden_active_enemy_capital_city(NativeGameState& state) {
   if (capital == nullptr) {
     return nullptr;
   }
-  if (relationship_between(state, state.active_player_id, state.root_player_id) == "WAR") {
+  const bool has_active_enemy_units = std::any_of(
+      state.units.begin(),
+      state.units.end(),
+      [&](const NativeUnit& unit) { return unit.tribe_id == state.active_player_id; });
+  if (!has_active_enemy_units &&
+      relationship_between(state, state.active_player_id, state.root_player_id) == "WAR") {
     for (const std::string& tech : {"ROADS", "STRATEGY"}) {
       if (!has_tech(*active_tribe, tech)) {
         active_tribe->researched_tech_ids.push_back(tech);
       }
     }
   }
-
   const int x = capital->x;
   const int y = capital->y;
   for (int dy = -1; dy <= 1; ++dy) {
