@@ -1,0 +1,42 @@
+{
+  "Game Mode": "Might",
+  "Map Type": "Drylands",
+  "Map Size": "Tiny",
+  "Glory Score Limit": 10000,
+  "Turn Limit": 18,
+  "Match Retry Limit": 0,
+  "Parallel Games": 1,
+  "Balance Seats": false,
+  "Write Match Logs": true,
+  "External Log Dir": "C:/Users/Umair/OneDrive/Desktop/Work/Self_Projects/Tribes_MCTS/logs/road_debug",
+  "Tournament Summary Log Path": "C:/Users/Umair/OneDrive/Desktop/Work/Self_Projects/Tribes_MCTS/logs/road_debug/summary.log",
+  "Verbose": false,
+  "Game Count": 1,
+  "Level Seeds": [1813771],
+  "Participants": [
+    {
+      "Type": "External",
+      "Name": "Tuned Bot",
+      "Tribe": "Xin Xi",
+      "External Action Timeout Ms": 300000,
+      "External Command": [
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        "Set-Location -LiteralPath 'C:\\Users\\Umair\\OneDrive\\Desktop\\Work\\Self_Projects\\Tribes_MCTS'; $env:PYTHONPATH='C:\\Users\\Umair\\OneDrive\\Desktop\\Work\\Self_Projects\\Tribes_MCTS\\py'; python 'C:\\Users\\Umair\\OneDrive\\Desktop\\Work\\Self_Projects\\Tribes_MCTS\\py\\bots\\native_static_mcts_bot.py' --static-eval-variant tuned --deterministic --max-depth 0 --top-k-actions 128 --search-batch-size 64 --wall-clock-per-action-seconds 0.5"
+      ]
+    },
+    {
+      "Type": "External",
+      "Name": "Experimental Bot",
+      "Tribe": "Bardur",
+      "External Action Timeout Ms": 300000,
+      "External Command": [
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        "Set-Location -LiteralPath 'C:\\Users\\Umair\\OneDrive\\Desktop\\Work\\Self_Projects\\Tribes_MCTS'; $env:PYTHONPATH='C:\\Users\\Umair\\OneDrive\\Desktop\\Work\\Self_Projects\\Tribes_MCTS\\py'; python 'C:\\Users\\Umair\\OneDrive\\Desktop\\Work\\Self_Projects\\Tribes_MCTS\\py\\bots\\native_static_mcts_bot.py' --static-eval-variant experimental --deterministic --max-depth 0 --top-k-actions 128 --search-batch-size 64 --wall-clock-per-action-seconds 0.5"
+      ]
+    }
+  ]
+}

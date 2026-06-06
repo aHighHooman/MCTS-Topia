@@ -31,7 +31,7 @@ def main() -> None:
     parser.add_argument("--wall-clock-per-turn-seconds", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--static-eval-variant", choices=("baseline", "tuned"), default=None)
+    parser.add_argument("--static-eval-variant", choices=("baseline", "tuned", "experimental"), default=None)
     parser.add_argument(
         "--static-only-bootstrap",
         action="store_true",

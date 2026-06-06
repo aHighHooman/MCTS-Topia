@@ -61,7 +61,6 @@ _ROOT_ALWAYS_KEEP_TYPES = {
     "RESEARCH_TECH",
     "BUILD",
     "SPAWN",
-    "BUILD_ROAD",
     "RECOVER",
     "HEAL_OTHERS",
     "UPGRADE_SHIP",
