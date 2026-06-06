@@ -22,6 +22,7 @@
   "java_classpath": null,
   "java_main_class": null,
   "checkpoint": "py/profiling/mcts_search_profiling_random_init_model.pt",
+  "static_eval_variant": "tuned",
   "device": "cuda",
   "simulations": null,
   "wall_time_sec": 1,

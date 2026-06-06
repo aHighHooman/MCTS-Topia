@@ -6,6 +6,7 @@ import csv
 from dataclasses import dataclass, field
 import json
 import math
+import os
 from pathlib import Path
 import pstats
 import random
@@ -56,6 +57,7 @@ _MCTS_SEARCH_DEFAULTS: dict[str, Any] = {
     "java_classpath": None,
     "java_main_class": None,
     "checkpoint": str(DEFAULT_AUTORESEARCH_CHECKPOINT),
+    "static_eval_variant": "tuned",
     "device": None,
     "simulations": None,
     "wall_time_sec": 10.0,
@@ -1449,6 +1451,8 @@ def _load_mcts_search_config(path: Path = DEFAULT_MCTS_SEARCH_CONFIG) -> argpars
     values["synthetic"] = False
     if str(values.get("evaluator")) not in {"nn", "static", "bot"}:
         raise ValueError("mcts_search config evaluator must be one of: nn, static, bot")
+    if str(values.get("static_eval_variant")) not in {"baseline", "tuned", "experimental"}:
+        raise ValueError("mcts_search config static_eval_variant must be one of: baseline, tuned, experimental")
     for key in _PATH_CONFIG_KEYS:
         value = values.get(key)
         if isinstance(value, str) and value:
@@ -1953,6 +1957,8 @@ def main() -> int:
     elif args.profile_csv is None:
         args.profile_csv = _default_mcts_search_output_path(args, "functions.csv")
 
+    os.environ["TRIBES_STATIC_EVAL_VARIANT"] = str(args.static_eval_variant)
+
     extension = load_native_mcts_extension()
     if extension is None:
         raise RuntimeError("Native MCTS extension is unavailable; build prerequisites may be missing.")
@@ -2143,7 +2149,8 @@ def main() -> int:
         f"mode={'walltime' if using_walltime else 'fixed_nodes'} "
         f"node_budget={'walltime' if using_walltime else cfg.search.num_simulations} "
         f"wall_time_sec_per_position={args.wall_time_sec if using_walltime else 'n/a'} "
-        f"batch={cfg.search.batch_size} evaluator={args.evaluator} device={device} checkpoint={checkpoint_status} "
+        f"batch={cfg.search.batch_size} evaluator={args.evaluator} static_eval_variant={args.static_eval_variant} "
+        f"device={device} checkpoint={checkpoint_status} "
         f"source={'payload' if args.payload else args.selfplay_run_mode} "
         f"map={args.selfplay_map_type}/{args.selfplay_map_size} "
         f"total_ms={elapsed * 1000.0:.3f}"
@@ -2306,6 +2313,7 @@ def main() -> int:
                 "wall_time_sec_per_position": args.wall_time_sec if using_walltime else None,
                 "batch_size": cfg.search.batch_size,
                 "evaluator": args.evaluator,
+                "static_eval_variant": args.static_eval_variant,
                 "device": str(device),
                 "checkpoint": checkpoint_status,
                 "elapsed_sec": elapsed,
