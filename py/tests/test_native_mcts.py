@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import unittest
 import sys
@@ -250,6 +251,74 @@ def _message_with_research(tech: str, researched_tech_ids: list[str], stars: int
             ],
         }
     )
+
+
+def _message_with_military_research_context(techs: list[str], stars: int = 18) -> dict:
+    size = 6
+    tiles = [
+        [
+            {
+                "x": x,
+                "y": y,
+                "visible": True,
+                "explored": True,
+                "terrain": "PLAIN",
+            }
+            for x in range(size)
+        ]
+        for y in range(size)
+    ]
+    cities = [
+        {"id": 10, "tribe_id": 0, "x": 1, "y": 1, "level": 2, "population": 0, "population_need": 3, "production": 3, "is_capital": True, "has_walls": False},
+        {"id": 20, "tribe_id": 1, "x": 4, "y": 1, "level": 3, "population": 0, "population_need": 4, "production": 3, "is_capital": True, "has_walls": True},
+    ]
+    tiles[1][1]["terrain"] = "CITY"
+    tiles[1][1]["city_id"] = 10
+    tiles[1][4]["terrain"] = "CITY"
+    tiles[1][4]["city_id"] = 20
+    units = [
+        {"id": 1, "tribe_id": 0, "city_id": 10, "type": "WARRIOR", "x": 1, "y": 1, "current_hp": 10, "max_hp": 10, "kills": 0, "is_veteran": False, "status": "FRESH", "is_hidden": False},
+        {"id": 2, "tribe_id": 1, "city_id": 20, "type": "WARRIOR", "x": 3, "y": 1, "current_hp": 10, "max_hp": 10, "kills": 0, "is_veteran": False, "status": "FRESH", "is_hidden": False},
+    ]
+    tiles[1][1]["unit_id"] = 1
+    tiles[1][3]["unit_id"] = 2
+    return normalize_message(
+        {
+            "player_id": 0,
+            "observation": {
+                "active_player_id": 0,
+                "tick": 12,
+                "can_end_turn": True,
+                "board": {"size": size, "tiles": tiles},
+                "units": units,
+                "cities": cities,
+                "tribes": [
+                    {"id": 0, "stars": stars, "score": 0, "researched_tech_ids": [], "cities": [10], "extra_units": []},
+                    {"id": 1, "stars": 10, "score": 0, "researched_tech_ids": [], "cities": [20], "extra_units": []},
+                ],
+            },
+            "actions": [
+                {"id": f"research_{tech.lower()}", "type": "RESEARCH_TECH", "tribe_id": 0, "p": 0, "tech": tech}
+                for tech in techs
+            ] + [{"id": "end", "type": "END_TURN"}],
+        }
+    )
+
+
+def _static_priors_for_variant(extension, message: dict, variant: str) -> dict[str, float]:
+    previous = os.environ.get("TRIBES_STATIC_EVAL_VARIANT")
+    try:
+        os.environ["TRIBES_STATIC_EVAL_VARIANT"] = variant
+        evaluation = dict(extension.evaluate_static(message, 128))
+    finally:
+        if previous is None:
+            os.environ.pop("TRIBES_STATIC_EVAL_VARIANT", None)
+        else:
+            os.environ["TRIBES_STATIC_EVAL_VARIANT"] = previous
+    return {
+        str(action["id"]): float(prior)
+        for action, prior in zip(message["actions"], evaluation["priors"])
+    }
 
 
 def _message_with_village_and_ruin_choices() -> dict:
@@ -1389,6 +1458,136 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertGreaterEqual(float(evaluation["value"]), -1.0)
         self.assertLessEqual(float(evaluation["value"]), 1.0)
 
+    def test_static_eval_variants_keep_baseline_and_tuned_stable_without_research_context(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message()
+
+        baseline = _static_priors_for_variant(extension, message, "baseline")
+        tuned = _static_priors_for_variant(extension, message, "tuned")
+        experimental = _static_priors_for_variant(extension, message, "experimental")
+
+        self.assertNotEqual(baseline, tuned)
+        self.assertEqual(tuned, experimental)
+
+    def test_static_eval_experimental_does_not_boost_military_research_without_contact(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        for tech in ["ARCHERY", "STRATEGY", "SMITHERY", "MATHEMATICS", "CHIVALRY"]:
+            with self.subTest(tech=tech):
+                message = _message_with_military_research_context([tech], stars=24)
+                message["observation"]["units"] = [message["observation"]["units"][0]]
+                message["observation"]["cities"][1]["tribe_id"] = -1
+                message["observation"]["board"]["tiles"][1][3]["unit_id"] = 0
+
+                tuned = _static_priors_for_variant(extension, message, "tuned")
+                experimental = _static_priors_for_variant(extension, message, "experimental")
+
+                self.assertLessEqual(experimental[f"research_{tech.lower()}"], tuned[f"research_{tech.lower()}"])
+
+    def test_static_eval_experimental_requires_real_road_followup_for_roads_research(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message_with_military_research_context(["ROADS"], stars=12)
+        message["observation"]["units"] = [message["observation"]["units"][0]]
+        message["observation"]["cities"][1]["tribe_id"] = -1
+        message["observation"]["board"]["tiles"][1][3]["unit_id"] = 0
+
+        tuned = _static_priors_for_variant(extension, message, "tuned")
+        experimental = _static_priors_for_variant(extension, message, "experimental")
+
+        self.assertLessEqual(experimental["research_roads"], tuned["research_roads"])
+
+    def test_static_eval_experimental_boosts_defensive_military_research_under_city_threat(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        for tech in ["STRATEGY", "SMITHERY"]:
+            with self.subTest(tech=tech):
+                message = _message_with_military_research_context([tech])
+                enemy = message["observation"]["units"][1]
+                enemy["type"] = "KNIGHT"
+                enemy["attack"] = 3.5
+                enemy["movement"] = 3
+                enemy["x"] = 2
+                enemy["y"] = 1
+                message["observation"]["board"]["tiles"][1][3]["unit_id"] = 0
+                message["observation"]["board"]["tiles"][1][2]["unit_id"] = 2
+
+                tuned = _static_priors_for_variant(extension, message, "tuned")
+                experimental = _static_priors_for_variant(extension, message, "experimental")
+
+                self.assertGreater(experimental[f"research_{tech.lower()}"], tuned[f"research_{tech.lower()}"])
+
+    def test_static_eval_experimental_boosts_archery_and_mathematics_for_ranged_city_break_need(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        for tech in ["ARCHERY", "MATHEMATICS"]:
+            with self.subTest(tech=tech):
+                message = _message_with_military_research_context([tech])
+                message["observation"]["units"][1].update({"type": "ARCHER", "range": 2, "attack": 2, "x": 3, "y": 1})
+                message["observation"]["board"]["tiles"][1][3]["unit_id"] = 2
+                message["observation"]["board"]["tiles"][2][3]["terrain"] = "FOREST"
+
+                tuned = _static_priors_for_variant(extension, message, "tuned")
+                experimental = _static_priors_for_variant(extension, message, "experimental")
+
+                self.assertGreater(experimental[f"research_{tech.lower()}"], tuned[f"research_{tech.lower()}"])
+
+    def test_static_eval_experimental_boosts_chivalry_for_knight_timing(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message_with_military_research_context(["CHIVALRY", "FREE_SPIRIT"], stars=24)
+        for unit_id, x, hp in [(2, 3, 5), (3, 4, 6), (4, 4, 7)]:
+            if unit_id == 2:
+                unit = message["observation"]["units"][1]
+            else:
+                unit = dict(message["observation"]["units"][1])
+                unit["id"] = unit_id
+                message["observation"]["units"].append(unit)
+            unit.update({"type": "WARRIOR", "x": x, "y": 2, "current_hp": hp, "max_hp": 10})
+            message["observation"]["board"]["tiles"][2][x]["unit_id"] = unit_id
+
+        tuned = _static_priors_for_variant(extension, message, "tuned")
+        experimental = _static_priors_for_variant(extension, message, "experimental")
+
+        self.assertGreater(experimental["research_chivalry"], tuned["research_chivalry"])
+
+    def test_static_eval_experimental_boosts_naval_research_with_water_and_upgrade_context(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message_with_military_research_context(["SAILING", "RAMMING", "NAVIGATION"])
+        for y in range(6):
+            message["observation"]["board"]["tiles"][y][0]["terrain"] = "WATER"
+            message["observation"]["board"]["tiles"][y][5]["terrain"] = "WATER"
+        message["observation"]["board"]["tiles"][1][0]["building"] = "PORT"
+        message["observation"]["units"][0].update({"type": "RAFT", "x": 0, "y": 1})
+        message["observation"]["units"][1].update({"type": "SCOUT", "x": 5, "y": 1})
+        message["actions"].insert(0, {"id": "upgrade_scout", "type": "UPGRADE_SCOUT", "unit_id": 1, "u": 1})
+        message["actions"].insert(1, {"id": "upgrade_rammer", "type": "UPGRADE_RAMMER", "unit_id": 1, "u": 1})
+        message["actions"].insert(2, {"id": "upgrade_bomber", "type": "UPGRADE_BOMBER", "unit_id": 1, "u": 1})
+
+        tuned = _static_priors_for_variant(extension, message, "tuned")
+        experimental = _static_priors_for_variant(extension, message, "experimental")
+
+        self.assertGreater(experimental["research_sailing"], tuned["research_sailing"])
+        self.assertGreater(experimental["research_ramming"], tuned["research_ramming"])
+        self.assertGreater(experimental["research_navigation"], tuned["research_navigation"])
+
+    def test_static_eval_experimental_penalizes_poor_post_tech_exploitability(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message_with_military_research_context(["MATHEMATICS"], stars=4)
+        message["observation"]["units"] = []
+        message["observation"]["board"]["tiles"][1][1]["unit_id"] = 0
+        message["observation"]["board"]["tiles"][1][3]["unit_id"] = 0
+        message["observation"]["cities"][1]["has_walls"] = False
+        message["observation"]["cities"][1]["level"] = 1
+
+        tuned = _static_priors_for_variant(extension, message, "tuned")
+        experimental = _static_priors_for_variant(extension, message, "experimental")
+
+        self.assertLess(experimental["research_mathematics"], tuned["research_mathematics"])
+
     def test_static_eval_accepts_neutral_observed_city(self) -> None:
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)
@@ -1451,6 +1650,63 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertGreater(priors[0], priors[2])
         self.assertGreater(priors[1], priors[2])
+
+    def test_static_eval_prefers_road_frontier_progress_over_branching(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message()
+        observation = message["observation"]
+        observation["tribes"][0]["stars"] = 10
+        observation["tribes"][0]["cities"] = [10, 20]
+        observation["cities"] = [
+            {"id": 10, "tribe_id": 0, "x": 0, "y": 1, "level": 1, "population": 0, "population_need": 2, "production": 1, "is_capital": True},
+            {"id": 20, "tribe_id": 0, "x": 3, "y": 1, "level": 1, "population": 0, "population_need": 2, "production": 1, "is_capital": False},
+        ]
+        for city in observation["cities"]:
+            tile = observation["board"]["tiles"][city["y"]][city["x"]]
+            tile["terrain"] = "CITY"
+            tile["city_id"] = city["id"]
+        observation["board"]["tiles"][1][1]["road"] = True
+        message["actions"] = [
+            {"id": "branch", "type": "BUILD_ROAD", "tribe_id": 0, "p": 0, "x": 1, "y": 2},
+            {"id": "connect", "type": "BUILD_ROAD", "tribe_id": 0, "p": 0, "x": 2, "y": 1},
+            {"id": "end", "type": "END_TURN"},
+        ]
+
+        tuned = _static_priors_for_variant(extension, message, "tuned")
+        experimental = _static_priors_for_variant(extension, message, "experimental")
+
+        self.assertGreater(tuned["connect"], tuned["branch"])
+        self.assertGreater(experimental["connect"], experimental["branch"])
+
+    def test_static_eval_does_not_reward_branches_from_connected_city_roads(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message()
+        observation = message["observation"]
+        observation["tribes"][0]["stars"] = 10
+        observation["tribes"][0]["cities"] = [10, 20]
+        observation["cities"] = [
+            {"id": 10, "tribe_id": 0, "x": 0, "y": 1, "level": 1, "population": 0, "population_need": 2, "production": 1, "is_capital": True},
+            {"id": 20, "tribe_id": 0, "x": 3, "y": 1, "level": 1, "population": 0, "population_need": 2, "production": 1, "is_capital": False},
+        ]
+        for city in observation["cities"]:
+            tile = observation["board"]["tiles"][city["y"]][city["x"]]
+            tile["terrain"] = "CITY"
+            tile["city_id"] = city["id"]
+        observation["board"]["tiles"][1][1]["road"] = True
+        observation["board"]["tiles"][1][2]["road"] = True
+        message["actions"] = [
+            {"id": "branch", "type": "BUILD_ROAD", "tribe_id": 0, "p": 0, "x": 2, "y": 2},
+            {"id": "spawn", "type": "SPAWN", "position": {"x": 0, "y": 1}, "x": 0, "y": 1},
+            {"id": "end", "type": "END_TURN"},
+        ]
+
+        tuned = _static_priors_for_variant(extension, message, "tuned")
+        experimental = _static_priors_for_variant(extension, message, "experimental")
+
+        self.assertLess(tuned["branch"], tuned["spawn"])
+        self.assertLess(experimental["branch"], experimental["spawn"])
 
     def test_static_eval_prefers_parsed_unit_attack_over_type_fallback(self) -> None:
         extension = load_native_mcts_extension()
@@ -2046,6 +2302,29 @@ class NativeMCTSTest(unittest.TestCase):
                     "24",
                     "--action-id",
                     "A6",
+                    "--max-actions",
+                    "512",
+                    "--no-compile-java",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
+    def test_java_parity_smoke_hidden_capital_points_worth(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "smoke:basic",
+                    "--depth",
+                    "2",
+                    "--max-states",
+                    "24",
+                    "--max-actions-per-state",
+                    "24",
+                    "--action-id",
+                    "s6_A5",
                     "--max-actions",
                     "512",
                     "--no-compile-java",

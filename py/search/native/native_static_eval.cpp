@@ -5,9 +5,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <iostream>
 #include <map>
+#include <sstream>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace tribes::native {
@@ -111,9 +114,25 @@ double clamp(double value, double lo, double hi) {
   return std::max(lo, std::min(hi, value));
 }
 
-bool use_baseline_eval() {
+enum class StaticEvalVariant {
+  Baseline,
+  Tuned,
+  Experimental,
+};
+
+StaticEvalVariant static_eval_variant() {
   const char* value = std::getenv("TRIBES_STATIC_EVAL_VARIANT");
-  return value != nullptr && std::string(value) == "baseline";
+  if (value == nullptr) {
+    return StaticEvalVariant::Tuned;
+  }
+  const std::string variant(value);
+  if (variant == "baseline") {
+    return StaticEvalVariant::Baseline;
+  }
+  if (variant == "experimental") {
+    return StaticEvalVariant::Experimental;
+  }
+  return StaticEvalVariant::Tuned;
 }
 
 const NativeUnit* unit_by_id(const NativeGameState& state, int id) {
@@ -406,29 +425,6 @@ int nearest_enemy_city_distance(const NativeGameState& state, int player_id, int
   return best;
 }
 
-bool is_trade_node_for_player(const NativeGameState& state, int player_id, const NativeTile& tile) {
-  if (tile.road || tile.terrain == "VILLAGE") {
-    return true;
-  }
-  if (tile.terrain == "CITY") {
-    const NativeCity* city = city_by_id(state, tile.city_id);
-    return city != nullptr && city->tribe_id == player_id;
-  }
-  return tile.building == "PORT" || tile.building == "DOCK";
-}
-
-int adjacent_trade_nodes(const NativeGameState& state, int player_id, int x, int y) {
-  int count = 0;
-  static const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-  for (const auto& dir : dirs) {
-    const NativeTile* tile = tile_at(state, x + dir[0], y + dir[1]);
-    if (tile != nullptr && tile->explored && is_trade_node_for_player(state, player_id, *tile)) {
-      ++count;
-    }
-  }
-  return count;
-}
-
 const NativeUnit* stronger_enemy_near(const NativeGameState& state, const NativeUnit& unit) {
   for (const NativeUnit& enemy : state.units) {
     if (enemy.tribe_id == unit.tribe_id || enemy.hidden || enemy.current_hp <= 0) {
@@ -508,6 +504,594 @@ double research_score_tuned(const NativeAction& action, const NativeGameState& s
     score -= 1.1;
   }
   return clamp(score, 0.0, 8.5);
+}
+
+bool is_water_terrain(const std::string& terrain) {
+  return terrain == "WATER" || terrain == "OCEAN" || terrain == "SHALLOW_WATER" ||
+      terrain == "DEEP_WATER";
+}
+
+bool is_naval_unit(const std::string& type) {
+  return type == "RAFT" || type == "BOAT" || type == "SHIP" || type == "BATTLESHIP" ||
+      type == "RAMMER" || type == "SCOUT" || type == "BOMBER" || type == "DINGHY" ||
+      type == "PIRATE" || type == "JUGGERNAUT";
+}
+
+bool is_city_occupied_by_player(const NativeGameState& state, const NativeCity& city, int player_id) {
+  const NativeTile* tile = tile_at(state, city.x, city.y);
+  if (tile == nullptr || tile->unit_id <= 0) {
+    return false;
+  }
+  const NativeUnit* unit = unit_by_id(state, tile->unit_id);
+  return unit != nullptr && unit->tribe_id == player_id && unit->current_hp > 0;
+}
+
+const NativeCity* owned_city_center_at(const NativeGameState& state, int player_id, int x, int y);
+const NativeCity* capital_for_player(const NativeGameState& state, int player_id);
+
+int tech_cost_for(const NativeTribe* tribe, const std::string& tech, int city_count) {
+  const int tier = tech_tier_score(tech);
+  int cost = 4 + tier * std::max(1, city_count);
+  if (tribe != nullptr &&
+      std::find(tribe->researched_tech_ids.begin(), tribe->researched_tech_ids.end(), "PHILOSOPHY") !=
+          tribe->researched_tech_ids.end()) {
+    cost = static_cast<int>(std::ceil(static_cast<double>(cost) * (2.0 / 3.0)));
+  }
+  return cost;
+}
+
+struct MilitaryResearchContext {
+  int player_id = 0;
+  int stars_after_research = 0;
+  int city_count = 0;
+  int spawn_capacity = 0;
+  int occupied_city_centers = 0;
+  int exposed_city_center_units = 0;
+  double city_threat = 0.0;
+  double friendly_power = 0.0;
+  double enemy_power = 0.0;
+  double local_enemy_pressure = 0.0;
+  double local_friendly_support = 0.0;
+  int vulnerable_friendly_units = 0;
+  int enemy_ranged = 0;
+  int enemy_durable_melee = 0;
+  int enemy_mobile = 0;
+  int enemy_siege = 0;
+  int enemy_naval = 0;
+  int enemy_cloak = 0;
+  int damaged_low_hp_enemies = 0;
+  int clustered_enemies = 0;
+  int enemy_city_pressure = 0;
+  int wall_city_break_need = 0;
+  int water_tiles = 0;
+  int coastal_cities = 0;
+  int port_count = 0;
+  int mountain_fronts = 0;
+  int forest_fronts = 0;
+  int villages_near_front = 0;
+  int own_rafts_or_scouts = 0;
+  int visible_enemy_units = 0;
+  int visible_enemy_cities = 0;
+  bool enemy_can_threaten_owned_city = false;
+  bool enemy_can_threaten_capital = false;
+  bool contested_village_exists = false;
+  int frontline_enemy_city_proximity = 0;
+  int friendly_unit_pressure_on_enemy_city = 0;
+  bool urgent_non_research_spend = false;
+  bool has_spawn_action = false;
+  bool has_road_action = false;
+  bool has_ship_upgrade = false;
+  bool has_scout_upgrade = false;
+  bool has_rammer_upgrade = false;
+  bool has_bomber_upgrade = false;
+  bool has_peace_action = false;
+  bool has_embassy_action = false;
+  bool has_enemy_city_reachable = false;
+};
+
+std::set<int> city_ids_connected_by_candidate_road(
+    const NativeGameState& state,
+    int player_id,
+    int x,
+    int y);
+bool candidate_merges_city_connections(
+    const NativeGameState& state,
+    int player_id,
+    int x,
+    int y,
+    bool* connects_capital);
+bool candidate_extends_city_connection(
+    const NativeGameState& state,
+    int player_id,
+    const std::set<int>& connected_city_ids,
+    int x,
+    int y,
+    bool* capital_progress);
+
+bool can_spawn_unit_type_soon(
+    const NativeGameState& state,
+    int player_id,
+    const std::string& unit_type,
+    int stars_after_research) {
+  const int cost = unit_type == "KNIGHT" || unit_type == "CATAPULT" ? 8 :
+      (unit_type == "SWORDMAN" || unit_type == "SWORDSMAN" ? 5 : 3);
+  const int soon_cost = std::max(0, cost - 2);
+  if (stars_after_research < soon_cost) {
+    return false;
+  }
+  for (const NativeCity& city : state.cities) {
+    if (city.tribe_id == player_id && city.production > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool has_city_resource_followup(const NativeGameState& state, int player_id, const std::string& tech) {
+  for (const NativeCity& city : state.cities) {
+    if (city.tribe_id != player_id) {
+      continue;
+    }
+    for (const NativeTile& tile : state.tiles) {
+      if (!tile.visible || !tile_in_player_city(state, player_id, tile)) {
+        continue;
+      }
+      if ((tech == "SMITHERY" && (tile.resource == "ORE" || tile.building == "MINE")) ||
+          (tech == "MATHEMATICS" && (tile.terrain == "FOREST" || tile.building == "LUMBER_HUT"))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool has_safe_catapult_position(const NativeGameState& state, int player_id) {
+  for (const NativeCity& city : state.cities) {
+    if (city.tribe_id != player_id || is_city_occupied_by_player(state, city, player_id)) {
+      continue;
+    }
+    if (friendly_support_at(state, player_id, city.x, city.y) >= enemy_attack_pressure_at(state, player_id, city.x, city.y)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool has_knight_chain_targets(const NativeGameState& state, int player_id) {
+  int targets = 0;
+  for (const NativeUnit& unit : state.units) {
+    if (unit.tribe_id != player_id && !unit.hidden && unit.current_hp > 0 &&
+        (unit.current_hp <= 7 || unit_range_value(unit) >= 2 || unit.type == "CATAPULT")) {
+      ++targets;
+    }
+  }
+  return targets >= 2;
+}
+
+bool has_city_connection_road_followup(
+    const NativeGameState& state,
+    int player_id,
+    const std::vector<NativeAction>& actions,
+    const std::vector<int>& legal_action_indexes) {
+  for (int action_index : legal_action_indexes) {
+    if (action_index < 0 || action_index >= static_cast<int>(actions.size()) ||
+        action_type(actions[action_index]) != "BUILD_ROAD") {
+      continue;
+    }
+    int x = 0;
+    int y = 0;
+    if (!action_destination(actions[action_index], &x, &y)) {
+      continue;
+    }
+    const std::set<int> connected = city_ids_connected_by_candidate_road(state, player_id, x, y);
+    bool connects_capital = false;
+    bool capital_progress = false;
+    if (candidate_merges_city_connections(state, player_id, x, y, &connects_capital) ||
+        candidate_extends_city_connection(state, player_id, connected, x, y, &capital_progress)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool has_unit_tempo_road_followup(const NativeGameState& state, int player_id) {
+  for (const NativeUnit& unit : state.units) {
+    if (unit.tribe_id != player_id || unit.current_hp <= 0) {
+      continue;
+    }
+    for (const NativeTile& tile : state.tiles) {
+      if (!tile.visible) {
+        continue;
+      }
+      const NativeCity* city = nullptr;
+      if (tile.city_id > 0) {
+        city = city_by_id(state, tile.city_id);
+      }
+      const bool enemy_city = city != nullptr && city->tribe_id >= 0 && city->tribe_id != player_id;
+      const bool threatened_city = owned_city_center_at(state, player_id, tile.x, tile.y) != nullptr &&
+          enemy_attack_pressure_at(state, player_id, tile.x, tile.y) > 1.0;
+      const bool target = tile.terrain == "VILLAGE" || tile.resource == "RUINS" || enemy_city || threatened_city;
+      if (target && chebyshev(unit.x, unit.y, tile.x, tile.y) >= 2 && chebyshev(unit.x, unit.y, tile.x, tile.y) <= 4) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+MilitaryResearchContext build_military_research_context(
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions,
+    const std::vector<int>& legal_action_indexes,
+    const NativeAction* research_action) {
+  MilitaryResearchContext ctx;
+  ctx.player_id = state.active_player_id;
+  const NativeTribe* tribe = tribe_by_id(state, ctx.player_id);
+  ctx.city_count = static_cast<int>(std::count_if(state.cities.begin(), state.cities.end(), [&ctx](const NativeCity& city) {
+    return city.tribe_id == ctx.player_id;
+  }));
+  const std::string tech = research_action == nullptr ? "" : action_string(*research_action, "technology", "tech");
+  const int stars = tribe == nullptr ? 0 : tribe->stars;
+  ctx.stars_after_research = stars - tech_cost_for(tribe, tech, ctx.city_count);
+
+  for (const NativeCity& city : state.cities) {
+    if (city.tribe_id == ctx.player_id) {
+      ctx.spawn_capacity += std::max(0, city.production);
+      ctx.city_threat += enemy_attack_pressure_at(state, ctx.player_id, city.x, city.y);
+      ctx.local_friendly_support += friendly_support_at(state, ctx.player_id, city.x, city.y);
+      ctx.local_enemy_pressure += enemy_attack_pressure_at(state, ctx.player_id, city.x, city.y);
+      if (is_city_occupied_by_player(state, city, ctx.player_id)) {
+        ++ctx.occupied_city_centers;
+        if (enemy_attack_pressure_at(state, ctx.player_id, city.x, city.y) > 3.5) {
+          ++ctx.exposed_city_center_units;
+        }
+      }
+      for (const NativeTile& tile : state.tiles) {
+        if (!tile.visible || chebyshev(tile.x, tile.y, city.x, city.y) > 1) {
+          continue;
+        }
+        if (tile.building == "PORT" || tile.building == "DOCK") {
+          ++ctx.port_count;
+        }
+        if (is_water_terrain(tile.terrain)) {
+          ++ctx.coastal_cities;
+          break;
+        }
+      }
+    } else if (city.tribe_id >= 0) {
+      ++ctx.visible_enemy_cities;
+      const int nearest = nearest_friendly_city_distance(state, ctx.player_id, city.x, city.y);
+      if (nearest >= 0 && nearest <= 4) {
+        ++ctx.frontline_enemy_city_proximity;
+        ++ctx.enemy_city_pressure;
+        if (city.walls || city.level >= 3) {
+          ++ctx.wall_city_break_need;
+        }
+        if (nearest <= 3) {
+          ctx.has_enemy_city_reachable = true;
+        }
+      }
+    }
+  }
+
+  for (const NativeTile& tile : state.tiles) {
+    if (!tile.visible) {
+      continue;
+    }
+    if (is_water_terrain(tile.terrain)) {
+      ++ctx.water_tiles;
+    }
+    if (tile.terrain == "MOUNTAIN" && enemy_attack_pressure_at(state, ctx.player_id, tile.x, tile.y) > 1.0) {
+      ++ctx.mountain_fronts;
+    }
+    if (tile.terrain == "FOREST" && enemy_attack_pressure_at(state, ctx.player_id, tile.x, tile.y) > 1.0) {
+      ++ctx.forest_fronts;
+    }
+    if (tile.terrain == "VILLAGE" && nearest_friendly_city_distance(state, ctx.player_id, tile.x, tile.y) <= 4) {
+      ++ctx.villages_near_front;
+      bool friendly_close = false;
+      bool enemy_close = false;
+      for (const NativeUnit& unit : state.units) {
+        if (unit.hidden || unit.current_hp <= 0 || chebyshev(unit.x, unit.y, tile.x, tile.y) > 2) {
+          continue;
+        }
+        if (unit.tribe_id == ctx.player_id) {
+          friendly_close = true;
+        } else {
+          enemy_close = true;
+        }
+      }
+      ctx.contested_village_exists = ctx.contested_village_exists || (friendly_close && enemy_close);
+    }
+  }
+
+  for (const NativeUnit& unit : state.units) {
+    if (unit.hidden || unit.current_hp <= 0) {
+      continue;
+    }
+    const double power = unit_power(unit);
+    if (unit.tribe_id == ctx.player_id) {
+      ctx.friendly_power += power;
+      if (is_naval_unit(unit.type) && (unit.type == "RAFT" || unit.type == "SCOUT")) {
+        ++ctx.own_rafts_or_scouts;
+      }
+      if (enemy_attack_pressure_at(state, ctx.player_id, unit.x, unit.y) > friendly_support_at(state, ctx.player_id, unit.x, unit.y) + 2.5) {
+        ++ctx.vulnerable_friendly_units;
+      }
+      for (const NativeCity& city : state.cities) {
+        if (city.tribe_id >= 0 && city.tribe_id != ctx.player_id &&
+            chebyshev(unit.x, unit.y, city.x, city.y) <= unit_mobility_value(unit) + unit_range_value(unit) + 1) {
+          ++ctx.friendly_unit_pressure_on_enemy_city;
+          break;
+        }
+      }
+      continue;
+    }
+    ++ctx.visible_enemy_units;
+    ctx.enemy_power += power;
+    ctx.enemy_ranged += unit_range_value(unit) >= 2;
+    ctx.enemy_durable_melee += unit_range_value(unit) <= 1 && unit_defence_value(unit) >= 2.0 && unit.current_hp >= 10;
+    ctx.enemy_mobile += unit_mobility_value(unit) >= 2;
+    ctx.enemy_siege += unit.type == "CATAPULT" || unit.type == "BOMBER" || unit.type == "RAMMER";
+    ctx.enemy_naval += is_naval_unit(unit.type);
+    ctx.enemy_cloak += unit.type == "CLOAK" || unit.type == "DAGGER";
+    ctx.damaged_low_hp_enemies += unit.current_hp <= 7;
+    for (const NativeUnit& other : state.units) {
+      if (other.id != unit.id && other.tribe_id != ctx.player_id && !other.hidden && other.current_hp > 0 &&
+          chebyshev(unit.x, unit.y, other.x, other.y) <= 1) {
+        ++ctx.clustered_enemies;
+        break;
+      }
+    }
+    for (const NativeCity& city : state.cities) {
+      if (city.tribe_id != ctx.player_id) {
+        continue;
+      }
+      const bool can_threaten = chebyshev(unit.x, unit.y, city.x, city.y) <=
+          unit_mobility_value(unit) + unit_range_value(unit);
+      ctx.enemy_can_threaten_owned_city = ctx.enemy_can_threaten_owned_city || can_threaten;
+      ctx.enemy_can_threaten_capital = ctx.enemy_can_threaten_capital || (city.capital && can_threaten);
+    }
+  }
+
+  for (int action_index : legal_action_indexes) {
+    if (action_index < 0 || action_index >= static_cast<int>(actions.size())) {
+      continue;
+    }
+    const NativeAction& action = actions[action_index];
+    const std::string type = action_type(action);
+    ctx.has_spawn_action = ctx.has_spawn_action || type == "SPAWN";
+    ctx.has_road_action = ctx.has_road_action || type == "BUILD_ROAD";
+    ctx.has_ship_upgrade = ctx.has_ship_upgrade || type == "UPGRADE_SHIP" || type == "UPGRADE_BOAT";
+    ctx.has_scout_upgrade = ctx.has_scout_upgrade || type == "UPGRADE_SCOUT";
+    ctx.has_rammer_upgrade = ctx.has_rammer_upgrade || type == "UPGRADE_RAMMER";
+    ctx.has_bomber_upgrade = ctx.has_bomber_upgrade || type == "UPGRADE_BOMBER";
+    ctx.has_peace_action = ctx.has_peace_action || type == "PROPOSE_PEACE" || type == "ACCEPT_PEACE" ||
+        type == "PROPOSE_TREATY" || type == "ACCEPT_TREATY";
+    ctx.has_embassy_action = ctx.has_embassy_action || type == "BUILD_EMBASSY";
+  }
+  return ctx;
+}
+
+bool has_urgent_non_research_spend(
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions,
+    const std::vector<int>& legal_action_indexes,
+    const MilitaryResearchContext& ctx) {
+  const NativeTribe* tribe = tribe_by_id(state, ctx.player_id);
+  const int stars = tribe == nullptr ? 0 : tribe->stars;
+  bool high_value_spawn_or_build = false;
+  for (int action_index : legal_action_indexes) {
+    if (action_index < 0 || action_index >= static_cast<int>(actions.size())) {
+      continue;
+    }
+    const NativeAction& legal = actions[action_index];
+    const std::string type = action_type(legal);
+    if (type == "RESEARCH_TECH" || type == "RESEARCH") {
+      continue;
+    }
+    if (type == "CAPTURE" || type == "EXAMINE" || type == "MAKE_VETERAN") {
+      return true;
+    }
+    if (type == "ATTACK") {
+      const NativeUnit* target = unit_by_id(state, action_int(legal, "target_unit_id", "tu"));
+      if (target != nullptr && unit_value(*target) >= 5.0) {
+        return true;
+      }
+    }
+    if ((ctx.enemy_can_threaten_capital || ctx.enemy_can_threaten_owned_city) && type == "SPAWN") {
+      return true;
+    }
+    if (ctx.enemy_can_threaten_capital && type == "RECOVER") {
+      return true;
+    }
+    if (type == "RESOURCE_GATHERING") {
+      const NativeCity* city = city_by_id(state, legal.city_id);
+      if (city != nullptr && needed_to_level(city) <= 2) {
+        return true;
+      }
+      high_value_spawn_or_build = true;
+    }
+    if (type == "MOVE" || type == "STEP_MOVE") {
+      int dx = 0;
+      int dy = 0;
+      if (action_destination(legal, &dx, &dy)) {
+        const NativeTile* tile = tile_at(state, dx, dy);
+        if (tile != nullptr && (tile->terrain == "VILLAGE" || tile->resource == "RUINS")) {
+          return true;
+        }
+      }
+    }
+    if (type == "SPAWN" || type == "BUILD" || type == "BUILD_ROAD") {
+      high_value_spawn_or_build = true;
+    }
+  }
+  return high_value_spawn_or_build && ctx.stars_after_research < std::min(5, stars);
+}
+
+bool can_exploit_researched_tech_soon(
+    const std::string& tech,
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions,
+    const std::vector<int>& legal_action_indexes,
+    const MilitaryResearchContext& ctx) {
+  const bool contact = ctx.visible_enemy_units > 0 || ctx.visible_enemy_cities > 0 || ctx.contested_village_exists;
+  if (tech == "RIDING") {
+    const bool can_spawn = can_spawn_unit_type_soon(state, ctx.player_id, "RIDER", ctx.stars_after_research);
+    const bool expansion = ctx.villages_near_front > 0 || has_unit_tempo_road_followup(state, ctx.player_id);
+    const bool defense = ctx.enemy_can_threaten_owned_city || ctx.enemy_can_threaten_capital;
+    const bool pressure = contact && ctx.enemy_ranged + ctx.enemy_mobile > 0;
+    return can_spawn && (expansion || defense || pressure);
+  }
+  if (tech == "ROADS") {
+    return ctx.stars_after_research >= 3 &&
+        (has_city_connection_road_followup(state, ctx.player_id, actions, legal_action_indexes) ||
+         has_unit_tempo_road_followup(state, ctx.player_id));
+  }
+  if (tech == "ARCHERY") {
+    return contact && can_spawn_unit_type_soon(state, ctx.player_id, "ARCHER", ctx.stars_after_research) &&
+        (ctx.enemy_durable_melee > 0 || ctx.forest_fronts > 0 || ctx.local_friendly_support >= 2.0 ||
+         ctx.wall_city_break_need > 0);
+  }
+  if (tech == "STRATEGY") {
+    return (ctx.enemy_can_threaten_owned_city || ctx.enemy_can_threaten_capital) &&
+        (can_spawn_unit_type_soon(state, ctx.player_id, "DEFENDER", ctx.stars_after_research) || ctx.has_peace_action);
+  }
+  if (tech == "SMITHERY") {
+    return can_spawn_unit_type_soon(state, ctx.player_id, "SWORDMAN", ctx.stars_after_research) &&
+        (has_city_resource_followup(state, ctx.player_id, tech) || ctx.enemy_durable_melee > 0 ||
+         ctx.friendly_unit_pressure_on_enemy_city > 0);
+  }
+  if (tech == "MATHEMATICS") {
+    return (ctx.frontline_enemy_city_proximity > 0 || ctx.wall_city_break_need > 0 || has_city_resource_followup(state, ctx.player_id, tech)) &&
+        (has_city_resource_followup(state, ctx.player_id, tech) ||
+         (can_spawn_unit_type_soon(state, ctx.player_id, "CATAPULT", ctx.stars_after_research) &&
+          has_safe_catapult_position(state, ctx.player_id)));
+  }
+  if (tech == "CHIVALRY") {
+    const bool knight_access = has_knight_chain_targets(state, ctx.player_id) ||
+        ctx.friendly_unit_pressure_on_enemy_city > 0 || has_unit_tempo_road_followup(state, ctx.player_id);
+    const bool bad_targets = ctx.enemy_durable_melee + ctx.wall_city_break_need > ctx.damaged_low_hp_enemies + ctx.enemy_ranged + 1;
+    return can_spawn_unit_type_soon(state, ctx.player_id, "KNIGHT", ctx.stars_after_research) &&
+        knight_access && !bad_targets;
+  }
+  return true;
+}
+
+double military_research_overlay(
+    const NativeAction& action,
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions,
+    const std::vector<int>& legal_action_indexes,
+    const MilitaryResearchContext& ctx,
+    bool* can_exploit_out,
+    std::string* reason_flags_out) {
+  const std::string tech = action_string(action, "technology", "tech");
+  const bool contact = ctx.visible_enemy_units > 0 || ctx.visible_enemy_cities > 0 || ctx.contested_village_exists;
+  const bool can_exploit = can_exploit_researched_tech_soon(tech, state, actions, legal_action_indexes, ctx);
+  if (can_exploit_out != nullptr) {
+    *can_exploit_out = can_exploit;
+  }
+  std::vector<std::string> reasons;
+  const double city_threat = clamp(ctx.city_threat / 6.0, 0.0, 1.4);
+  const double enemy_advantage = clamp((ctx.enemy_power - ctx.friendly_power) / 8.0, 0.0, 1.5);
+  const double water = clamp((ctx.water_tiles + 2 * ctx.coastal_cities + 2 * ctx.port_count) / 8.0, 0.0, 2.0);
+  double overlay = 0.0;
+
+  if (tech == "RIDING") overlay += can_exploit ? 0.55 + 0.25 * ctx.villages_near_front + 0.30 * city_threat : -0.25;
+  else if (tech == "ROADS") overlay += can_exploit ? 0.70 + 0.30 * ctx.frontline_enemy_city_proximity : -0.55;
+  else if (tech == "FREE_SPIRIT") overlay += 0.25 + (ctx.stars_after_research >= 8 ? 0.45 : 0.0);
+  else if (tech == "CHIVALRY") overlay += 0.55 + 0.45 * ctx.damaged_low_hp_enemies + 0.35 * ctx.clustered_enemies +
+      0.45 * clamp((ctx.friendly_power - ctx.enemy_power) / 8.0, 0.0, 1.5);
+  else if (tech == "STRATEGY") overlay += 0.85 + 1.00 * city_threat + 0.45 * ctx.exposed_city_center_units +
+      0.25 * ctx.has_peace_action;
+  else if (tech == "ARCHERY") overlay += 0.65 + 0.45 * ctx.enemy_durable_melee + 0.25 * ctx.enemy_mobile +
+      0.35 * ctx.forest_fronts + 0.20 * enemy_advantage;
+  else if (tech == "SMITHERY") overlay += 0.55 + 0.65 * ctx.enemy_durable_melee + 0.45 * ctx.enemy_city_pressure +
+      0.35 * city_threat;
+  else if (tech == "MATHEMATICS") overlay += 0.60 + 0.85 * ctx.wall_city_break_need + 0.45 * ctx.enemy_city_pressure +
+      0.35 * ctx.enemy_siege - (ctx.local_friendly_support < 2.0 ? 0.9 : 0.0);
+  else if (tech == "FISHING") overlay += 0.25 + 0.35 * water + 0.25 * ctx.has_ship_upgrade;
+  else if (tech == "SAILING") overlay += 0.35 + 0.55 * water + 0.55 * ctx.own_rafts_or_scouts + 0.35 * ctx.has_scout_upgrade;
+  else if (tech == "RAMMING") overlay += 0.35 + 0.45 * water + 0.45 * ctx.enemy_naval + 0.45 * ctx.has_rammer_upgrade;
+  else if (tech == "NAVIGATION") overlay += 0.45 + 0.65 * water + 0.55 * ctx.enemy_naval + 0.55 * ctx.has_bomber_upgrade;
+  else if (tech == "AQUATISM") overlay += 0.15 + 0.45 * water + 0.65 * ctx.enemy_naval;
+  else if (tech == "DIPLOMACY") overlay += 0.30 + 0.65 * ctx.has_enemy_city_reachable + 0.35 * ctx.has_embassy_action +
+      0.30 * ctx.enemy_cloak + (ctx.stars_after_research >= 8 ? 0.35 : -0.35);
+  else if (tech == "CLIMBING") overlay += 0.25 + 0.45 * ctx.mountain_fronts + 0.25 * city_threat;
+
+  const bool gated_military = tech == "RIDING" || tech == "ROADS" || tech == "ARCHERY" ||
+      tech == "STRATEGY" || tech == "SMITHERY" || tech == "MATHEMATICS" || tech == "CHIVALRY";
+  if (gated_military) {
+    if (!can_exploit) {
+      overlay = std::min(overlay, 0.10);
+      reasons.push_back("no_exploit");
+    } else {
+      overlay += 0.45;
+      reasons.push_back("exploit");
+    }
+    if (!contact && tech != "RIDING" && tech != "ROADS") {
+      overlay = std::min(overlay, 0.0);
+      reasons.push_back("no_contact");
+    }
+    if (ctx.urgent_non_research_spend) {
+      overlay -= (tech == "RIDING" || tech == "ROADS") ? 0.35 : 0.75;
+      reasons.push_back("urgent_spend");
+    }
+  }
+  if (tech == "MATHEMATICS" && (ctx.enemy_city_pressure == 0 || ctx.stars_after_research < 0)) {
+    overlay -= 0.8;
+  }
+  if (ctx.stars_after_research < 0) {
+    overlay -= 0.45;
+  }
+  if (reason_flags_out != nullptr) {
+    std::ostringstream joined;
+    for (size_t i = 0; i < reasons.size(); ++i) {
+      if (i > 0) joined << ",";
+      joined << reasons[i];
+    }
+    *reason_flags_out = joined.str();
+  }
+  return clamp(overlay, -1.6, 1.8);
+}
+
+double research_score_experimental(
+    const NativeAction& action,
+    const NativeGameState& state,
+    int player_id,
+    const std::vector<NativeAction>& actions,
+    const std::vector<int>& legal_action_indexes,
+    const MilitaryResearchContext& ctx) {
+  const double tuned = research_score_tuned(action, state, player_id);
+  bool can_exploit = false;
+  std::string reason_flags;
+  const double overlay = military_research_overlay(
+      action, state, actions, legal_action_indexes, ctx, &can_exploit, &reason_flags);
+  const double final = clamp(tuned + overlay, 0.0, 9.2);
+  const char* debug = std::getenv("TRIBES_STATIC_EVAL_DEBUG_RESEARCH");
+  if (debug != nullptr && std::string(debug) == "1") {
+    const NativeTribe* tribe = tribe_by_id(state, player_id);
+    std::cerr << "research_eval"
+              << " tick=" << state.tick
+              << " stars=" << (tribe == nullptr ? 0 : tribe->stars)
+              << " tech=" << action_string(action, "technology", "tech")
+              << " base_tuned_score=" << tuned
+              << " overlay_score=" << overlay
+              << " final_score=" << final
+              << " can_exploit_soon=" << (can_exploit ? 1 : 0)
+              << " urgent_non_research_spend=" << (ctx.urgent_non_research_spend ? 1 : 0)
+              << " visible_enemy_units=" << ctx.visible_enemy_units
+              << " visible_enemy_cities=" << ctx.visible_enemy_cities
+              << " enemy_can_threaten_owned_city=" << (ctx.enemy_can_threaten_owned_city ? 1 : 0)
+              << " enemy_can_threaten_capital=" << (ctx.enemy_can_threaten_capital ? 1 : 0)
+              << " contested_village_exists=" << (ctx.contested_village_exists ? 1 : 0)
+              << " frontline_enemy_city_proximity=" << ctx.frontline_enemy_city_proximity
+              << " friendly_unit_pressure_on_enemy_city=" << ctx.friendly_unit_pressure_on_enemy_city
+              << " reason_flags=" << reason_flags
+              << "\n";
+  }
+  return final;
 }
 
 double build_score_baseline(const NativeAction& action, const NativeGameState& state, int player_id) {
@@ -827,7 +1411,403 @@ double move_score_tuned(const NativeAction& action, const NativeGameState& state
   return clamp(score, 0.0, 10.0);
 }
 
-double road_score_tuned(const NativeAction& action, const NativeGameState& state, int player_id) {
+const NativeCity* owned_city_center_at(const NativeGameState& state, int player_id, int x, int y) {
+  for (const NativeCity& city : state.cities) {
+    if (city.tribe_id == player_id && city.x == x && city.y == y) {
+      return &city;
+    }
+  }
+  return nullptr;
+}
+
+const NativeCity* capital_for_player(const NativeGameState& state, int player_id) {
+  for (const NativeCity& city : state.cities) {
+    if (city.tribe_id == player_id && city.capital) {
+      return &city;
+    }
+  }
+  return nullptr;
+}
+
+int owned_city_count_for_player(const NativeGameState& state, int player_id) {
+  return static_cast<int>(std::count_if(state.cities.begin(), state.cities.end(), [player_id](const NativeCity& city) {
+    return city.tribe_id == player_id;
+  }));
+}
+
+int enemy_city_count_for_player(const NativeGameState& state, int player_id) {
+  return static_cast<int>(std::count_if(state.cities.begin(), state.cities.end(), [player_id](const NativeCity& city) {
+    return city.tribe_id >= 0 && city.tribe_id != player_id;
+  }));
+}
+
+void collect_city_ids_from_road_component(
+    const NativeGameState& state,
+    int player_id,
+    int start_x,
+    int start_y,
+    std::set<int>* city_ids) {
+  if (city_ids == nullptr) {
+    return;
+  }
+  const NativeTile* start = tile_at(state, start_x, start_y);
+  if (start == nullptr || !start->road) {
+    return;
+  }
+  std::vector<std::pair<int, int>> stack;
+  std::set<std::pair<int, int>> visited;
+  stack.push_back({start_x, start_y});
+  visited.insert({start_x, start_y});
+  static const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+  while (!stack.empty()) {
+    const std::pair<int, int> current = stack.back();
+    stack.pop_back();
+    const int x = current.first;
+    const int y = current.second;
+    for (const auto& dir : dirs) {
+      const int nx = x + dir[0];
+      const int ny = y + dir[1];
+      const NativeCity* city = owned_city_center_at(state, player_id, nx, ny);
+      if (city != nullptr) {
+        city_ids->insert(city->id);
+      }
+      const NativeTile* tile = tile_at(state, nx, ny);
+      if (tile != nullptr && tile->road && !visited.count({nx, ny})) {
+        visited.insert({nx, ny});
+        stack.push_back({nx, ny});
+      }
+    }
+  }
+}
+
+std::set<int> city_ids_connected_by_candidate_road(
+    const NativeGameState& state,
+    int player_id,
+    int x,
+    int y) {
+  std::set<int> city_ids;
+  const NativeCity* candidate_city = owned_city_center_at(state, player_id, x, y);
+  if (candidate_city != nullptr) {
+    city_ids.insert(candidate_city->id);
+  }
+  static const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+  for (const auto& dir : dirs) {
+    const int nx = x + dir[0];
+    const int ny = y + dir[1];
+    const NativeCity* city = owned_city_center_at(state, player_id, nx, ny);
+    if (city != nullptr) {
+      city_ids.insert(city->id);
+    }
+    collect_city_ids_from_road_component(state, player_id, nx, ny, &city_ids);
+  }
+  return city_ids;
+}
+
+std::vector<std::set<int>> city_connection_groups_adjacent_to_candidate(
+    const NativeGameState& state,
+    int player_id,
+    int x,
+    int y) {
+  std::vector<std::set<int>> groups;
+  std::set<std::pair<int, int>> visited_roads;
+  static const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+
+  for (const auto& dir : dirs) {
+    const int nx = x + dir[0];
+    const int ny = y + dir[1];
+    const NativeCity* city = owned_city_center_at(state, player_id, nx, ny);
+    if (city != nullptr) {
+      groups.push_back({city->id});
+    }
+    const NativeTile* tile = tile_at(state, nx, ny);
+    if (tile == nullptr || !tile->road || visited_roads.count({nx, ny})) {
+      continue;
+    }
+
+    std::set<int> city_ids;
+    std::vector<std::pair<int, int>> stack;
+    stack.push_back({nx, ny});
+    visited_roads.insert({nx, ny});
+    while (!stack.empty()) {
+      const std::pair<int, int> current = stack.back();
+      stack.pop_back();
+      for (const auto& component_dir : dirs) {
+        const int cx = current.first + component_dir[0];
+        const int cy = current.second + component_dir[1];
+        const NativeCity* component_city = owned_city_center_at(state, player_id, cx, cy);
+        if (component_city != nullptr) {
+          city_ids.insert(component_city->id);
+        }
+        const NativeTile* component_tile = tile_at(state, cx, cy);
+        if (component_tile != nullptr && component_tile->road && !visited_roads.count({cx, cy})) {
+          visited_roads.insert({cx, cy});
+          stack.push_back({cx, cy});
+        }
+      }
+    }
+    if (!city_ids.empty()) {
+      groups.push_back(city_ids);
+    }
+  }
+  return groups;
+}
+
+bool candidate_merges_city_connections(
+    const NativeGameState& state,
+    int player_id,
+    int x,
+    int y,
+    bool* connects_capital) {
+  if (connects_capital != nullptr) {
+    *connects_capital = false;
+  }
+  const std::vector<std::set<int>> groups = city_connection_groups_adjacent_to_candidate(state, player_id, x, y);
+  std::set<int> merged_city_ids;
+  bool merged_distinct_groups = false;
+  for (const std::set<int>& group : groups) {
+    bool adds_new_city = false;
+    for (int city_id : group) {
+      if (!merged_city_ids.count(city_id)) {
+        adds_new_city = true;
+        break;
+      }
+    }
+    if (adds_new_city && !merged_city_ids.empty()) {
+      merged_distinct_groups = true;
+    }
+    merged_city_ids.insert(group.begin(), group.end());
+  }
+  if (!merged_distinct_groups || merged_city_ids.size() < 2) {
+    return false;
+  }
+  const NativeCity* capital = capital_for_player(state, player_id);
+  if (connects_capital != nullptr && capital != nullptr && merged_city_ids.count(capital->id) > 0) {
+    *connects_capital = true;
+  }
+  return true;
+}
+
+int connected_frontier_distance_to_target(
+    const NativeGameState& state,
+    int player_id,
+    int x,
+    int y,
+    const NativeCity& target) {
+  int best = -1;
+  static const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+  std::vector<std::pair<int, int>> stack;
+  std::set<std::pair<int, int>> visited;
+  auto observe = [&best, &target](int px, int py) {
+    const int dist = chebyshev(px, py, target.x, target.y);
+    if (best < 0 || dist < best) {
+      best = dist;
+    }
+  };
+
+  for (const auto& dir : dirs) {
+    const int nx = x + dir[0];
+    const int ny = y + dir[1];
+    const NativeCity* city = owned_city_center_at(state, player_id, nx, ny);
+    if (city != nullptr) {
+      observe(city->x, city->y);
+    }
+    const NativeTile* tile = tile_at(state, nx, ny);
+    if (tile != nullptr && tile->road && !visited.count({nx, ny})) {
+      visited.insert({nx, ny});
+      stack.push_back({nx, ny});
+    }
+  }
+
+  while (!stack.empty()) {
+    const std::pair<int, int> current = stack.back();
+    stack.pop_back();
+    observe(current.first, current.second);
+    for (const auto& dir : dirs) {
+      const int nx = current.first + dir[0];
+      const int ny = current.second + dir[1];
+      const NativeCity* city = owned_city_center_at(state, player_id, nx, ny);
+      if (city != nullptr) {
+        observe(city->x, city->y);
+      }
+      const NativeTile* tile = tile_at(state, nx, ny);
+      if (tile != nullptr && tile->road && !visited.count({nx, ny})) {
+        visited.insert({nx, ny});
+        stack.push_back({nx, ny});
+      }
+    }
+  }
+  return best;
+}
+
+const NativeCity* nearest_other_owned_city(
+    const NativeGameState& state,
+    int player_id,
+    const NativeCity& source,
+    bool prefer_capital) {
+  const NativeCity* best = nullptr;
+  int best_dist = 0;
+  for (const NativeCity& city : state.cities) {
+    if (city.tribe_id != player_id || city.id == source.id) {
+      continue;
+    }
+    if (prefer_capital && !city.capital) {
+      continue;
+    }
+    const int dist = chebyshev(source.x, source.y, city.x, city.y);
+    if (best == nullptr || dist < best_dist) {
+      best = &city;
+      best_dist = dist;
+    }
+  }
+  if (best != nullptr || !prefer_capital) {
+    return best;
+  }
+  return nearest_other_owned_city(state, player_id, source, false);
+}
+
+bool candidate_extends_city_connection(
+    const NativeGameState& state,
+    int player_id,
+    const std::set<int>& connected_city_ids,
+    int x,
+    int y,
+    bool* capital_progress) {
+  bool progress = false;
+  bool capital = false;
+  const NativeCity* player_capital = capital_for_player(state, player_id);
+  for (int city_id : connected_city_ids) {
+    const NativeCity* source = city_by_id(state, city_id);
+    if (source == nullptr || source->tribe_id != player_id) {
+      continue;
+    }
+    const bool source_is_capital = player_capital != nullptr && source->id == player_capital->id;
+    const NativeCity* target = source_is_capital
+        ? nearest_other_owned_city(state, player_id, *source, false)
+        : (player_capital != nullptr ? player_capital : nearest_other_owned_city(state, player_id, *source, false));
+    if (target == nullptr) {
+      continue;
+    }
+    const int frontier_to_target = connected_frontier_distance_to_target(state, player_id, x, y, *target);
+    const int candidate_to_target = chebyshev(x, y, target->x, target->y);
+    if (frontier_to_target >= 0 && candidate_to_target < frontier_to_target) {
+      progress = true;
+      if (source_is_capital || target->capital) {
+        capital = true;
+      }
+    }
+  }
+  if (capital_progress != nullptr) {
+    *capital_progress = capital;
+  }
+  return progress;
+}
+
+bool has_affordable_high_value_research(
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions,
+    const std::vector<int>& legal_action_indexes,
+    int player_id) {
+  const NativeTribe* tribe = tribe_by_id(state, player_id);
+  const int stars = tribe == nullptr ? 0 : tribe->stars;
+  const int city_count = owned_city_count_for_player(state, player_id);
+  for (int action_index : legal_action_indexes) {
+    if (action_index < 0 || action_index >= static_cast<int>(actions.size())) {
+      continue;
+    }
+    const NativeAction& legal = actions[action_index];
+    const std::string type = action_type(legal);
+    if (type != "RESEARCH_TECH" && type != "RESEARCH") {
+      continue;
+    }
+    const std::string tech = action_string(legal, "technology", "tech");
+    if (stars >= tech_cost_for(tribe, tech, city_count) && research_score_tuned(legal, state, player_id) >= 6.0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool has_near_level_resource_gathering(
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions,
+    const std::vector<int>& legal_action_indexes) {
+  for (int action_index : legal_action_indexes) {
+    if (action_index < 0 || action_index >= static_cast<int>(actions.size())) {
+      continue;
+    }
+    const NativeAction& legal = actions[action_index];
+    if (action_type(legal) != "RESOURCE_GATHERING") {
+      continue;
+    }
+    const NativeCity* city = city_by_id(state, legal.city_id);
+    if (city != nullptr && needed_to_level(city) <= 2) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool has_defensive_spending_need(
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions,
+    const std::vector<int>& legal_action_indexes,
+    int player_id) {
+  double city_threat = 0.0;
+  double city_support = 0.0;
+  for (const NativeCity& city : state.cities) {
+    if (city.tribe_id != player_id) {
+      continue;
+    }
+    city_threat += enemy_attack_pressure_at(state, player_id, city.x, city.y);
+    city_support += friendly_support_at(state, player_id, city.x, city.y);
+  }
+  bool can_spawn = false;
+  for (int action_index : legal_action_indexes) {
+    if (action_index < 0 || action_index >= static_cast<int>(actions.size())) {
+      continue;
+    }
+    can_spawn = can_spawn || action_type(actions[action_index]) == "SPAWN";
+  }
+  return can_spawn && city_threat > city_support + 3.0;
+}
+
+double road_bonus_readiness(
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions,
+    const std::vector<int>& legal_action_indexes,
+    int player_id,
+    int cost) {
+  const NativeTribe* tribe = tribe_by_id(state, player_id);
+  const int stars = tribe == nullptr ? 0 : tribe->stars;
+  const int my_cities = owned_city_count_for_player(state, player_id);
+  const int enemy_cities = enemy_city_count_for_player(state, player_id);
+  double readiness = 1.0;
+  if (stars <= cost + 1) {
+    readiness *= 0.35;
+  } else if (stars <= cost + 3) {
+    readiness *= 0.65;
+  }
+  if (enemy_cities > my_cities) {
+    readiness *= 0.70;
+  }
+  if (has_defensive_spending_need(state, actions, legal_action_indexes, player_id)) {
+    readiness *= 0.55;
+  }
+  if (has_affordable_high_value_research(state, actions, legal_action_indexes, player_id)) {
+    readiness *= 0.70;
+  }
+  if (has_near_level_resource_gathering(state, actions, legal_action_indexes)) {
+    readiness *= 0.75;
+  }
+  return clamp(readiness, 0.20, 1.0);
+}
+
+double road_score_tuned(
+    const NativeAction& action,
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions,
+    const std::vector<int>& legal_action_indexes,
+    int player_id) {
   const NativeTribe* tribe = tribe_by_id(state, player_id);
   const int stars = tribe == nullptr ? 0 : tribe->stars;
   int x = 0;
@@ -836,38 +1816,65 @@ double road_score_tuned(const NativeAction& action, const NativeGameState& state
     return 0.0;
   }
   const NativeTile* tile = tile_at(state, x, y);
-  if (tile == nullptr || tile->road || stars < 3) {
+  if (tile == nullptr || tile->road) {
     return 0.0;
   }
-  const bool water = tile->terrain == "SHALLOW_WATER" || tile->terrain == "WATER" || tile->terrain == "DEEP_WATER";
+  const bool water = is_water_terrain(tile->terrain);
   const int cost = water ? 5 : 3;
-  if (stars < cost) {
+  if (stars < cost || owned_city_count_for_player(state, player_id) < 2) {
     return 0.0;
   }
-  double score = -0.4;
-  if (tile->terrain == "VILLAGE") {
-    score += 1.6;
+
+  const std::set<int> connected_city_ids = city_ids_connected_by_candidate_road(state, player_id, x, y);
+  bool connects_capital = false;
+  const bool connects_multiple_cities =
+      candidate_merges_city_connections(state, player_id, x, y, &connects_capital);
+  bool capital_progress = false;
+  const bool extends_connection = candidate_extends_city_connection(
+      state, player_id, connected_city_ids, x, y, &capital_progress);
+  const bool shortens_unit_target_path = has_unit_tempo_road_followup(state, player_id);
+
+  double score = 0.0;
+  if (connects_multiple_cities && connects_capital) {
+    score += 4.2;
+  } else if (connects_multiple_cities) {
+    score += 3.2;
+  } else if (capital_progress) {
+    score += 2.1;
+  } else if (extends_connection) {
+    score += 1.4;
   }
+
+  if (score <= 0.0) {
+    return 0.0;
+  }
+
   if (tile_in_player_city(state, player_id, *tile)) {
-    score += 0.9;
-  } else if (tile->city_id > 0) {
-    score -= 1.0;
-  }
-  const int links = adjacent_trade_nodes(state, player_id, x, y);
-  if (links >= 2) {
-    score += 3.2 + 0.7 * static_cast<double>(links - 2);
-  } else if (links == 1) {
-    score += 0.7;
-  } else {
-    score -= 1.4;
+    score += 0.35;
   }
   if (water) {
-    score -= 1.0;
+    score *= 0.65;
   }
-  if (stars <= cost + 2) {
-    score -= 0.8;
+
+  const double raw_score = score;
+  const double readiness = road_bonus_readiness(state, actions, legal_action_indexes, player_id, cost);
+  score *= readiness;
+  const double final = clamp(score, 0.0, 4.4);
+  const char* debug = std::getenv("TRIBES_STATIC_EVAL_DEBUG_ROADS");
+  if (debug != nullptr && std::string(debug) == "1") {
+    std::cerr << "road_eval"
+              << " tile=" << x << "," << y
+              << " stars=" << stars
+              << " connects_city_component=" << (connects_multiple_cities ? 1 : 0)
+              << " connects_capital_network=" << (connects_capital ? 1 : 0)
+              << " extends_city_network=" << (extends_connection ? 1 : 0)
+              << " shortens_unit_target_path=" << (shortens_unit_target_path ? 1 : 0)
+              << " raw_score=" << raw_score
+              << " readiness=" << readiness
+              << " final_score=" << final
+              << "\n";
   }
-  return clamp(score, 0.0, 5.2);
+  return final;
 }
 
 double action_score_baseline(const NativeAction& action, const NativeGameState& state) {
@@ -948,7 +1955,11 @@ double action_score_baseline(const NativeAction& action, const NativeGameState& 
   return 0.0;
 }
 
-double action_score_tuned(const NativeAction& action, const NativeGameState& state) {
+double action_score_tuned(
+    const NativeAction& action,
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions,
+    const std::vector<int>& legal_action_indexes) {
   const int player_id = state.active_player_id;
   const std::string type = action_type(action);
   if (type == "CAPTURE") return capture_score_tuned(action, state, player_id);
@@ -994,7 +2005,7 @@ double action_score_tuned(const NativeAction& action, const NativeGameState& sta
     if (bonus == "CITY_WALL") return 4.0;
     return 2.2;
   }
-  if (type == "BUILD_ROAD") return road_score_tuned(action, state, player_id);
+  if (type == "BUILD_ROAD") return road_score_tuned(action, state, actions, legal_action_indexes, player_id);
   if (type == "RESEARCH_TECH") return research_score_tuned(action, state, player_id);
   if (type == "BUILD_EMBASSY") return stars >= 5 ? 3.2 : 0.8;
   if (type == "PROPOSE_PEACE" || type == "PROPOSE_TREATY" || type == "ACCEPT_PEACE" || type == "ACCEPT_TREATY") return 1.2;
@@ -1003,17 +2014,66 @@ double action_score_tuned(const NativeAction& action, const NativeGameState& sta
   return 0.0;
 }
 
+double action_score_tuned(const NativeAction& action, const NativeGameState& state) {
+  static const std::vector<NativeAction> no_actions;
+  static const std::vector<int> no_legal_action_indexes;
+  return action_score_tuned(action, state, no_actions, no_legal_action_indexes);
+}
+
+double action_score_experimental(
+    const NativeAction& action,
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions,
+    const std::vector<int>& legal_action_indexes,
+    const MilitaryResearchContext* research_context) {
+  const int player_id = state.active_player_id;
+  const std::string type = action_type(action);
+  if ((type == "RESEARCH_TECH" || type == "RESEARCH") && research_context != nullptr) {
+    return research_score_experimental(action, state, player_id, actions, legal_action_indexes, *research_context);
+  }
+  return action_score_tuned(action, state, actions, legal_action_indexes);
+}
+
 std::vector<double> priors_for_state(const NativeGameState& state, const std::vector<NativeAction>& actions) {
+  const StaticEvalVariant variant = static_eval_variant();
+  std::vector<MilitaryResearchContext> experimental_contexts;
+  if (variant == StaticEvalVariant::Experimental) {
+    for (int action_index : state.legal_action_indexes) {
+      if (action_index < 0 || action_index >= static_cast<int>(actions.size())) {
+        continue;
+      }
+      const NativeAction& action = actions[action_index];
+      const std::string type = action_type(action);
+      if (type == "RESEARCH_TECH" || type == "RESEARCH") {
+        MilitaryResearchContext ctx = build_military_research_context(state, actions, state.legal_action_indexes, &action);
+        ctx.urgent_non_research_spend = has_urgent_non_research_spend(state, actions, state.legal_action_indexes, ctx);
+        experimental_contexts.push_back(ctx);
+      }
+    }
+  }
   std::vector<double> scores;
   scores.reserve(state.legal_action_indexes.size());
   double min_score = 0.0;
   double max_score = 0.0;
   bool have_score = false;
+  size_t experimental_context_index = 0;
   for (int action_index : state.legal_action_indexes) {
-    const double score = action_index >= 0 && action_index < static_cast<int>(actions.size())
-        ? (use_baseline_eval() ? action_score_baseline(actions[action_index], state)
-                               : action_score_tuned(actions[action_index], state))
-        : 0.0;
+    double score = 0.0;
+    if (action_index >= 0 && action_index < static_cast<int>(actions.size())) {
+      if (variant == StaticEvalVariant::Baseline) {
+        score = action_score_baseline(actions[action_index], state);
+      } else if (variant == StaticEvalVariant::Experimental) {
+        const std::string type = action_type(actions[action_index]);
+        const MilitaryResearchContext* context = nullptr;
+        if ((type == "RESEARCH_TECH" || type == "RESEARCH") &&
+            experimental_context_index < experimental_contexts.size()) {
+          context = &experimental_contexts[experimental_context_index++];
+        }
+        score = action_score_experimental(actions[action_index], state, actions, state.legal_action_indexes, context);
+      } else {
+        score = action_score_tuned(actions[action_index], state, actions, state.legal_action_indexes);
+      }
+    }
     scores.push_back(score);
     min_score = have_score ? std::min(min_score, score) : score;
     max_score = have_score ? std::max(max_score, score) : score;
@@ -1203,11 +2263,9 @@ double state_value_tuned(const NativeGameState& state) {
   double village_control = 0.0;
   int explored = 0;
   int visible_resources = 0;
-  int roads = 0;
   for (const NativeTile& tile : state.tiles) {
     explored += tile.explored ? 1 : 0;
     visible_resources += tile.visible && !tile.resource.empty() && tile_in_player_city(state, player_id, tile) ? 1 : 0;
-    roads += tile.road && tile_in_player_city(state, player_id, tile) ? 1 : 0;
     if (tile.visible && tile.terrain == "VILLAGE") {
       ++visible_villages;
       int my_best = -1;
@@ -1262,7 +2320,7 @@ double state_value_tuned(const NativeGameState& state) {
       0.16 * my_score + 0.10 * (my_score - best_enemy_score) +
       1.25 * my_tech +
       1.55 * static_cast<double>(visible_villages) + 1.4 * village_control +
-      0.32 * static_cast<double>(visible_resources) + 0.20 * static_cast<double>(roads) + exploration +
+      0.32 * static_cast<double>(visible_resources) + exploration +
       0.55 * attack_opportunity + 0.55 * enemy_city_pressure -
       1.55 * vulnerable_penalty - 1.7 * capital_threat - 0.85 * city_threat -
       0.75 * static_cast<double>(wounded_units) +
@@ -1270,12 +2328,23 @@ double state_value_tuned(const NativeGameState& state) {
   return std::tanh(raw / 95.0);
 }
 
+double state_value_experimental(const NativeGameState& state) {
+  return state_value_tuned(state);
+}
+
 StaticEvaluation static_evaluation_for_state(
     const NativeGameState& state,
     const std::vector<NativeAction>& actions) {
+  const StaticEvalVariant variant = static_eval_variant();
   StaticEvaluation evaluation;
   evaluation.priors = priors_for_state(state, actions);
-  evaluation.value = use_baseline_eval() ? state_value_baseline(state) : state_value_tuned(state);
+  if (variant == StaticEvalVariant::Baseline) {
+    evaluation.value = state_value_baseline(state);
+  } else if (variant == StaticEvalVariant::Experimental) {
+    evaluation.value = state_value_experimental(state);
+  } else {
+    evaluation.value = state_value_tuned(state);
+  }
   return evaluation;
 }
 
