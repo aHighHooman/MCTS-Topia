@@ -319,7 +319,7 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="cpu", help="Device passed through to the self-play runner.")
     parser.add_argument("--start-seed", type=int, default=10_000_000)
     parser.add_argument("--deterministic", action="store_true")
-    parser.add_argument("--static-eval-variant", type=str, default=None)
+    parser.add_argument("--static-eval-variant", choices=("baseline", "experimental"), default=None)
 
     parser.add_argument("--simulations", "--mcts-sims", dest="simulations", type=int, default=256)
     parser.add_argument("--max-depth", type=int, default=0)

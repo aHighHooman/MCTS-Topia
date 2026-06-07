@@ -70,7 +70,7 @@ def main() -> None:
     parser.add_argument("--top-k-actions", type=int, default=64)
     parser.add_argument("--max-actions", type=int, default=512, help="Maximum actions to parse/search; use -1 for no cap.")
     parser.add_argument("--search-batch-size", type=int, default=64)
-    parser.add_argument("--static-eval-variant", choices=("baseline", "tuned", "experimental"), default="tuned")
+    parser.add_argument("--static-eval-variant", choices=("baseline", "experimental"), default="baseline")
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--seed", type=int, default=13)
     args = parser.parse_args()

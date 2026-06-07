@@ -57,7 +57,7 @@ _MCTS_SEARCH_DEFAULTS: dict[str, Any] = {
     "java_classpath": None,
     "java_main_class": None,
     "checkpoint": str(DEFAULT_AUTORESEARCH_CHECKPOINT),
-    "static_eval_variant": "tuned",
+    "static_eval_variant": "baseline",
     "device": None,
     "simulations": None,
     "wall_time_sec": 10.0,
@@ -1451,8 +1451,8 @@ def _load_mcts_search_config(path: Path = DEFAULT_MCTS_SEARCH_CONFIG) -> argpars
     values["synthetic"] = False
     if str(values.get("evaluator")) not in {"nn", "static", "bot"}:
         raise ValueError("mcts_search config evaluator must be one of: nn, static, bot")
-    if str(values.get("static_eval_variant")) not in {"baseline", "tuned", "experimental"}:
-        raise ValueError("mcts_search config static_eval_variant must be one of: baseline, tuned, experimental")
+    if str(values.get("static_eval_variant")) not in {"baseline", "experimental"}:
+        raise ValueError("mcts_search config static_eval_variant must be one of: baseline, experimental")
     for key in _PATH_CONFIG_KEYS:
         value = values.get(key)
         if isinstance(value, str) and value:

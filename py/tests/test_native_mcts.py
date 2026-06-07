@@ -1458,17 +1458,15 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertGreaterEqual(float(evaluation["value"]), -1.0)
         self.assertLessEqual(float(evaluation["value"]), 1.0)
 
-    def test_static_eval_variants_keep_baseline_and_tuned_stable_without_research_context(self) -> None:
+    def test_static_eval_variants_keep_baseline_and_experimental_stable_without_research_context(self) -> None:
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)
         message = _message()
 
         baseline = _static_priors_for_variant(extension, message, "baseline")
-        tuned = _static_priors_for_variant(extension, message, "tuned")
         experimental = _static_priors_for_variant(extension, message, "experimental")
 
-        self.assertNotEqual(baseline, tuned)
-        self.assertEqual(tuned, experimental)
+        self.assertEqual(baseline, experimental)
 
     def test_static_eval_experimental_does_not_boost_military_research_without_contact(self) -> None:
         extension = load_native_mcts_extension()
@@ -1480,10 +1478,10 @@ class NativeMCTSTest(unittest.TestCase):
                 message["observation"]["cities"][1]["tribe_id"] = -1
                 message["observation"]["board"]["tiles"][1][3]["unit_id"] = 0
 
-                tuned = _static_priors_for_variant(extension, message, "tuned")
+                baseline = _static_priors_for_variant(extension, message, "baseline")
                 experimental = _static_priors_for_variant(extension, message, "experimental")
 
-                self.assertLessEqual(experimental[f"research_{tech.lower()}"], tuned[f"research_{tech.lower()}"])
+                self.assertLessEqual(experimental[f"research_{tech.lower()}"], baseline[f"research_{tech.lower()}"])
 
     def test_static_eval_experimental_requires_real_road_followup_for_roads_research(self) -> None:
         extension = load_native_mcts_extension()
@@ -1493,10 +1491,10 @@ class NativeMCTSTest(unittest.TestCase):
         message["observation"]["cities"][1]["tribe_id"] = -1
         message["observation"]["board"]["tiles"][1][3]["unit_id"] = 0
 
-        tuned = _static_priors_for_variant(extension, message, "tuned")
+        baseline = _static_priors_for_variant(extension, message, "baseline")
         experimental = _static_priors_for_variant(extension, message, "experimental")
 
-        self.assertLessEqual(experimental["research_roads"], tuned["research_roads"])
+        self.assertLessEqual(experimental["research_roads"], baseline["research_roads"])
 
     def test_static_eval_experimental_boosts_defensive_military_research_under_city_threat(self) -> None:
         extension = load_native_mcts_extension()
@@ -1513,10 +1511,10 @@ class NativeMCTSTest(unittest.TestCase):
                 message["observation"]["board"]["tiles"][1][3]["unit_id"] = 0
                 message["observation"]["board"]["tiles"][1][2]["unit_id"] = 2
 
-                tuned = _static_priors_for_variant(extension, message, "tuned")
+                baseline = _static_priors_for_variant(extension, message, "baseline")
                 experimental = _static_priors_for_variant(extension, message, "experimental")
 
-                self.assertGreater(experimental[f"research_{tech.lower()}"], tuned[f"research_{tech.lower()}"])
+                self.assertGreater(experimental[f"research_{tech.lower()}"], baseline[f"research_{tech.lower()}"])
 
     def test_static_eval_experimental_boosts_archery_and_mathematics_for_ranged_city_break_need(self) -> None:
         extension = load_native_mcts_extension()
@@ -1528,10 +1526,10 @@ class NativeMCTSTest(unittest.TestCase):
                 message["observation"]["board"]["tiles"][1][3]["unit_id"] = 2
                 message["observation"]["board"]["tiles"][2][3]["terrain"] = "FOREST"
 
-                tuned = _static_priors_for_variant(extension, message, "tuned")
+                baseline = _static_priors_for_variant(extension, message, "baseline")
                 experimental = _static_priors_for_variant(extension, message, "experimental")
 
-                self.assertGreater(experimental[f"research_{tech.lower()}"], tuned[f"research_{tech.lower()}"])
+                self.assertGreater(experimental[f"research_{tech.lower()}"], baseline[f"research_{tech.lower()}"])
 
     def test_static_eval_experimental_boosts_chivalry_for_knight_timing(self) -> None:
         extension = load_native_mcts_extension()
@@ -1547,10 +1545,10 @@ class NativeMCTSTest(unittest.TestCase):
             unit.update({"type": "WARRIOR", "x": x, "y": 2, "current_hp": hp, "max_hp": 10})
             message["observation"]["board"]["tiles"][2][x]["unit_id"] = unit_id
 
-        tuned = _static_priors_for_variant(extension, message, "tuned")
+        baseline = _static_priors_for_variant(extension, message, "baseline")
         experimental = _static_priors_for_variant(extension, message, "experimental")
 
-        self.assertGreater(experimental["research_chivalry"], tuned["research_chivalry"])
+        self.assertGreater(experimental["research_chivalry"], baseline["research_chivalry"])
 
     def test_static_eval_experimental_boosts_naval_research_with_water_and_upgrade_context(self) -> None:
         extension = load_native_mcts_extension()
@@ -1566,12 +1564,12 @@ class NativeMCTSTest(unittest.TestCase):
         message["actions"].insert(1, {"id": "upgrade_rammer", "type": "UPGRADE_RAMMER", "unit_id": 1, "u": 1})
         message["actions"].insert(2, {"id": "upgrade_bomber", "type": "UPGRADE_BOMBER", "unit_id": 1, "u": 1})
 
-        tuned = _static_priors_for_variant(extension, message, "tuned")
+        baseline = _static_priors_for_variant(extension, message, "baseline")
         experimental = _static_priors_for_variant(extension, message, "experimental")
 
-        self.assertGreater(experimental["research_sailing"], tuned["research_sailing"])
-        self.assertGreater(experimental["research_ramming"], tuned["research_ramming"])
-        self.assertGreater(experimental["research_navigation"], tuned["research_navigation"])
+        self.assertGreater(experimental["research_sailing"], baseline["research_sailing"])
+        self.assertGreater(experimental["research_ramming"], baseline["research_ramming"])
+        self.assertGreater(experimental["research_navigation"], baseline["research_navigation"])
 
     def test_static_eval_experimental_penalizes_poor_post_tech_exploitability(self) -> None:
         extension = load_native_mcts_extension()
@@ -1583,10 +1581,10 @@ class NativeMCTSTest(unittest.TestCase):
         message["observation"]["cities"][1]["has_walls"] = False
         message["observation"]["cities"][1]["level"] = 1
 
-        tuned = _static_priors_for_variant(extension, message, "tuned")
+        baseline = _static_priors_for_variant(extension, message, "baseline")
         experimental = _static_priors_for_variant(extension, message, "experimental")
 
-        self.assertLess(experimental["research_mathematics"], tuned["research_mathematics"])
+        self.assertLess(experimental["research_mathematics"], baseline["research_mathematics"])
 
     def test_static_eval_accepts_neutral_observed_city(self) -> None:
         extension = load_native_mcts_extension()
@@ -1673,10 +1671,10 @@ class NativeMCTSTest(unittest.TestCase):
             {"id": "end", "type": "END_TURN"},
         ]
 
-        tuned = _static_priors_for_variant(extension, message, "tuned")
+        baseline = _static_priors_for_variant(extension, message, "baseline")
         experimental = _static_priors_for_variant(extension, message, "experimental")
 
-        self.assertGreater(tuned["connect"], tuned["branch"])
+        self.assertGreater(baseline["connect"], baseline["branch"])
         self.assertGreater(experimental["connect"], experimental["branch"])
 
     def test_static_eval_does_not_reward_branches_from_connected_city_roads(self) -> None:
@@ -1702,10 +1700,10 @@ class NativeMCTSTest(unittest.TestCase):
             {"id": "end", "type": "END_TURN"},
         ]
 
-        tuned = _static_priors_for_variant(extension, message, "tuned")
+        baseline = _static_priors_for_variant(extension, message, "baseline")
         experimental = _static_priors_for_variant(extension, message, "experimental")
 
-        self.assertLess(tuned["branch"], tuned["spawn"])
+        self.assertLess(baseline["branch"], baseline["spawn"])
         self.assertLess(experimental["branch"], experimental["spawn"])
 
     def test_static_eval_prefers_parsed_unit_attack_over_type_fallback(self) -> None:
