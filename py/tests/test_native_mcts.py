@@ -1186,7 +1186,7 @@ class NativeMCTSTest(unittest.TestCase):
         defender = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 2)
         defender_tribe = next(tribe for tribe in leaf_payload["observation"]["tribes"] if tribe["id"] == 1)
 
-        self.assertEqual(defender["kills"], 1)
+        self.assertEqual(defender["kills"], 0)
         self.assertEqual(defender_tribe["kills"], 0)
 
     def test_native_infiltrate_transition_spawns_daggers(self) -> None:
@@ -2354,6 +2354,28 @@ class NativeMCTSTest(unittest.TestCase):
                     "64",
                     "--action-id",
                     "s19_A30",
+                    "--max-actions",
+                    "768",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
+    def test_java_parity_milestone4_retaliation_does_not_increment_kills(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "milestone4:units",
+                    "--depth",
+                    "1",
+                    "--max-states",
+                    "1",
+                    "--max-actions-per-state",
+                    "64",
+                    "--action-id",
+                    "A44",
                     "--max-actions",
                     "768",
                 ]

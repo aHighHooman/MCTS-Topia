@@ -335,9 +335,16 @@ void set_unit_payload_field(NativeGameState& state, int unit_id, const char* nor
     if (read_int(unit, "id", 0) != unit_id) {
       continue;
     }
-    unit[normalized] = value;
+    py::handle actual_value = value;
+    const NativeUnit* native_unit = unit_by_id_const(state, unit_id);
+    if (native_unit != nullptr && native_unit->tribe_id != state.root_player_id &&
+        ((normalized != nullptr && strcmp(normalized, "kills") == 0) ||
+         (compact != nullptr && strcmp(compact, "k") == 0))) {
+      actual_value = py::int_(0);
+    }
+    unit[normalized] = actual_value;
     if (compact != nullptr) {
-      unit[compact] = value;
+      unit[compact] = actual_value;
     }
     return;
   }
