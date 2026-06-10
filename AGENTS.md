@@ -61,7 +61,6 @@ python -m training.checkpoint_tournament
 ## Important Files
 
 - `docs/external-bot-protocol.md`: JSON stdin/stdout protocol and forward-model command loop.
-- `docs/hybrid-rl-model-architecture.md` and `docs/hybrid-selfplay-architecture.md`: RL/model/self-play architecture notes.
 - External Java: `src/core/game/RegressionHarness.java`, `src/HeadlessPlay.java`, `src/Tournament.java`.
 - `play.json`: default single-game config.
 - `tournament.json`: default tournament config.
@@ -73,7 +72,6 @@ python -m training.checkpoint_tournament
 - `py/nn/model.py`, `py/nn/belief.py`, `py/nn/augmentation.py`: model, belief, and replay augmentation.
 - `py/search/native/cpp_extension.py`: native extension loader/build behavior.
 - `py/bots/`: protocol-facing external bots.
-- `levels/`: CSV levels and test maps.
 
 ## Coding Guidance
 
@@ -82,6 +80,4 @@ python -m training.checkpoint_tournament
 - Observation and forward-model states are player-specific hidden-information copies, not omniscient game state.
 - Do not preserve backward compatibility when updating bots, tree searches, training code, or tests unless explicitly requested.
 - Requested functionality should become the default behavior; only add explicit flags or toggles when asked.
-- When changing encoded features, keep `py/nn/encoding.py`, `ModelConfig`/`py/search/config.py`, `py/nn/model.py`, model input assumptions, and related tests in sync.
-- When changing training defaults, keep `py/training/config.py`, bot CLI arguments, replay serialization, and tests aligned.
 - When changing native transitions or static evaluation, compare against Java behavior and prefer adding focused parity coverage in `py/tests/test_native_mcts.py` or the parity runner.
