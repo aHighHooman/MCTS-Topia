@@ -2428,6 +2428,28 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(status, 0)
 
+    def test_java_parity_milestone4_upgraded_scout_move_reveals_full_range(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "milestone4:units",
+                    "--depth",
+                    "2",
+                    "--max-states",
+                    "56",
+                    "--max-actions-per-state",
+                    "64",
+                    "--action-id",
+                    "s55_A56",
+                    "--max-actions",
+                    "768",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
     def test_java_parity_milestone4_disembark_move_does_not_add_extra_unit_id(self) -> None:
         status = run_parity(
             parse_args(

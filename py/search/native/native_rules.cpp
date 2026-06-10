@@ -582,6 +582,7 @@ void append_payload_int_to_list(py::dict owner, const char* key, int value) {
 }
 
 void append_city_payload_unit(NativeGameState& state, int city_id, int unit_id);
+int reveal_square_for_root(NativeGameState& state, int cx, int cy, int radius);
 
 void append_extra_unit_payload(NativeGameState& state, int tribe_id, int unit_id) {
   if (!state.observation.contains("tribes") || !py::isinstance<py::list>(state.observation["tribes"])) {
@@ -1434,6 +1435,14 @@ bool apply_move(NativeGameState& next, const NativeAction& action) {
   if (water_unit_type(unit->type) &&
       (to->terrain == "PLAIN" || to->terrain == "FOREST" || to->terrain == "MOUNTAIN" ||
        to->terrain == "CITY" || to->terrain == "VILLAGE")) {
+    if (unit->tribe_id == next.root_player_id) {
+      const int reveal_radius =
+          (to->terrain == "MOUNTAIN" || unit->type == "SCOUT" || unit->type == "CLOAK" || unit->type == "DINGHY") ? 2 : 1;
+      const int newly_explored = reveal_square_for_root(next, x, y, reveal_radius);
+      if (newly_explored != 0) {
+        update_tribe_economy(next, unit->tribe_id, 0, newly_explored * 5);
+      }
+    }
     const int old_unit_id = unit->id;
     const int new_unit_id = next_unit_id(next);
     NativeUnit old_unit_ref = *unit;
@@ -2227,43 +2236,46 @@ bool unit_visible_to_root(const NativeGameState& state, const NativeUnit& unit) 
   return !unit.hidden && tile_visible_for_asset(state, unit.x, unit.y);
 }
 
-int reveal_from_current_assets(NativeGameState& state) {
+int reveal_square_for_root(NativeGameState& state, int cx, int cy, int radius) {
   int newly_explored = 0;
-  auto reveal_square = [&](int cx, int cy, int radius) {
-    for (NativeTile& tile : state.tiles) {
-      if (std::max(std::abs(tile.x - cx), std::abs(tile.y - cy)) <= radius) {
-        if (!tile.explored) {
-          newly_explored += 1;
-        }
-        tile.explored = true;
-        tile.visible = true;
-        if (tile.terrain.empty()) {
-          tile.terrain = "PLAIN";
-        }
-        if (tile.city_id <= 0) {
-          for (const NativeCity& city : state.cities) {
-            if (std::max(std::abs(tile.x - city.x), std::abs(tile.y - city.y)) <= 1) {
-              tile.city_id = city.id;
-              if (tile.x == city.x && tile.y == city.y) {
-                tile.terrain = "CITY";
-                tile.road = true;
-                append_visible_city_payload(state, city);
-              }
-              break;
+  for (NativeTile& tile : state.tiles) {
+    if (std::max(std::abs(tile.x - cx), std::abs(tile.y - cy)) <= radius) {
+      if (!tile.explored) {
+        newly_explored += 1;
+      }
+      tile.explored = true;
+      tile.visible = true;
+      if (tile.terrain.empty()) {
+        tile.terrain = "PLAIN";
+      }
+      if (tile.city_id <= 0) {
+        for (const NativeCity& city : state.cities) {
+          if (std::max(std::abs(tile.x - city.x), std::abs(tile.y - city.y)) <= 1) {
+            tile.city_id = city.id;
+            if (tile.x == city.x && tile.y == city.y) {
+              tile.terrain = "CITY";
+              tile.road = true;
+              append_visible_city_payload(state, city);
             }
+            break;
           }
         }
       }
     }
-  };
+  }
+  return newly_explored;
+}
+
+int reveal_from_current_assets(NativeGameState& state) {
+  int newly_explored = 0;
   for (const NativeCity& city : state.cities) {
     if (city.tribe_id == state.root_player_id) {
-      reveal_square(city.x, city.y, 1);
+      newly_explored += reveal_square_for_root(state, city.x, city.y, 1);
     }
   }
   for (const NativeUnit& unit : state.units) {
     if (unit.tribe_id == state.root_player_id && unit.current_hp != 0) {
-      reveal_square(unit.x, unit.y, unit.type == "SCOUT" || unit.type == "CLOAK" ? 2 : 1);
+      newly_explored += reveal_square_for_root(state, unit.x, unit.y, unit.type == "SCOUT" || unit.type == "CLOAK" ? 2 : 1);
     }
   }
   return newly_explored;
