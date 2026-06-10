@@ -2103,7 +2103,7 @@ void append_visible_city_payload(NativeGameState& state, const NativeCity& city)
   out["need"] = city.population_need;
   out["production"] = city.production;
   out["prod"] = city.production;
-  out["bound"] = city.bound > 0 ? city.bound : 1;
+  out["bound"] = city.bound > 0 ? city.bound : (city.capital ? 0 : 1);
   const int visible_points = city.points_worth > 0
       ? city.points_worth
       : (city.capital ? inferred_hidden_capital_points_worth(state, city.id, city.x, city.y) : 0);
@@ -4693,7 +4693,7 @@ void ensure_city_payload_visible(NativeGameState& state, const NativeCity& nativ
   city["prod"] = native_city.production;
   city["cap"] = native_city.capital;
   city["wall"] = native_city.walls;
-  city["bound"] = native_city.bound <= 0 ? 1 : native_city.bound;
+  city["bound"] = native_city.bound > 0 ? native_city.bound : (native_city.capital ? 0 : 1);
   city["pts"] = native_city.points_worth > 0
       ? native_city.points_worth
       : (native_city.capital

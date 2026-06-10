@@ -2340,6 +2340,28 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(status, 0)
 
+    def test_java_parity_milestone4_move_reveals_hidden_capital_bound_zero(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "milestone4:units",
+                    "--depth",
+                    "2",
+                    "--max-states",
+                    "36",
+                    "--max-actions-per-state",
+                    "64",
+                    "--action-id",
+                    "s19_A30",
+                    "--max-actions",
+                    "768",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
     def test_java_parity_milestone3_city_end_turn_regenerates_enemy_actions(self) -> None:
         status = run_parity(
             parse_args(
