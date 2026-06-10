@@ -686,6 +686,42 @@ void move_unit_to_city(NativeGameState& state, NativeUnit& unit, NativeCity& tar
   set_unit_payload_field(state, unit.id, "city_id", "c", py::int_(target_city.id));
 }
 
+bool move_last_unit_from_city_to_city(NativeGameState& state, NativeCity& source_city, NativeCity& target_city) {
+  if (source_city.unit_ids.empty()) {
+    return false;
+  }
+  const int unit_id = source_city.unit_ids.back();
+  NativeUnit* unit = unit_by_id(state, unit_id);
+  if (unit == nullptr) {
+    return false;
+  }
+  move_unit_to_city(state, *unit, target_city);
+  return true;
+}
+
+bool move_one_unit_to_new_city(NativeGameState& state, int tribe_id, NativeCity& target_city) {
+  NativeTribe* tribe = tribe_by_id(state, tribe_id);
+  if (tribe == nullptr) {
+    return false;
+  }
+  NativeCity* capital = city_by_id(state, tribe->capital_id);
+  if (capital != nullptr && capital->id != target_city.id && capital->tribe_id == tribe_id &&
+      move_last_unit_from_city_to_city(state, *capital, target_city)) {
+    return true;
+  }
+  for (int city_id : tribe->city_ids) {
+    if (city_id == tribe->capital_id || city_id == target_city.id) {
+      continue;
+    }
+    NativeCity* city = city_by_id(state, city_id);
+    if (city != nullptr && city->tribe_id == tribe_id &&
+        move_last_unit_from_city_to_city(state, *city, target_city)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void sync_city_buildings_payload(NativeGameState& state, NativeCity& city) {
   const bool has_embassy = std::any_of(city.buildings.begin(), city.buildings.end(), [](const NativeBuilding& building) {
     return building.type == "EMBASSY";
@@ -1533,6 +1569,9 @@ bool apply_capture(NativeGameState& next, const NativeAction& action) {
       out["wall"] = false;
       out["inf"] = false;
       py::reinterpret_borrow<py::list>(next.observation["cities"]).append(out);
+    }
+    if (NativeCity* created_city = city_by_id(next, new_city.id); created_city != nullptr) {
+      move_one_unit_to_new_city(next, unit->tribe_id, *created_city);
     }
     unit->status = "FINISHED";
     set_unit_payload_field(next, unit->id, "status", "s", py::str("FINISHED"));
