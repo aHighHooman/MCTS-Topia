@@ -1422,7 +1422,6 @@ bool apply_move(NativeGameState& next, const NativeAction& action) {
     set_unit_payload_field(next, new_unit_id, "current_hp", "hp", py::int_(unit->current_hp));
     set_unit_payload_field(next, new_unit_id, "current_hp_exact", "hpx", py::float_(unit->current_hp_exact));
     remove_unit_from_owner_lists_payload(next, old_unit_ref);
-    append_extra_unit_payload(next, unit->tribe_id, new_unit_id);
     disembarked = true;
   }
   if (disembarked) {
