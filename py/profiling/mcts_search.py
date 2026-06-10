@@ -110,6 +110,8 @@ from training.config import rl_path
 
 _STATIC_TREE_DEPTH_SUM = 0
 _STATIC_TREE_MAX_DEPTH = 0
+_STATIC_TREE_TURN_DEPTH_SUM = 0
+_STATIC_TREE_MAX_TURN_DEPTH = 0
 _STATIC_TREE_SELECTED_PATHS = 0
 _STATIC_TREE_EXPANDED_NODE_IDS: set[int] = set()
 
@@ -155,10 +157,16 @@ class SearchStats:
     eval_cache_size: int = 0
     depth_sum: int = 0
     max_depth: int = 0
+    turn_depth_sum: int = 0
+    max_turn_depth: int = 0
 
     @property
     def average_depth(self) -> float:
         return float(self.depth_sum) / max(1, self.selected_paths)
+
+    @property
+    def average_turn_depth(self) -> float:
+        return float(self.turn_depth_sum) / max(1, self.selected_paths)
 
 
 @dataclass
@@ -677,6 +685,15 @@ def _install_timed_static_evaluator(collector: TimingCollector, branching: Branc
     return original
 
 
+def _tree_batch_stats(tree: Any) -> tuple[int, int, int, int]:
+    raw = tuple(tree.last_batch_stats())
+    depth_sum = int(raw[0]) if len(raw) >= 1 else 0
+    max_depth = int(raw[1]) if len(raw) >= 2 else 0
+    turn_depth_sum = int(raw[2]) if len(raw) >= 3 else 0
+    max_turn_depth = int(raw[3]) if len(raw) >= 4 else 0
+    return depth_sum, max_depth, turn_depth_sum, max_turn_depth
+
+
 def _install_timed_tree(extension: object, collector: TimingCollector, device: torch.device | str) -> type:
     original_cls = extension.NativeMCTS
 
@@ -719,31 +736,35 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
             return result
 
         def select_leaf_batch_evals_only(self, *args: Any, **kwargs: Any) -> Any:
-            global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_SELECTED_PATHS
+            global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_TURN_DEPTH_SUM, _STATIC_TREE_MAX_TURN_DEPTH, _STATIC_TREE_SELECTED_PATHS
             started_at = time.perf_counter()
             result = list(self._tree.select_leaf_batch_evals_only(*args, **kwargs))
             frontier = int(args[0]) if args else len(result)
             collector.add("native_tree.select_leaf_batch_evals_only", time.perf_counter() - started_at, items=frontier)
-            batch_depth_sum, batch_max_depth = self._tree.last_batch_stats()
+            batch_depth_sum, batch_max_depth, batch_turn_depth_sum, batch_max_turn_depth = _tree_batch_stats(self._tree)
             _STATIC_TREE_DEPTH_SUM += int(batch_depth_sum)
             _STATIC_TREE_MAX_DEPTH = max(_STATIC_TREE_MAX_DEPTH, int(batch_max_depth))
+            _STATIC_TREE_TURN_DEPTH_SUM += int(batch_turn_depth_sum)
+            _STATIC_TREE_MAX_TURN_DEPTH = max(_STATIC_TREE_MAX_TURN_DEPTH, int(batch_max_turn_depth))
             _STATIC_TREE_SELECTED_PATHS += len(result)
             return result
 
         def select_leaf_batches_evals_only(self, *args: Any, **kwargs: Any) -> Any:
-            global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_SELECTED_PATHS
+            global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_TURN_DEPTH_SUM, _STATIC_TREE_MAX_TURN_DEPTH, _STATIC_TREE_SELECTED_PATHS
             started_at = time.perf_counter()
             result, completed = self._tree.select_leaf_batches_evals_only(*args, **kwargs)
             result = list(result)
             collector.add("native_tree.select_leaf_batches_evals_only", time.perf_counter() - started_at, items=int(completed))
-            batch_depth_sum, batch_max_depth = self._tree.last_batch_stats()
+            batch_depth_sum, batch_max_depth, batch_turn_depth_sum, batch_max_turn_depth = _tree_batch_stats(self._tree)
             _STATIC_TREE_DEPTH_SUM += int(batch_depth_sum)
             _STATIC_TREE_MAX_DEPTH = max(_STATIC_TREE_MAX_DEPTH, int(batch_max_depth))
+            _STATIC_TREE_TURN_DEPTH_SUM += int(batch_turn_depth_sum)
+            _STATIC_TREE_MAX_TURN_DEPTH = max(_STATIC_TREE_MAX_TURN_DEPTH, int(batch_max_turn_depth))
             _STATIC_TREE_SELECTED_PATHS += int(completed)
             return result, int(completed)
 
         def run_static_search_batch(self, *args: Any, **kwargs: Any) -> Any:
-            global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_SELECTED_PATHS, _STATIC_TREE_EXPANDED_NODE_IDS
+            global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_TURN_DEPTH_SUM, _STATIC_TREE_MAX_TURN_DEPTH, _STATIC_TREE_SELECTED_PATHS, _STATIC_TREE_EXPANDED_NODE_IDS
             started_at = time.perf_counter()
             expanded, completed = self._tree.run_static_search_batch(*args, **kwargs)
             expanded = int(expanded)
@@ -752,9 +773,11 @@ def _install_timed_tree(extension: object, collector: TimingCollector, device: t
             if hasattr(self._tree, "last_static_timing"):
                 for name, elapsed_ms in dict(self._tree.last_static_timing()).items():
                     collector.add(f"native_static.{name}", float(elapsed_ms) / 1000.0, items=completed)
-            batch_depth_sum, batch_max_depth = self._tree.last_batch_stats()
+            batch_depth_sum, batch_max_depth, batch_turn_depth_sum, batch_max_turn_depth = _tree_batch_stats(self._tree)
             _STATIC_TREE_DEPTH_SUM += int(batch_depth_sum)
             _STATIC_TREE_MAX_DEPTH = max(_STATIC_TREE_MAX_DEPTH, int(batch_max_depth))
+            _STATIC_TREE_TURN_DEPTH_SUM += int(batch_turn_depth_sum)
+            _STATIC_TREE_MAX_TURN_DEPTH = max(_STATIC_TREE_MAX_TURN_DEPTH, int(batch_max_turn_depth))
             _STATIC_TREE_SELECTED_PATHS += completed
             start_id = len(_STATIC_TREE_EXPANDED_NODE_IDS)
             for offset in range(expanded):
@@ -1062,7 +1085,9 @@ def _run_native_mcts_walltime(
             raw_selections = select_leaf_batch(frontier, max_depth, float(search_cfg.c_puct))
         for raw_selection in raw_selections:
             if evals_only_batch is not None:
-                if len(raw_selection) == 6:
+                if len(raw_selection) == 7:
+                    selection_id, parent_node_id, parent_action_index, state_key, selection_depth, _turn_depth, raw_leaf_payload = raw_selection
+                elif len(raw_selection) == 6:
                     selection_id, parent_node_id, parent_action_index, state_key, selection_depth, raw_leaf_payload = raw_selection
                 else:
                     selection_id, parent_node_id, parent_action_index, state_key, raw_leaf_payload = raw_selection
@@ -1170,9 +1195,11 @@ def _run_native_mcts_walltime(
             selections.append(selection)
 
         if evals_only_batch is not None:
-            batch_depth_sum, batch_max_depth = tree.last_batch_stats()
+            batch_depth_sum, batch_max_depth, batch_turn_depth_sum, batch_max_turn_depth = _tree_batch_stats(tree)
             stats.depth_sum += int(batch_depth_sum)
             stats.max_depth = max(stats.max_depth, int(batch_max_depth))
+            stats.turn_depth_sum += int(batch_turn_depth_sum)
+            stats.max_turn_depth = max(stats.max_turn_depth, int(batch_max_turn_depth))
             stats.selected_paths += int(completed_frontier)
         if not selections:
             if evals_only_batch is not None:
@@ -1471,6 +1498,8 @@ def _add_stats(total: SearchStats, item: SearchStats) -> None:
     total.eval_cache_size += int(item.eval_cache_size)
     total.depth_sum += int(item.depth_sum)
     total.max_depth = max(int(total.max_depth), int(item.max_depth))
+    total.turn_depth_sum += int(item.turn_depth_sum)
+    total.max_turn_depth = max(int(total.max_turn_depth), int(item.max_turn_depth))
 
 
 def _payload_actions(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1838,9 +1867,11 @@ def _run_bot_profile_case(
     using_walltime: bool,
     repeats: int,
 ) -> tuple[native_mcts.SearchResult | None, SearchStats, float]:
-    global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_SELECTED_PATHS, _STATIC_TREE_EXPANDED_NODE_IDS
+    global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_TURN_DEPTH_SUM, _STATIC_TREE_MAX_TURN_DEPTH, _STATIC_TREE_SELECTED_PATHS, _STATIC_TREE_EXPANDED_NODE_IDS
     _STATIC_TREE_DEPTH_SUM = 0
     _STATIC_TREE_MAX_DEPTH = 0
+    _STATIC_TREE_TURN_DEPTH_SUM = 0
+    _STATIC_TREE_MAX_TURN_DEPTH = 0
     _STATIC_TREE_SELECTED_PATHS = 0
     _STATIC_TREE_EXPANDED_NODE_IDS = set()
     last_result: native_mcts.SearchResult | None = None
@@ -1848,6 +1879,7 @@ def _run_bot_profile_case(
     started_at = time.perf_counter()
     for _ in range(max(1, int(repeats))):
         depth_sum_before = _STATIC_TREE_DEPTH_SUM
+        turn_depth_sum_before = _STATIC_TREE_TURN_DEPTH_SUM
         selected_paths_before = _STATIC_TREE_SELECTED_PATHS
         expanded_before = len(_STATIC_TREE_EXPANDED_NODE_IDS)
         bot.reset_episode()
@@ -1863,6 +1895,8 @@ def _run_bot_profile_case(
         expanded_delta = max(0, len(_STATIC_TREE_EXPANDED_NODE_IDS) - expanded_before)
         stats.depth_sum += max(0, _STATIC_TREE_DEPTH_SUM - depth_sum_before)
         stats.max_depth = max(stats.max_depth, _STATIC_TREE_MAX_DEPTH)
+        stats.turn_depth_sum += max(0, _STATIC_TREE_TURN_DEPTH_SUM - turn_depth_sum_before)
+        stats.max_turn_depth = max(stats.max_turn_depth, _STATIC_TREE_MAX_TURN_DEPTH)
         stats.selected_paths += selected_delta
         stats.expanded_nodes += expanded_delta
         stats.simulations += expanded_delta
@@ -2119,6 +2153,8 @@ def main() -> int:
                 "selected_paths_per_sec": _format_rate(run_stats.selected_paths, elapsed),
                 "avg_depth": f"{run_stats.average_depth:.2f}",
                 "max_depth": run_stats.max_depth,
+                "avg_turn_depth": f"{run_stats.average_turn_depth:.2f}",
+                "max_turn_depth": run_stats.max_turn_depth,
                 "eval_batches": run_stats.eval_batches,
                 "eval_positions": run_stats.eval_positions,
                 "eval_cache_hits": run_stats.eval_cache_hits,
@@ -2174,6 +2210,8 @@ def main() -> int:
                 ("selected_paths_per_sec", "paths/s"),
                 ("avg_depth", "avg_depth"),
                 ("max_depth", "max_depth"),
+                ("avg_turn_depth", "avg_turn_depth"),
+                ("max_turn_depth", "max_turn_depth"),
             ],
         )
     )
@@ -2187,6 +2225,8 @@ def main() -> int:
             f"selected_paths_per_sec={_format_rate(total_stats.selected_paths, elapsed)} "
             f"avg_depth={total_stats.average_depth:.2f} "
             f"max_depth={total_stats.max_depth} "
+            f"avg_turn_depth={total_stats.average_turn_depth:.2f} "
+            f"max_turn_depth={total_stats.max_turn_depth} "
             f"eval_batches={total_stats.eval_batches} "
             f"eval_positions={total_stats.eval_positions} "
             f"eval_cache_hits={total_stats.eval_cache_hits}"
@@ -2327,6 +2367,8 @@ def main() -> int:
                 "expanded_nodes_per_sec": _format_rate(total_stats.expanded_nodes, elapsed),
                 "avg_depth": f"{total_stats.average_depth:.3f}",
                 "max_depth": total_stats.max_depth,
+                "avg_turn_depth": f"{total_stats.average_turn_depth:.3f}",
+                "max_turn_depth": total_stats.max_turn_depth,
                 "eval_batches": total_stats.eval_batches,
                 "eval_positions": total_stats.eval_positions,
                 "eval_cache_hits": total_stats.eval_cache_hits,

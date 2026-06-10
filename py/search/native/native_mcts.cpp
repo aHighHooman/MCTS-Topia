@@ -471,6 +471,8 @@ class NativeMCTS {
     py::list out;
     last_batch_depth_sum_ = 0;
     last_batch_max_depth_ = 0;
+    last_batch_turn_depth_sum_ = 0;
+    last_batch_max_turn_depth_ = 0;
     if (frontier <= 0) {
       return out;
     }
@@ -479,6 +481,7 @@ class NativeMCTS {
       std::vector<int> path_action_indexes;
       path_node_ids.reserve(8);
       path_action_indexes.reserve(8);
+      int turn_depth = 0;
       int current_node_id = 0;
       double leaf_value = leaf_value_for(nodes_[0], states_[nodes_[0].state_index]);
       bool needs_expansion = false;
@@ -506,6 +509,9 @@ class NativeMCTS {
         const int local_action_index = select_action_index(node, c_puct);
         path_node_ids.push_back(current_node_id);
         path_action_indexes.push_back(local_action_index);
+        if (is_end_turn_action(state.legal_action_indexes[local_action_index])) {
+          turn_depth += 1;
+        }
 
         const int child_node_id = node.child_node_ids[local_action_index];
         if (child_node_id < 0) {
@@ -542,6 +548,8 @@ class NativeMCTS {
       const int selected_depth = static_cast<int>(path_node_ids.size());
       last_batch_depth_sum_ += selected_depth;
       last_batch_max_depth_ = std::max(last_batch_max_depth_, selected_depth);
+      last_batch_turn_depth_sum_ += turn_depth;
+      last_batch_max_turn_depth_ = std::max(last_batch_max_turn_depth_, turn_depth);
 
       if (!needs_expansion || leaf_terminal || selected_leaf_state == nullptr) {
         complete_path_internal_unchecked(
@@ -574,19 +582,26 @@ class NativeMCTS {
           parent_action_index,
           state_key,
           selected_depth,
+          turn_depth,
           serialize_leaf_payload(*selected_leaf_state)));
     }
     return out;
   }
 
   py::tuple last_batch_stats() const {
-    return py::make_tuple(last_batch_depth_sum_, last_batch_max_depth_);
+    return py::make_tuple(
+        last_batch_depth_sum_,
+        last_batch_max_depth_,
+        last_batch_turn_depth_sum_,
+        last_batch_max_turn_depth_);
   }
 
   py::tuple select_leaf_batches_evals_only(int frontier, int max_batches, int max_depth, double c_puct) {
     py::list out;
     last_batch_depth_sum_ = 0;
     last_batch_max_depth_ = 0;
+    last_batch_turn_depth_sum_ = 0;
+    last_batch_max_turn_depth_ = 0;
     int completed_simulations = 0;
     if (frontier <= 0) {
       return py::make_tuple(out, completed_simulations);
@@ -601,6 +616,7 @@ class NativeMCTS {
         std::vector<int> path_action_indexes;
         path_node_ids.reserve(8);
         path_action_indexes.reserve(8);
+        int turn_depth = 0;
         int current_node_id = 0;
         double leaf_value = leaf_value_for(nodes_[0], states_[nodes_[0].state_index]);
         bool needs_expansion = false;
@@ -629,6 +645,9 @@ class NativeMCTS {
           const int local_action_index = select_action_index(node, c_puct);
           path_node_ids.push_back(current_node_id);
           path_action_indexes.push_back(local_action_index);
+          if (is_end_turn_action(state.legal_action_indexes[local_action_index])) {
+            turn_depth += 1;
+          }
 
           const int child_node_id = node.child_node_ids[local_action_index];
           if (child_node_id < 0) {
@@ -643,6 +662,8 @@ class NativeMCTS {
               const int selected_depth = static_cast<int>(path_node_ids.size());
               last_batch_depth_sum_ += selected_depth;
               last_batch_max_depth_ = std::max(last_batch_max_depth_, selected_depth);
+              last_batch_turn_depth_sum_ += turn_depth;
+              last_batch_max_turn_depth_ = std::max(last_batch_max_turn_depth_, turn_depth);
               completed_simulations += 1;
               reserve_path_internal_unchecked(path_node_ids, path_action_indexes);
               pending_selections_[primary_it->second].repeat_count += 1;
@@ -684,6 +705,8 @@ class NativeMCTS {
         const int selected_depth = static_cast<int>(path_node_ids.size());
         last_batch_depth_sum_ += selected_depth;
         last_batch_max_depth_ = std::max(last_batch_max_depth_, selected_depth);
+        last_batch_turn_depth_sum_ += turn_depth;
+        last_batch_max_turn_depth_ = std::max(last_batch_max_turn_depth_, turn_depth);
         completed_simulations += 1;
 
         if (!needs_expansion || leaf_terminal || selected_leaf_state == nullptr) {
@@ -718,6 +741,7 @@ class NativeMCTS {
             parent_action_index,
             state_key,
             selected_depth,
+            turn_depth,
             serialize_leaf_payload(*selected_leaf_state)));
       }
       if (py::len(out) >= target_evaluations) {
@@ -730,6 +754,8 @@ class NativeMCTS {
   py::tuple run_static_search_batch(int frontier, int max_depth, double c_puct) {
     last_batch_depth_sum_ = 0;
     last_batch_max_depth_ = 0;
+    last_batch_turn_depth_sum_ = 0;
+    last_batch_max_turn_depth_ = 0;
     reset_last_static_timing();
     int expanded_nodes = 0;
     int completed_simulations = 0;
@@ -741,6 +767,7 @@ class NativeMCTS {
       std::vector<int> path_action_indexes;
       path_node_ids.reserve(8);
       path_action_indexes.reserve(8);
+      int turn_depth = 0;
       int current_node_id = 0;
       double leaf_value = leaf_value_for(nodes_[0], states_[nodes_[0].state_index]);
       bool needs_expansion = false;
@@ -768,7 +795,9 @@ class NativeMCTS {
         const int local_action_index = select_action_index(node, c_puct);
         path_node_ids.push_back(current_node_id);
         path_action_indexes.push_back(local_action_index);
-
+        if (is_end_turn_action(state.legal_action_indexes[local_action_index])) {
+          turn_depth += 1;
+        }
         const int child_node_id = node.child_node_ids[local_action_index];
         if (child_node_id < 0) {
           needs_expansion = true;
@@ -794,6 +823,8 @@ class NativeMCTS {
       const int selected_depth = static_cast<int>(path_node_ids.size());
       last_batch_depth_sum_ += selected_depth;
       last_batch_max_depth_ = std::max(last_batch_max_depth_, selected_depth);
+      last_batch_turn_depth_sum_ += turn_depth;
+      last_batch_max_turn_depth_ = std::max(last_batch_max_turn_depth_, turn_depth);
       completed_simulations += 1;
 
       if (!needs_expansion) {
@@ -1135,6 +1166,8 @@ class NativeMCTS {
   std::vector<PendingSelection> pending_selections_;
   int64_t last_batch_depth_sum_ = 0;
   int last_batch_max_depth_ = 0;
+  int64_t last_batch_turn_depth_sum_ = 0;
+  int last_batch_max_turn_depth_ = 0;
   int max_actions_ = 0;
   bool static_timing_enabled_ = false;
   double last_static_select_ms_ = 0.0;
@@ -1191,6 +1224,12 @@ class NativeMCTS {
 
   NativeGameState apply_action(const NativeGameState& state, int global_action_index) {
     return apply_action_strict(state, actions_, global_action_index, max_actions_);
+  }
+
+  bool is_end_turn_action(int global_action_index) const {
+    return global_action_index >= 0 &&
+        global_action_index < static_cast<int>(actions_.size()) &&
+        actions_[global_action_index].type == "END_TURN";
   }
 
   py::dict serialize_leaf_payload(const NativeGameState& state) const {

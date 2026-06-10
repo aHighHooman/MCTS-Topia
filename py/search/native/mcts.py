@@ -438,7 +438,9 @@ def run_native_mcts(
                 max_selected_depth = max(max_selected_depth, int(batch_max_depth))
         for raw_selection in raw_selections:
             if evals_only_batch is not None:
-                if len(raw_selection) == 6:
+                if len(raw_selection) == 7:
+                    selection_id, parent_node_id, parent_action_index, state_key, _selection_depth, _turn_depth, raw_leaf_payload = raw_selection
+                elif len(raw_selection) == 6:
                     selection_id, parent_node_id, parent_action_index, state_key, _selection_depth, raw_leaf_payload = raw_selection
                 else:
                     selection_id, parent_node_id, parent_action_index, state_key, raw_leaf_payload = raw_selection

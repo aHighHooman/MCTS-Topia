@@ -218,7 +218,9 @@ def run_native_static_mcts(
             raw_selections = _native_call(tree.select_leaf_batch_evals_only, frontier, max_depth, float(search_cfg.c_puct))
 
         for raw_selection in raw_selections:
-            if len(raw_selection) == 6:
+            if len(raw_selection) == 7:
+                selection_id, parent_node_id, parent_action_index, state_key, _selection_depth, _turn_depth, raw_leaf_payload = raw_selection
+            elif len(raw_selection) == 6:
                 selection_id, parent_node_id, parent_action_index, state_key, _selection_depth, raw_leaf_payload = raw_selection
             else:
                 selection_id, parent_node_id, parent_action_index, state_key, raw_leaf_payload = raw_selection
