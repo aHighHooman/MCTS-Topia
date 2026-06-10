@@ -12,7 +12,9 @@ import players.external.ExternalBotPayloadBuilder;
 import players.external.ExternalForwardModelSession;
 import utils.Vector2d;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.Map;
 import java.util.Random;
 
 public final class NativeParityOracle {
@@ -414,7 +416,9 @@ public final class NativeParityOracle {
         if (!"forward_model_result".equals(response.optString("type"))) {
             throw new IllegalStateException(response.optString("message", "Oracle root inspect failed."));
         }
-        return response.getJSONObject("state");
+        JSONObject state = response.getJSONObject("state");
+        annotateActorIdFloor(session, session.getRootStateId(), state);
+        return state;
     }
 
     private static JSONArray buildParityTree(ExternalForwardModelSession session,
@@ -473,7 +477,9 @@ public final class NativeParityOracle {
         if (!"forward_model_result".equals(response.optString("type"))) {
             throw new IllegalStateException(response.optString("message", "Oracle inspect failed for " + stateId));
         }
-        return response.getJSONObject("state");
+        JSONObject state = response.getJSONObject("state");
+        annotateActorIdFloor(session, stateId, state);
+        return state;
     }
 
     private static JSONArray stepSampledActions(ExternalForwardModelSession session,
@@ -497,7 +503,9 @@ public final class NativeParityOracle {
                 JSONObject response = session.handleCommand(request);
                 child.put("ok", "forward_model_result".equals(response.optString("type")));
                 if (child.getBoolean("ok")) {
-                    child.put("state", response.getJSONObject("state"));
+                    JSONObject childState = response.getJSONObject("state");
+                    annotateActorIdFloor(session, childState.optString("state_id", ""), childState);
+                    child.put("state", childState);
                 } else {
                     child.put("error", response.optString("message", "Oracle step failed."));
                 }
@@ -513,6 +521,33 @@ public final class NativeParityOracle {
     private static String actionIdFor(String stateId, int actionIndex) {
         String prefix = ExternalBotPayloadBuilder.ROOT_STATE_ID.equals(stateId) ? "A" : stateId + "_A";
         return prefix + actionIndex;
+    }
+
+    private static void annotateActorIdFloor(ExternalForwardModelSession session, String stateId, JSONObject payload) {
+        if (stateId == null || stateId.isEmpty() || payload == null || !payload.has("observation")) {
+            return;
+        }
+        try {
+            Field statesField = ExternalForwardModelSession.class.getDeclaredField("states");
+            statesField.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> states = (Map<String, Object>) statesField.get(session);
+            Object sessionState = states.get(stateId);
+            if (sessionState == null) {
+                return;
+            }
+
+            Field stateField = sessionState.getClass().getDeclaredField("state");
+            stateField.setAccessible(true);
+            GameState gameState = (GameState) stateField.get(sessionState);
+
+            Field counterField = Board.class.getDeclaredField("actorIDcounter");
+            counterField.setAccessible(true);
+            int actorIdFloor = counterField.getInt(gameState.getBoard());
+            payload.getJSONObject("observation").put("_native_actor_id_floor", actorIdFloor);
+        } catch (ReflectiveOperationException ignored) {
+            // Parity-only metadata; native falls back to visible ids if this cannot be read.
+        }
     }
 
     private static ArrayList<String> buildActionIds(String prefix, int size) {

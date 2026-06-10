@@ -84,7 +84,67 @@ def _run_java_oracle(
         text=True,
         check=True,
     )
-    return json.loads(completed.stdout)
+    oracle = json.loads(completed.stdout)
+    _annotate_native_actor_id_floors(oracle)
+    return oracle
+
+
+def _state_observation(state: dict[str, Any]) -> dict[str, Any]:
+    observation = state.get("observation")
+    if isinstance(observation, dict):
+        return observation
+    observation = state.get("obs")
+    if isinstance(observation, dict):
+        return observation
+    return {}
+
+
+def _max_actor_id_in_state(state: dict[str, Any]) -> int:
+    observation = _state_observation(state)
+    max_id = int(observation.get("_native_actor_id_floor", 0) or 0)
+    for city in observation.get("cities", []) or []:
+        if isinstance(city, dict):
+            max_id = max(max_id, int(city.get("id", 0) or 0))
+    for unit in observation.get("units", []) or []:
+        if isinstance(unit, dict):
+            max_id = max(max_id, int(unit.get("id", 0) or 0))
+    return max_id
+
+
+def _set_native_actor_id_floor(state: dict[str, Any], floor: int) -> None:
+    observation = _state_observation(state)
+    if observation:
+        observation["_native_actor_id_floor"] = max(int(observation.get("_native_actor_id_floor", 0) or 0), int(floor))
+
+
+def _annotate_native_actor_id_floors(oracle: dict[str, Any]) -> None:
+    nodes = list(oracle.get("nodes") or [])
+    if not nodes:
+        return
+
+    floors: dict[str, int] = {}
+    root_state = nodes[0].get("state", {})
+    root_state_id = str(nodes[0].get("state_id", oracle.get("root_state_id", "root")))
+    root_floor = _max_actor_id_in_state(root_state)
+    floors[root_state_id] = root_floor
+
+    for node in nodes:
+        state = node.get("state", {})
+        state_id = str(node.get("state_id", ""))
+        floor = max(floors.get(state_id, 0), _max_actor_id_in_state(state))
+        floors[state_id] = floor
+        _set_native_actor_id_floor(state, floor)
+        for child in node.get("children", []) or []:
+            if not isinstance(child, dict) or not child.get("ok"):
+                continue
+            child_state = child.get("state")
+            if not isinstance(child_state, dict):
+                continue
+            child_state_id = str(child_state.get("state_id", ""))
+            child_floor = max(floor, _max_actor_id_in_state(child_state))
+            if child_state_id:
+                floors[child_state_id] = max(floors.get(child_state_id, 0), child_floor)
+            _set_native_actor_id_floor(child_state, child_floor)
 
 
 def _java_executable() -> str:
@@ -134,6 +194,7 @@ def _canonical_state(state: dict[str, Any], player_id: int) -> dict[str, Any]:
 
 def _canonical_observation(observation: dict[str, Any]) -> dict[str, Any]:
     out = dict(observation)
+    out.pop("_native_actor_id_floor", None)
     out["board"] = _canonical_board(dict(out.get("board", {})), list(out.get("cities", [])))
     out["units"] = sorted((_canonical_unit(unit) for unit in out.get("units", [])), key=lambda unit: unit.get("id", 0))
     out["cities"] = sorted((_canonical_city(city) for city in out.get("cities", [])), key=lambda city: city.get("id", 0))

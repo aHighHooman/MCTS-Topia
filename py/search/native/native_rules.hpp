@@ -116,6 +116,7 @@ struct NativeGameState {
   std::vector<std::vector<int>> pending_offer_from;
   std::vector<std::vector<std::string>> pending_offer_types;
   std::vector<int> legal_action_indexes;
+  int actor_id_floor = 0;
   int root_player_id = 0;
   int active_player_id = 0;
   int tick = 0;

@@ -2472,6 +2472,50 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(status, 0)
 
+    def test_java_parity_milestone4_spawn_after_disband_reuses_unit_id(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "milestone4:units",
+                    "--depth",
+                    "2",
+                    "--max-states",
+                    "58",
+                    "--max-actions-per-state",
+                    "64",
+                    "--action-id",
+                    "s57_A17",
+                    "--max-actions",
+                    "768",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
+    def test_java_parity_milestone4_village_capture_after_disband_reuses_city_id(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "milestone4:units",
+                    "--depth",
+                    "2",
+                    "--max-states",
+                    "58",
+                    "--max-actions-per-state",
+                    "64",
+                    "--action-id",
+                    "s57_A26",
+                    "--max-actions",
+                    "768",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
     def test_java_parity_milestone4_capture_clears_previous_city_unit(self) -> None:
         status = run_parity(
             parse_args(

@@ -965,7 +965,7 @@ void sync_tribe_monuments_payload(NativeGameState& state, const NativeTribe& tri
 }
 
 int next_unit_id(const NativeGameState& state) {
-  int max_id = 0;
+  int max_id = state.actor_id_floor;
   for (const NativeCity& city : state.cities) {
     max_id = std::max(max_id, city.id);
   }
@@ -976,7 +976,7 @@ int next_unit_id(const NativeGameState& state) {
 }
 
 int next_city_id(const NativeGameState& state) {
-  int max_id = 0;
+  int max_id = state.actor_id_floor;
   for (const NativeCity& city : state.cities) {
     max_id = std::max(max_id, city.id);
   }
@@ -4301,6 +4301,8 @@ bool apply_disband(NativeGameState& next, const NativeAction& action) {
     return false;
   }
   const int tribe_id = unit->tribe_id;
+  next.actor_id_floor = std::max(next.actor_id_floor, unit->id);
+  next.observation["_native_actor_id_floor"] = next.actor_id_floor;
   remove_unit_ownership_payload(next, *unit);
   mark_unit_removed(next, *unit);
   update_tribe_economy(next, tribe_id, std::max(0, unit_cost(unit->type) / 2), -unit_points(unit->type));
@@ -4435,6 +4437,9 @@ void parse_units(NativeGameState& state) {
   if (!state.observation.contains("units") || !py::isinstance<py::list>(state.observation["units"])) {
     throw std::runtime_error("Native strict payload parse failure: observation.units must be a list.");
   }
+  state.actor_id_floor = std::max(
+      state.actor_id_floor,
+      read_int(state.observation, "_native_actor_id_floor", read_int(state.observation, "actor_id_floor", 0)));
   py::list units = py::reinterpret_borrow<py::list>(state.observation["units"]);
   state.units.reserve(py::len(units));
   for (const auto& unit_handle : units) {
