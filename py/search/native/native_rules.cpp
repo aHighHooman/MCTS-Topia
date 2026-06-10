@@ -1780,7 +1780,6 @@ bool apply_convert(NativeGameState& next, const NativeAction& action) {
   unit->status = "FINISHED";
   target->status = "FINISHED";
   target->city_id = -1;
-  append_extra_unit_payload(next, unit->tribe_id, target->id);
   update_tribe_economy(next, unit->tribe_id, 0, target->type == "WARRIOR" ? 15 : unit_points(target->type));
   set_relationship(next, unit->tribe_id, old_owner, "WAR");
   set_relationship(next, old_owner, unit->tribe_id, "WAR");
