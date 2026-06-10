@@ -2046,6 +2046,127 @@ bool water_unit_type(const std::string& type) {
       type == "JUGGERNAUT" || type == "DINGHY" || type == "PIRATE";
 }
 
+bool can_use_road_at(const NativeGameState& state, int tribe_id, const NativeTile& tile) {
+  const bool road_like = (tile.road && tile.terrain != "SHALLOW_WATER" && tile.terrain != "DEEP_WATER" &&
+                          tile.terrain != "CITY") ||
+      tile.terrain == "CITY" || tile.terrain == "VILLAGE";
+  if (!road_like) {
+    return false;
+  }
+  if (tile.city_id <= 0) {
+    return true;
+  }
+  const NativeCity* city = city_by_id(const_cast<NativeGameState&>(state), tile.city_id);
+  if (city == nullptr) {
+    return false;
+  }
+  return city->tribe_id == tribe_id || relationship_between(state, tribe_id, city->tribe_id) == "TREATY";
+}
+
+bool adjacent_visible_enemy_unit(const NativeGameState& state, const NativeUnit& unit, int x, int y) {
+  for (int dx = -1; dx <= 1; ++dx) {
+    for (int dy = -1; dy <= 1; ++dy) {
+      if (dx == 0 && dy == 0) {
+        continue;
+      }
+      NativeTile* neighbor = tile_at(const_cast<NativeGameState&>(state), x + dx, y + dy);
+      if (neighbor == nullptr || neighbor->unit_id <= 0) {
+        continue;
+      }
+      NativeUnit* other = unit_by_id(const_cast<NativeGameState&>(state), neighbor->unit_id);
+      if (other != nullptr && other->tribe_id != unit.tribe_id &&
+          relationship_between(state, unit.tribe_id, other->tribe_id) != "TREATY") {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+std::vector<std::pair<int, int>> reachable_move_targets(const NativeGameState& state, const NativeUnit& unit) {
+  std::vector<std::pair<int, int>> targets;
+  if (state.board_size <= 0 || water_unit_type(unit.type)) {
+    return targets;
+  }
+  const double max_cost = static_cast<double>(std::max(1, unit.movement));
+  std::map<std::pair<int, int>, double> best;
+  std::vector<std::pair<int, int>> frontier;
+  const std::pair<int, int> start{unit.x, unit.y};
+  best[start] = 0.0;
+  frontier.push_back(start);
+
+  for (size_t cursor = 0; cursor < frontier.size(); ++cursor) {
+    const auto [from_x, from_y] = frontier[cursor];
+    const double cost_from = best[{from_x, from_y}];
+    if (cost_from >= max_cost) {
+      continue;
+    }
+    const NativeTile* from_tile = tile_at(const_cast<NativeGameState&>(state), from_x, from_y);
+    const bool on_road = from_tile != nullptr && can_use_road_at(state, unit.tribe_id, *from_tile);
+    for (int dx = -1; dx <= 1; ++dx) {
+      for (int dy = -1; dy <= 1; ++dy) {
+        if (dx == 0 && dy == 0) {
+          continue;
+        }
+        const int x = from_x + dx;
+        const int y = from_y + dy;
+        if (x < 0 || y < 0 || x >= state.board_size || y >= state.board_size) {
+          continue;
+        }
+        NativeTile* tile = tile_at(const_cast<NativeGameState&>(state), x, y);
+        if (tile == nullptr || !(tile->explored || state.active_player_id != state.root_player_id) ||
+            tile->terrain == "DEEP_WATER" || tile->terrain == "WATER") {
+          continue;
+        }
+        if (tile->unit_id > 0) {
+          NativeUnit* occupant = unit_by_id(const_cast<NativeGameState&>(state), tile->unit_id);
+          if (occupant == nullptr || occupant->tribe_id != unit.tribe_id) {
+            continue;
+          }
+        }
+        if (unit.type == "MIND_BENDER" && tile->terrain == "CITY" && tile->city_id > 0) {
+          NativeCity* city = city_by_id(const_cast<NativeGameState&>(state), tile->city_id);
+          if (city != nullptr && city->tribe_id != unit.tribe_id) {
+            continue;
+          }
+        }
+        const bool zone_of_control = unit.type != "CLOAK" && adjacent_visible_enemy_unit(state, unit, x, y);
+        if (zone_of_control && tile->unit_id > 0) {
+          continue;
+        }
+        double step_cost = 1.0;
+        if ((tile->terrain == "FOREST" || tile->terrain == "MOUNTAIN") && unit.type != "CLOAK") {
+          step_cost = cost_from < max_cost ? max_cost - cost_from : max_cost;
+        }
+        if (unit.type != "CLOAK" && on_road && can_use_road_at(state, unit.tribe_id, *tile)) {
+          step_cost = std::max(0.5, step_cost / 2.0);
+        }
+        if (zone_of_control) {
+          step_cost = cost_from < max_cost ? max_cost - cost_from : max_cost;
+        }
+        const double next_cost = cost_from + step_cost;
+        if (std::floor(next_cost) > max_cost) {
+          continue;
+        }
+        const std::pair<int, int> pos{x, y};
+        auto best_it = best.find(pos);
+        if (best_it == best.end() || next_cost + 1e-9 < best_it->second) {
+          best[pos] = next_cost;
+          frontier.push_back(pos);
+        }
+      }
+    }
+  }
+
+  for (const auto& entry : best) {
+    NativeTile* tile = tile_at(const_cast<NativeGameState&>(state), entry.first.first, entry.first.second);
+    if (entry.first != start && tile != nullptr && tile->unit_id <= 0) {
+      targets.push_back(entry.first);
+    }
+  }
+  return targets;
+}
+
 std::string attacked_status_after(const NativeUnit& unit, bool dealt_kill) {
   if (unit.type == "KNIGHT" && dealt_kill) {
     return "ATTACKED";
@@ -3145,7 +3266,26 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
       }
     }
     if (!java_priority_order.empty()) {
+      std::set<std::pair<int, int>> emitted_moves;
       for (const auto& target : java_priority_order) {
+        emitted_moves.insert(target);
+        append_tile_action(
+            state,
+            actions,
+            max_actions,
+            ":u" + std::to_string(unit.id) + ":move:" + std::to_string(target.first) + ":" + std::to_string(target.second),
+            "MOVE",
+            state.active_player_id,
+            unit.id,
+            0,
+            target.first,
+            target.second,
+            "destination");
+      }
+      for (const auto& target : reachable_move_targets(state, unit)) {
+        if (emitted_moves.count(target) > 0) {
+          continue;
+        }
         append_tile_action(
             state,
             actions,
