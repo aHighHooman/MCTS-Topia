@@ -4290,7 +4290,6 @@ bool apply_upgrade_unit(NativeGameState& next, const NativeAction& action, const
   if (cost > 0) {
     update_tribe_economy(next, unit->tribe_id, -cost, 0);
   }
-  update_tribe_economy(next, unit->tribe_id, 0, unit_points(upgraded_type) - unit_points(unit->type));
 
   const int new_unit_id = next_unit_id(next);
   NativeTile* tile = tile_at(next, unit->x, unit->y);
@@ -4317,7 +4316,6 @@ bool apply_upgrade_unit(NativeGameState& next, const NativeAction& action, const
     NativeUnit old_unit_ref = *unit;
     old_unit_ref.id = old_unit_id;
     remove_unit_from_owner_lists_payload(next, old_unit_ref);
-    append_extra_unit_payload(next, unit->tribe_id, new_unit_id);
   } else if (NativeCity* city = city_by_id(next, unit->city_id); city != nullptr) {
     for (int& existing : city->unit_ids) {
       if (existing == old_unit_id) {
@@ -5746,7 +5744,8 @@ NativeGameState apply_action_strict(
     return next;
   }
   const int newly_explored = reveal_from_current_assets(next);
-  if (type == "MOVE" || type == "STEP_MOVE" || type == "ATTACK" || type == "SPAWN") {
+  if (type == "MOVE" || type == "STEP_MOVE" || type == "ATTACK" || type == "SPAWN" ||
+      type == "UPGRADE_RAMMER" || type == "UPGRADE_SCOUT" || type == "UPGRADE_BOMBER") {
     update_tribe_economy(next, next.active_player_id, 0, newly_explored * 5);
   }
   if (type == "MOVE" || type == "STEP_MOVE") {
