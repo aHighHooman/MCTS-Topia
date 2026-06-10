@@ -942,6 +942,23 @@ int next_city_id(const NativeGameState& state) {
   return max_id + 1;
 }
 
+int inferred_hidden_capital_points_worth(NativeGameState& state, int city_id, int x, int y) {
+  constexpr int kCityBorderPoints = 20;
+  int assigned_tiles = 0;
+  for (int dy = -1; dy <= 1; ++dy) {
+    for (int dx = -1; dx <= 1; ++dx) {
+      NativeTile* tile = tile_at(state, x + dx, y + dy);
+      if (tile == nullptr) {
+        continue;
+      }
+      if (tile->city_id <= 0 || tile->city_id == city_id) {
+        ++assigned_tiles;
+      }
+    }
+  }
+  return assigned_tiles > 0 ? assigned_tiles * kCityBorderPoints : 180;
+}
+
 void update_tribe_economy(NativeGameState& state, int tribe_id, int stars_delta, int score_delta) {
   NativeTribe* tribe = tribe_by_id(state, tribe_id);
   if (tribe == nullptr) {
@@ -2088,7 +2105,9 @@ void append_visible_city_payload(NativeGameState& state, const NativeCity& city)
   out["production"] = city.production;
   out["prod"] = city.production;
   out["bound"] = city.bound > 0 ? city.bound : 1;
-  const int visible_points = city.points_worth > 0 ? city.points_worth : (city.capital ? 180 : 0);
+  const int visible_points = city.points_worth > 0
+      ? city.points_worth
+      : (city.capital ? inferred_hidden_capital_points_worth(state, city.id, city.x, city.y) : 0);
   out["points_worth"] = visible_points;
   out["pts"] = visible_points;
   out["b"] = py::list();
@@ -2346,7 +2365,9 @@ void preserve_hidden_enemy_action_state(
       city.walls = false;
       city.infiltrated = false;
       city.bound = city.capital ? 0 : 1;
-      city.points_worth = city.capital ? 180 : 0;
+      city.points_worth = city.capital
+          ? inferred_hidden_capital_points_worth(next, city.id, city.x, city.y)
+          : 0;
       next.cities.push_back(city);
       if (std::find(next_active_tribe->city_ids.begin(), next_active_tribe->city_ids.end(), city_id) ==
           next_active_tribe->city_ids.end()) {
@@ -4674,7 +4695,11 @@ void ensure_city_payload_visible(NativeGameState& state, const NativeCity& nativ
   city["cap"] = native_city.capital;
   city["wall"] = native_city.walls;
   city["bound"] = native_city.bound <= 0 ? 1 : native_city.bound;
-  city["pts"] = native_city.points_worth <= 0 ? 180 : native_city.points_worth;
+  city["pts"] = native_city.points_worth > 0
+      ? native_city.points_worth
+      : (native_city.capital
+          ? inferred_hidden_capital_points_worth(state, native_city.id, native_city.x, native_city.y)
+          : 0);
   city["inf"] = native_city.infiltrated;
   py::list units;
   for (int unit_id : native_city.unit_ids) {
@@ -5295,7 +5320,7 @@ NativeCity* capital_city_for_tribe(NativeGameState& state, int tribe_id) {
   city.walls = false;
   city.infiltrated = false;
   city.bound = 0;
-  city.points_worth = 160;
+  city.points_worth = inferred_hidden_capital_points_worth(state, city.id, city.x, city.y);
   state.cities.push_back(city);
   for (int dy = -1; dy <= 1; ++dy) {
     for (int dx = -1; dx <= 1; ++dx) {
@@ -5404,7 +5429,7 @@ NativeCity* ensure_hidden_embassy_capital_city_for_tribe(NativeGameState& state,
   city.walls = false;
   city.infiltrated = false;
   city.bound = 0;
-  city.points_worth = 180;
+  city.points_worth = inferred_hidden_capital_points_worth(state, city.id, city.x, city.y);
   state.cities.push_back(city);
   for (int dy = -1; dy <= 1; ++dy) {
     for (int dx = -1; dx <= 1; ++dx) {

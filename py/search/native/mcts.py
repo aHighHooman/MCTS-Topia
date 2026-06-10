@@ -426,14 +426,16 @@ def run_native_mcts(
         completed_frontier = frontier
         if evals_only_batches is not None:
             raw_selections, completed_frontier = _native_call(evals_only_batches, frontier, 1, max_depth, float(search_cfg.c_puct))
-            batch_depth_sum, batch_max_depth = _native_call(tree.last_batch_stats)
+            batch_stats = _native_call(tree.last_batch_stats)
+            batch_depth_sum, batch_max_depth = batch_stats[:2]
             depth_sum += int(batch_depth_sum)
             max_selected_depth = max(max_selected_depth, int(batch_max_depth))
         else:
             select_leaf_batch = evals_only_batch or getattr(tree, "select_leaf_batch_compact", tree.select_leaf_batch)
             raw_selections = _native_call(select_leaf_batch, frontier, max_depth, float(search_cfg.c_puct))
             if evals_only_batch is not None:
-                batch_depth_sum, batch_max_depth = _native_call(tree.last_batch_stats)
+                batch_stats = _native_call(tree.last_batch_stats)
+                batch_depth_sum, batch_max_depth = batch_stats[:2]
                 depth_sum += int(batch_depth_sum)
                 max_selected_depth = max(max_selected_depth, int(batch_max_depth))
         for raw_selection in raw_selections:
