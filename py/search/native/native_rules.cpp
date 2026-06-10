@@ -217,6 +217,14 @@ py::dict deepish_copy_observation(const py::dict& input) {
     }
     out["board"] = board;
   }
+  if (out.contains("_native_enemy_explored") && py::isinstance<py::dict>(out["_native_enemy_explored"])) {
+    py::dict input_memory = py::reinterpret_borrow<py::dict>(out["_native_enemy_explored"]);
+    py::dict output_memory;
+    for (const auto& item : input_memory) {
+      output_memory[item.first] = py::isinstance<py::list>(item.second) ? shallow_copy_list(item.second) : item.second;
+    }
+    out["_native_enemy_explored"] = output_memory;
+  }
   return out;
 }
 
@@ -2437,6 +2445,50 @@ bool tile_revealed_by_tribe_assets(
   return false;
 }
 
+bool hidden_enemy_explored_memory_contains(
+    const NativeGameState& state,
+    int tribe_id,
+    int x,
+    int y) {
+  const NativeTile* tile = tile_at(const_cast<NativeGameState&>(state), x, y);
+  if (tile == nullptr) {
+    return false;
+  }
+  return std::find(
+             tile->hidden_explored_by_tribes.begin(),
+             tile->hidden_explored_by_tribes.end(),
+             tribe_id) != tile->hidden_explored_by_tribes.end();
+}
+
+void mark_hidden_enemy_explored_memory(
+    NativeGameState& state,
+    int tribe_id,
+    int x,
+    int y) {
+  if (tribe_id == state.root_player_id) {
+    return;
+  }
+  NativeTile* tile = tile_at(state, x, y);
+  if (tile == nullptr || hidden_enemy_explored_memory_contains(state, tribe_id, x, y)) {
+    return;
+  }
+  tile->hidden_explored_by_tribes.push_back(tribe_id);
+}
+
+void mark_hidden_enemy_unit_reveal_memory(
+    NativeGameState& state,
+    int tribe_id,
+    const NativeUnit& unit,
+    int x,
+    int y) {
+  const int radius = unit_reveal_radius_on_tile(state, unit, x, y);
+  for (int tx = x - radius; tx <= x + radius; ++tx) {
+    for (int ty = y - radius; ty <= y + radius; ++ty) {
+      mark_hidden_enemy_explored_memory(state, tribe_id, tx, ty);
+    }
+  }
+}
+
 void prune_invisible_enemy_units_payload(NativeGameState& state) {
   if (!state.observation.contains("units") || !py::isinstance<py::list>(state.observation["units"])) {
     return;
@@ -2462,7 +2514,7 @@ void prune_invisible_enemy_units_payload(NativeGameState& state) {
 
 int estimate_hidden_enemy_move_exploration_score(
     const NativeGameState& previous,
-    const NativeGameState& next,
+    NativeGameState& next,
     const NativeAction& action) {
   if (previous.active_player_id == previous.root_player_id) {
     return 0;
@@ -2474,19 +2526,26 @@ int estimate_hidden_enemy_move_exploration_score(
     return 0;
   }
 
+  mark_hidden_enemy_unit_reveal_memory(
+      next, previous.active_player_id, *previous_unit, previous_unit->x, previous_unit->y);
+
   int newly_explored = 0;
   const int new_radius = unit_reveal_radius_on_tile(next, *moved_unit, moved_unit->x, moved_unit->y);
   for (const NativeTile& tile : next.tiles) {
     if (!tile_in_reveal_range(moved_unit->x, moved_unit->y, new_radius, tile.x, tile.y)) {
       continue;
     }
-    if (tile_revealed_by_tribe_assets(previous, previous.active_player_id, tile.x, tile.y, unit_id)) {
+    if (hidden_enemy_explored_memory_contains(previous, previous.active_player_id, tile.x, tile.y) ||
+        tile_revealed_by_tribe_assets(previous, previous.active_player_id, tile.x, tile.y, unit_id)) {
+      mark_hidden_enemy_explored_memory(next, previous.active_player_id, tile.x, tile.y);
       continue;
     }
     const int old_radius = unit_reveal_radius_on_tile(previous, *previous_unit, previous_unit->x, previous_unit->y);
     if (tile_in_reveal_range(previous_unit->x, previous_unit->y, old_radius, tile.x, tile.y)) {
+      mark_hidden_enemy_explored_memory(next, previous.active_player_id, tile.x, tile.y);
       continue;
     }
+    mark_hidden_enemy_explored_memory(next, previous.active_player_id, tile.x, tile.y);
     newly_explored += 1;
   }
   return newly_explored * 5;
@@ -4573,6 +4632,38 @@ void parse_tiles(NativeGameState& state) {
   }
 }
 
+void parse_hidden_enemy_explored_memory(NativeGameState& state) {
+  if (!state.observation.contains("_native_enemy_explored") ||
+      !py::isinstance<py::dict>(state.observation["_native_enemy_explored"]) ||
+      state.board_size <= 0) {
+    return;
+  }
+  py::dict memory = py::reinterpret_borrow<py::dict>(state.observation["_native_enemy_explored"]);
+  for (const auto& entry : memory) {
+    int tribe_id = -1;
+    try {
+      tribe_id = std::stoi(py::cast<std::string>(py::str(entry.first)));
+    } catch (const std::exception&) {
+      continue;
+    }
+    if (!py::isinstance<py::list>(entry.second)) {
+      continue;
+    }
+    py::list codes = py::reinterpret_borrow<py::list>(entry.second);
+    for (const auto& item : codes) {
+      int code = -1;
+      try {
+        code = py::cast<int>(item);
+      } catch (const py::cast_error&) {
+        continue;
+      }
+      const int x = code / state.board_size;
+      const int y = code % state.board_size;
+      mark_hidden_enemy_explored_memory(state, tribe_id, x, y);
+    }
+  }
+}
+
 void parse_units(NativeGameState& state) {
   if (!state.observation.contains("units") || !py::isinstance<py::list>(state.observation["units"])) {
     throw std::runtime_error("Native strict payload parse failure: observation.units must be a list.");
@@ -5733,6 +5824,7 @@ bool city_payload_contains(const NativeGameState& state, int city_id) {
 
 void parse_observation_state(NativeGameState& state) {
   parse_tiles(state);
+  parse_hidden_enemy_explored_memory(state);
   parse_units(state);
   parse_cities(state);
   parse_tribes(state);

@@ -31,6 +31,7 @@ struct NativeTile {
   int city_id = 0;
   int unit_id = 0;
   int territory_city_id = 0;
+  std::vector<int> hidden_explored_by_tribes;
 };
 
 struct NativeUnit {

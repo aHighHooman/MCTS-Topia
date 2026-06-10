@@ -2318,6 +2318,50 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(status, 0)
 
+    def test_java_parity_milestone4_enemy_chain_move_scores_exploration_once(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "milestone4:units",
+                    "--depth",
+                    "3",
+                    "--max-states",
+                    "586",
+                    "--max-actions-per-state",
+                    "64",
+                    "--action-id",
+                    "s585_A9",
+                    "--max-actions",
+                    "768",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
+    def test_java_parity_milestone4_enemy_chain_move_scores_after_forward_move(self) -> None:
+        status = run_parity(
+            parse_args(
+                [
+                    "--fixture",
+                    "milestone4:units",
+                    "--depth",
+                    "3",
+                    "--max-states",
+                    "587",
+                    "--max-actions-per-state",
+                    "64",
+                    "--action-id",
+                    "s586_A7",
+                    "--max-actions",
+                    "768",
+                ]
+            )
+        )
+
+        self.assertEqual(status, 0)
+
     def test_java_parity_milestone4_enemy_move_masks_unseen_units(self) -> None:
         status = run_parity(
             parse_args(

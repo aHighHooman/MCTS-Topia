@@ -86,6 +86,7 @@ def _run_java_oracle(
     )
     oracle = json.loads(completed.stdout)
     _annotate_native_actor_id_floors(oracle)
+    _annotate_native_enemy_explored(oracle)
     return oracle
 
 
@@ -115,6 +116,105 @@ def _set_native_actor_id_floor(state: dict[str, Any], floor: int) -> None:
     observation = _state_observation(state)
     if observation:
         observation["_native_actor_id_floor"] = max(int(observation.get("_native_actor_id_floor", 0) or 0), int(floor))
+
+def _copy_enemy_explored(memory: dict[int, set[int]]) -> dict[int, set[int]]:
+    return {tribe_id: set(codes) for tribe_id, codes in memory.items()}
+
+
+def _set_native_enemy_explored(state: dict[str, Any], memory: dict[int, set[int]]) -> None:
+    observation = _state_observation(state)
+    if observation:
+        observation["_native_enemy_explored"] = {
+            str(tribe_id): sorted(codes) for tribe_id, codes in sorted(memory.items()) if codes
+        }
+
+
+def _unit_reveal_radius(state: dict[str, Any], unit: dict[str, Any], x: int, y: int) -> int:
+    observation = _state_observation(state)
+    terrain = None
+    board = observation.get("board", {})
+    tiles = board.get("tiles", []) if isinstance(board, dict) else []
+    if 0 <= y < len(tiles) and isinstance(tiles[y], list) and 0 <= x < len(tiles[y]) and isinstance(tiles[y][x], dict):
+        terrain = tiles[y][x].get("terrain")
+    unit_type = str(unit.get("type", unit.get("t", "")))
+    return 2 if terrain == "MOUNTAIN" or unit_type in {"SCOUT", "CLOAK", "DINGHY"} else 1
+
+
+def _unit_by_id(state: dict[str, Any], unit_id: int) -> dict[str, Any] | None:
+    observation = _state_observation(state)
+    for unit in observation.get("units", []) or []:
+        if isinstance(unit, dict) and int(unit.get("id", 0) or 0) == unit_id:
+            return unit
+    return None
+
+
+def _mark_enemy_move_reveal(parent: dict[str, Any], child: dict[str, Any], action: dict[str, Any], memory: dict[int, set[int]]) -> None:
+    observation = _state_observation(parent)
+    active_player_id = int(
+        observation.get("active_player_id", observation.get("active", parent.get("active_player_id", parent.get("active", 0)))) or 0
+    )
+    root_player_id = int(parent.get("root_player_id", parent.get("player_id", parent.get("p", 0))) or 0)
+    action_type = str(action.get("type", action.get("t", "")))
+    if active_player_id == root_player_id or action_type not in {"MOVE", "STEP_MOVE"}:
+        return
+    unit_id = int(action.get("unit_id", action.get("u", 0)) or 0)
+    previous_unit = _unit_by_id(parent, unit_id)
+    moved_unit = _unit_by_id(child, unit_id)
+    if previous_unit is None or int(previous_unit.get("tribe_id", previous_unit.get("p", -1)) or -1) != active_player_id:
+        return
+    if moved_unit is None:
+        moved_unit = dict(previous_unit)
+        moved_unit["x"] = int(action.get("x", 0) or 0)
+        moved_unit["y"] = int(action.get("y", 0) or 0)
+    if int(moved_unit.get("tribe_id", moved_unit.get("p", -1)) or -1) != active_player_id:
+        return
+    board_size = int((_state_observation(child).get("board", {}) or {}).get("size", 0) or 0)
+    if board_size <= 0:
+        return
+    revealed = memory.setdefault(active_player_id, set())
+
+    for state, unit in ((parent, previous_unit), (child, moved_unit)):
+        if unit is None:
+            continue
+        x = int(unit.get("x", 0) or 0)
+        y = int(unit.get("y", 0) or 0)
+        radius = _unit_reveal_radius(state, unit, x, y)
+        for tx in range(max(0, x - radius), min(board_size, x + radius + 1)):
+            for ty in range(max(0, y - radius), min(board_size, y + radius + 1)):
+                revealed.add(tx * board_size + ty)
+
+
+def _annotate_native_enemy_explored(oracle: dict[str, Any]) -> None:
+    nodes = list(oracle.get("nodes") or [])
+    if not nodes:
+        return
+    memories: dict[str, dict[int, set[int]]] = {}
+    root_state_id = str(nodes[0].get("state_id", oracle.get("root_state_id", "root")))
+    memories[root_state_id] = {}
+
+    for node in nodes:
+        state = node.get("state", {})
+        if not isinstance(state, dict):
+            continue
+        state_id = str(node.get("state_id", ""))
+        parent_memory = _copy_enemy_explored(memories.get(state_id, {}))
+        memories[state_id] = parent_memory
+        _set_native_enemy_explored(state, parent_memory)
+        parent_actions = normalize_message({"player_id": int(oracle["player_id"]), **state}).get("actions", [])
+        for child in node.get("children", []) or []:
+            if not isinstance(child, dict) or not child.get("ok"):
+                continue
+            child_state = child.get("state")
+            if not isinstance(child_state, dict):
+                continue
+            action_index = int(child.get("action_index", -1) or -1)
+            action = parent_actions[action_index] if 0 <= action_index < len(parent_actions) else {}
+            child_memory = _copy_enemy_explored(parent_memory)
+            _mark_enemy_move_reveal(state, child_state, action, child_memory)
+            child_state_id = str(child_state.get("state_id", ""))
+            if child_state_id:
+                memories[child_state_id] = child_memory
+            _set_native_enemy_explored(child_state, child_memory)
 
 
 def _annotate_native_actor_id_floors(oracle: dict[str, Any]) -> None:
@@ -173,6 +273,10 @@ def _javac_executable() -> str:
 def _canonical_state(state: dict[str, Any], player_id: int) -> dict[str, Any]:
     message = dict(state)
     message.setdefault("player_id", player_id)
+    if isinstance(message.get("observation"), dict):
+        message["observation"] = dict(message["observation"])
+        message["observation"].pop("_native_actor_id_floor", None)
+        message["observation"].pop("_native_enemy_explored", None)
     normalized = normalize_message(message)
     observation = _canonical_observation(dict(normalized.get("observation", {})))
     return {
@@ -195,6 +299,7 @@ def _canonical_state(state: dict[str, Any], player_id: int) -> dict[str, Any]:
 def _canonical_observation(observation: dict[str, Any]) -> dict[str, Any]:
     out = dict(observation)
     out.pop("_native_actor_id_floor", None)
+    out.pop("_native_enemy_explored", None)
     out["board"] = _canonical_board(dict(out.get("board", {})), list(out.get("cities", [])))
     out["units"] = sorted((_canonical_unit(unit) for unit in out.get("units", [])), key=lambda unit: unit.get("id", 0))
     out["cities"] = sorted((_canonical_city(city) for city in out.get("cities", [])), key=lambda city: city.get("id", 0))
