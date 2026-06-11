@@ -30,9 +30,13 @@ def _normalize_profile_defaults(defaults: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def load_config_defaults(parser: argparse.ArgumentParser, argv: list[str] | None = None) -> argparse.Namespace:
+def load_config_defaults(
+    parser: argparse.ArgumentParser,
+    argv: list[str] | None = None,
+    default_config: Path | None = None,
+) -> argparse.Namespace:
     config_parser = argparse.ArgumentParser(add_help=False)
-    config_parser.add_argument("--config", type=Path, default=None, help="JSON config file with argparse option names.")
+    config_parser.add_argument("--config", type=Path, default=default_config, help="JSON config file with argparse option names.")
     config_args, remaining = config_parser.parse_known_args(argv)
     if config_args.config is not None:
         config_args.config = _resolve_config_path(config_args.config)

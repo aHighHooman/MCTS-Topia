@@ -22,15 +22,17 @@ if str(PY_ROOT) not in sys.path:
 from nn.bot_agent import compatible_state_dict
 from nn.encoding import encode_observation, normalize_message
 from nn.model import HybridPolicyValueNet
-from search.config import HybridAgentConfig
+from profiling.config import load_config_defaults
 from search.native import run_native_hybrid_mcts, run_native_mcts, run_native_static_mcts
 from search.native.hybrid_mcts import _mix_evaluation
 from search.native.mcts import _Evaluation
 from search.native.static_mcts import _evaluate_static_messages
+from training.config import HybridAgentConfig
 
 
 DEFAULT_PAYLOAD_DIR = PROJECT_ROOT / "debug-logs" / "mcts-profile-payloads"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "debug-logs" / "policy-search-alignment"
+DEFAULT_POLICY_SEARCH_ALIGNMENT_CONFIG = PY_ROOT / "profiling" / "configs" / "policy_search_alignment.json"
 STATIC_EVAL_VARIANTS = ("baseline", "experimental")
 
 POSITION_FIELDNAMES = [
@@ -579,7 +581,9 @@ def main() -> int:
     parser.add_argument("--static-policy-weight", type=float, default=0.5)
     parser.add_argument("--static-value-weight", type=float, default=0.5)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    args = parser.parse_args()
+    args = load_config_defaults(parser, default_config=DEFAULT_POLICY_SEARCH_ALIGNMENT_CONFIG)
+    if args.payload is None:
+        args.payload = []
     run(args)
     return 0
 
