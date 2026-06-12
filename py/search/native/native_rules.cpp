@@ -925,7 +925,7 @@ int resource_bonus(const std::string& type) {
   if (type == "FISH" || type == "FRUIT" || type == "ANIMAL") {
     return 1;
   }
-  if (type == "STARFISH" || type == "WHALE") {
+  if (type == "STARFISH") {
     return 10;
   }
   return 0;
@@ -4193,7 +4193,7 @@ bool apply_resource_gathering(NativeGameState& next, const NativeAction& action)
       : action_string(action, "resource_type", "rt");
   tile->resource.clear();
   sync_tile_to_payload(next, *tile);
-  if (resource == "STARFISH" || resource == "WHALE") {
+  if (resource == "STARFISH") {
     update_tribe_economy(next, city->tribe_id, resource_bonus(resource), 0);
     return true;
   }

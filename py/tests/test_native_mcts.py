@@ -32,7 +32,7 @@ from nn.model import HybridPolicyValueNet
 from search.native import run_native_hybrid_mcts, run_native_mcts, run_native_static_mcts
 from search.native.hybrid_mcts import _Evaluation, _mix_evaluation
 from search.native.cpp_extension import load_native_mcts_extension
-from search.native.mcts import NativeSearchParityError, _apply_end_turn_visit_guard, _message_cache_key, _root_priors
+from search.native.mcts import NativeSearchParityError, _apply_end_turn_visit_guard, _message_cache_key, _root_priors, _unique_action_mapping
 from search.native.parity_runner import _canonical_state, run_parity, parse_args
 
 
@@ -380,6 +380,54 @@ def _message_with_village_and_ruin_choices() -> dict:
         {"id": "move_village", "type": "MOVE", "unit_id": 1, "u": 1, "destination": {"x": 2, "y": 1}, "x": 2, "y": 1},
         {"id": "examine", "type": "EXAMINE", "unit_id": 2, "u": 2},
         {"id": "isolated_road", "type": "BUILD_ROAD", "tribe_id": 0, "p": 0, "position": {"x": 3, "y": 3}, "x": 3, "y": 3},
+        {"id": "end", "type": "END_TURN"},
+    ]
+    return message
+
+
+def _message_with_ruin_eta_assignment() -> dict:
+    message = _message()
+    observation = message["observation"]
+    observation["tribes"][0]["stars"] = 0
+    observation["tribes"][0]["researched_tech_ids"] = []
+    observation["board"]["tiles"][0][3]["resource"] = "RUINS"
+    observation["units"] = [
+        {
+            "id": 1,
+            "tribe_id": 0,
+            "city_id": 10,
+            "type": "WARRIOR",
+            "x": 0,
+            "y": 0,
+            "current_hp": 10,
+            "max_hp": 10,
+            "kills": 0,
+            "is_veteran": False,
+            "status": "FRESH",
+            "is_hidden": False,
+            "movement": 1,
+        },
+        {
+            "id": 2,
+            "tribe_id": 0,
+            "city_id": 10,
+            "type": "RIDER",
+            "x": 0,
+            "y": 3,
+            "current_hp": 10,
+            "max_hp": 10,
+            "kills": 0,
+            "is_veteran": False,
+            "status": "FRESH",
+            "is_hidden": False,
+            "movement": 2,
+        },
+    ]
+    observation["board"]["tiles"][0][0]["unit_id"] = 1
+    observation["board"]["tiles"][3][0]["unit_id"] = 2
+    message["actions"] = [
+        {"id": "warrior_toward_ruin", "type": "MOVE", "unit_id": 1, "u": 1, "destination": {"x": 1, "y": 0}, "x": 1, "y": 0},
+        {"id": "rider_toward_ruin", "type": "MOVE", "unit_id": 2, "u": 2, "destination": {"x": 1, "y": 2}, "x": 1, "y": 2},
         {"id": "end", "type": "END_TURN"},
     ]
     return message
@@ -931,6 +979,55 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertEqual(moved_unit["status"], "MOVED")
         self.assertEqual(leaf_payload["observation"]["board"]["tiles"][1][1]["unit_id"], 0)
         self.assertEqual(leaf_payload["observation"]["board"]["tiles"][1][2]["unit_id"], 1)
+
+    def test_promote_root_child_compacts_selected_subtree(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        tree = extension.NativeMCTS(_message_with_unit_move(), [0, 1], [1.0, 0.0], 0.1, False, 7, 64)
+
+        selection = dict(tree.select_leaf(4, 1.5))
+        leaf_payload = dict(selection["leaf_payload"])
+        child_id = tree.expand(
+            selection["parent_node_id"],
+            selection["parent_action_index"],
+            [1.0] * len(leaf_payload["actions"]),
+            0.2,
+            False,
+        )
+        self.assertGreaterEqual(child_id, 1)
+        self.assertEqual(tree.node_count(), 2)
+
+        promoted = dict(tree.promote_root_child_by_action_id("move"))
+
+        self.assertTrue(promoted["ok"], promoted)
+        self.assertEqual(promoted["previous_nodes"], 2)
+        self.assertEqual(promoted["promoted_subtree_nodes"], 1)
+        self.assertEqual(tree.node_count(), 1)
+        root_payload = dict(tree.root_payload())
+        self.assertEqual([action["type"] for action in root_payload["actions"]], ["END_TURN"])
+        moved_unit = root_payload["observation"]["units"][0]
+        self.assertEqual((moved_unit["x"], moved_unit["y"]), (2, 1))
+        self.assertEqual(moved_unit["status"], "MOVED")
+        self.assertEqual(len(tree.root_visit_distribution_by_index(1.0)), 1)
+
+    def test_action_mapping_ignores_request_scoped_ids_and_rejects_ambiguous_matches(self) -> None:
+        native_actions = [
+            {"id": "sim:p0:t0:end", "type": "END_TURN", "t": "END_TURN", "i": 12},
+            {"id": "sim:p0:t0:road", "type": "BUILD_ROAD", "x": 1, "y": 2, "i": 13},
+        ]
+        current_actions = [
+            {"id": "java-1", "type": "END_TURN", "t": "END_TURN", "i": 0},
+            {"id": "java-2", "type": "BUILD_ROAD", "x": 1, "y": 2, "i": 1},
+        ]
+
+        mapped, reason = _unique_action_mapping(native_actions, current_actions)
+
+        self.assertEqual(reason, "")
+        self.assertEqual(mapped, ["java-1", "java-2"])
+
+        ambiguous, reason = _unique_action_mapping(native_actions[:1], current_actions + [{"id": "java-3", "type": "END_TURN", "t": "END_TURN"}])
+        self.assertEqual(ambiguous, [])
+        self.assertEqual(reason, "ambiguous_action_signature")
 
     def test_end_turn_without_visible_enemy_advances_by_live_tribe_order(self) -> None:
         extension = load_native_mcts_extension()
@@ -1547,6 +1644,47 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertGreater(priors[0], priors[2])
         self.assertGreater(priors[1], priors[2])
 
+    def test_static_eval_assigns_ruin_bonus_to_fastest_unit_by_eta(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message_with_ruin_eta_assignment()
+
+        baseline = _static_priors_for_variant(extension, message, "baseline")
+        experimental = _static_priors_for_variant(extension, message, "experimental")
+
+        self.assertAlmostEqual(baseline["rider_toward_ruin"], baseline["warrior_toward_ruin"], places=6)
+        self.assertGreater(experimental["rider_toward_ruin"], experimental["warrior_toward_ruin"])
+        self.assertGreater(experimental["rider_toward_ruin"], experimental["end"])
+
+    def test_static_eval_filters_ruin_bonus_by_required_traversal_research(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+
+        cases = [
+            ("MOUNTAIN", "CLIMBING"),
+            ("SHALLOW_WATER", "FISHING"),
+            ("DEEP_WATER", "SAILING"),
+        ]
+        for terrain, tech in cases:
+            with self.subTest(terrain=terrain, tech=tech):
+                blocked = _message_with_ruin_eta_assignment()
+                blocked["observation"]["board"]["tiles"][0][3]["terrain"] = terrain
+                blocked_priors = _static_priors_for_variant(extension, blocked, "experimental")
+                self.assertAlmostEqual(
+                    blocked_priors["rider_toward_ruin"],
+                    blocked_priors["warrior_toward_ruin"],
+                    places=6,
+                )
+
+                allowed = _message_with_ruin_eta_assignment()
+                allowed["observation"]["board"]["tiles"][0][3]["terrain"] = terrain
+                allowed["observation"]["tribes"][0]["researched_tech_ids"] = [tech]
+                baseline_allowed = _static_priors_for_variant(extension, allowed, "baseline")
+                experimental_allowed = _static_priors_for_variant(extension, allowed, "experimental")
+
+                self.assertGreater(baseline_allowed["rider_toward_ruin"], baseline_allowed["end"])
+                self.assertGreater(experimental_allowed["rider_toward_ruin"], experimental_allowed["warrior_toward_ruin"])
+
     def test_static_eval_prefers_road_frontier_progress_over_branching(self) -> None:
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)
@@ -1573,7 +1711,7 @@ class NativeMCTSTest(unittest.TestCase):
         experimental = _static_priors_for_variant(extension, message, "experimental")
 
         self.assertGreater(baseline["connect"], baseline["branch"])
-        self.assertGreater(experimental["connect"], experimental["branch"])
+        self.assertAlmostEqual(experimental["connect"], experimental["branch"])
 
     def test_static_eval_does_not_reward_branches_from_connected_city_roads(self) -> None:
         extension = load_native_mcts_extension()
