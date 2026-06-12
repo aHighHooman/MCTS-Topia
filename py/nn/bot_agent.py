@@ -30,7 +30,7 @@ def compatible_state_dict(model: HybridPolicyValueNet, state_dict: dict[str, Any
 
 from search.config import HybridAgentConfig
 from search.device import require_cuda_device
-from search.native import NativeSearchUnavailable, run_native_mcts, run_native_static_mcts
+from search.native import NativeSearchUnavailable, ReusableNativeMCTSSession, ReusableNativeStaticMCTSSession, run_native_mcts, run_native_static_mcts
 from search.native.cpp_extension import load_native_mcts_extension
 from search.native.mcts import SearchResult
 from training.replay import (
@@ -48,6 +48,21 @@ def _profile_enabled() -> bool:
 def _profile_log(message: str) -> None:
     if _profile_enabled():
         print(f"[tribes_rl.profile] {message}", file=sys.stderr, flush=True)
+
+
+def _reuse_profile_fields(session: Any | None) -> str:
+    stats = getattr(session, "stats", None)
+    if stats is None:
+        return "tree_reuse_enabled=false"
+    return (
+        "tree_reuse_enabled=true "
+        f"tree_reuse_attempts={int(getattr(stats, 'attempts', 0))} "
+        f"tree_reuse_hits={int(getattr(stats, 'hits', 0))} "
+        f"tree_reuse_misses={int(getattr(stats, 'misses', 0))} "
+        f"reused_nodes={int(getattr(stats, 'reused_nodes', 0))} "
+        f"promoted_subtree_nodes={int(getattr(stats, 'promoted_subtree_nodes', 0))} "
+        f"tree_reuse_last_miss={getattr(stats, 'last_miss_reason', '') or 'none'}"
+    )
 
 
 def _compact_message(message: Dict[str, Any]) -> Dict[str, Any]:
@@ -122,6 +137,8 @@ class HybridRLBot:
         self.turn_step_index = 0
         self.last_active_player: int | None = None
         self.turn_budget_started_at: float | None = None
+        self._static_mcts_session = ReusableNativeStaticMCTSSession()
+        self._nn_mcts_session = ReusableNativeMCTSSession()
 
         # Static bootstrap mode intentionally skips every NN cost: no CUDA requirement,
         # no checkpoint load, no model construction, no warmup, no root/leaf forward passes.
@@ -199,6 +216,8 @@ class HybridRLBot:
         self.turn_step_index = 0
         self.last_active_player = None
         self.turn_budget_started_at = None
+        self._static_mcts_session.reset("episode_reset")
+        self._nn_mcts_session.reset("episode_reset")
 
     def _action_budget_seconds(self) -> float | None:
         budget = float(getattr(self.config.selfplay, "wall_clock_per_action_seconds", 0.0) or 0.0)
@@ -257,12 +276,20 @@ class HybridRLBot:
             raise NativeSearchUnavailable("Native MCTS extension is unavailable.")
 
         if self.static_only_bootstrap:
-            result = run_native_static_mcts(
-                message,
-                self.config.search,
-                self.config.model,
-                wall_time_seconds=self._action_budget_seconds(),
-            )
+            if bool(getattr(self.config.search, "reuse_tree", False)):
+                result = self._static_mcts_session.search(
+                    message,
+                    self.config.search,
+                    self.config.model,
+                    wall_time_seconds=self._action_budget_seconds(),
+                )
+            else:
+                result = run_native_static_mcts(
+                    message,
+                    self.config.search,
+                    self.config.model,
+                    wall_time_seconds=self._action_budget_seconds(),
+                )
             search_finished_at = time.perf_counter()
             _profile_log(
                 "choose_action "
@@ -271,7 +298,8 @@ class HybridRLBot:
                 f"search_ms={(search_finished_at - choose_started_at) * 1000.0:.1f} "
                 f"total_ms={(search_finished_at - choose_started_at) * 1000.0:.1f} "
                 f"actions={len(message.get('actions', []))} device={self.device} static_only=true "
-                f"action_budget_sec={self._action_budget_seconds() if self._action_budget_seconds() is not None else -1.0:.3f}"
+                f"action_budget_sec={self._action_budget_seconds() if self._action_budget_seconds() is not None else -1.0:.3f} "
+                f"{_reuse_profile_fields(self._static_mcts_session if bool(getattr(self.config.search, 'reuse_tree', False)) else None)}"
             )
             return self._finish_action_choice(message, result)
 
@@ -291,17 +319,30 @@ class HybridRLBot:
         if search_budget is not None and search_budget <= 0.0:
             result = self._fallback_result(message, output)
         else:
-            result = run_native_mcts(
-                message,
-                self.model,
-                self.config.search,
-                self.config.model,
-                self.device,
-                output.policy_logits[0],
-                output.value[0],
-                belief_snapshot,
-                wall_time_seconds=search_budget,
-            )
+            if bool(getattr(self.config.search, "reuse_tree", False)):
+                result = self._nn_mcts_session.search(
+                    message,
+                    self.model,
+                    self.config.search,
+                    self.config.model,
+                    self.device,
+                    output.policy_logits[0],
+                    output.value[0],
+                    belief_snapshot,
+                    wall_time_seconds=search_budget,
+                )
+            else:
+                result = run_native_mcts(
+                    message,
+                    self.model,
+                    self.config.search,
+                    self.config.model,
+                    self.device,
+                    output.policy_logits[0],
+                    output.value[0],
+                    belief_snapshot,
+                    wall_time_seconds=search_budget,
+                )
         search_finished_at = time.perf_counter()
         _profile_log(
             "choose_action "
@@ -310,7 +351,8 @@ class HybridRLBot:
             f"search_ms={(search_finished_at - inference_finished_at) * 1000.0:.1f} "
             f"total_ms={(search_finished_at - choose_started_at) * 1000.0:.1f} "
             f"actions={len(message.get('actions', []))} device={self.device} static_only=false "
-            f"action_budget_sec={action_budget if action_budget is not None else -1.0:.3f}"
+            f"action_budget_sec={action_budget if action_budget is not None else -1.0:.3f} "
+            f"{_reuse_profile_fields(self._nn_mcts_session if bool(getattr(self.config.search, 'reuse_tree', False)) else None)}"
         )
         return self._finish_action_choice(message, result)
 

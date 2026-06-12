@@ -45,6 +45,7 @@ def _configure(args: argparse.Namespace) -> HybridAgentConfig:
     cfg.search.batch_size = int(args.search_batch_size)
     cfg.search.static_policy_weight = max(0.0, min(1.0, float(getattr(args, "static_policy_weight", 0.0) or 0.0)))
     cfg.search.static_value_weight = max(0.0, min(1.0, float(getattr(args, "static_value_weight", 0.0) or 0.0)))
+    cfg.search.reuse_tree = bool(getattr(args, "reuse_tree", False))
     cfg.selfplay.max_actions_per_game = int(args.max_game_actions)
     if args.wall_clock_per_action_seconds is not None:
         cfg.selfplay.wall_clock_per_action_seconds = float(args.wall_clock_per_action_seconds)
@@ -158,6 +159,7 @@ def main() -> None:
     parser.add_argument("--max-game-actions", type=int, default=512)
     parser.add_argument("--wall-clock-per-action-seconds", type=float, default=None)
     parser.add_argument("--wall-clock-per-turn-seconds", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--reuse-tree", action="store_true")
     parser.add_argument("--profile-selfplay", action="store_true")
     parser.add_argument("--profile-output", type=Path, default=None)
     args = parser.parse_args()

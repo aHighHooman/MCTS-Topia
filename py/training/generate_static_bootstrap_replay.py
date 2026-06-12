@@ -86,6 +86,8 @@ def _static_bot_command(
         command.append("--deterministic")
     if static_eval_variant:
         command.extend(["--static-eval-variant", static_eval_variant])
+    if bool(getattr(cfg.search, "reuse_tree", False)):
+        command.append("--reuse-tree")
     return command
 
 
@@ -325,6 +327,7 @@ def main() -> None:
     parser.add_argument("--max-depth", type=int, default=0)
     parser.add_argument("--top-k-actions", type=int, default=64)
     parser.add_argument("--search-batch-size", type=int, default=64)
+    parser.add_argument("--reuse-tree", action="store_true", help="Experimentally reuse/promote native MCTS subtrees during static bootstrap self-play.")
     parser.add_argument("--max-actions", type=int, default=None)
     parser.add_argument("--game-mode", type=str, default=None)
     parser.add_argument("--max-turns-capitals", type=int, default=None)
@@ -359,6 +362,7 @@ def main() -> None:
     cfg.search.max_depth = int(args.max_depth)
     cfg.search.top_k_actions = int(args.top_k_actions)
     cfg.search.batch_size = int(args.search_batch_size)
+    cfg.search.reuse_tree = bool(args.reuse_tree)
 
     if args.max_actions is not None:
         cfg.model.max_actions = int(args.max_actions)

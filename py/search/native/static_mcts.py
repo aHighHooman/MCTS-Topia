@@ -10,6 +10,7 @@ from .cpp_extension import load_native_mcts_extension
 from .mcts import (
     NativeSearchParityError,
     NativeSearchUnavailable,
+    ReusableNativeMCTSSession,
     SearchResult,
     _Evaluation,
     _SearchTelemetry,
@@ -132,6 +133,46 @@ def _root_static_priors(
     return action_ids, priors, root_eval.value, indexes
 
 
+class ReusableNativeStaticMCTSSession(ReusableNativeMCTSSession):
+    def _root_priors(
+        self,
+        root_payload: Dict[str, Any],
+        evaluator: Any,
+        search_cfg: SearchConfig,
+        model_cfg: ModelConfig,
+        device: Any,
+        root_policy_logits: Any,
+        root_value: Any,
+        belief_snapshot: Any,
+    ) -> tuple[List[str], List[float], float, List[int]]:
+        return _root_static_priors(root_payload, search_cfg, model_cfg)
+
+    def _evaluate_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        evaluator: Any,
+        model_cfg: ModelConfig,
+        device: Any,
+    ) -> List[_Evaluation]:
+        return _evaluate_static_messages(messages, model_cfg.max_actions)
+
+    def search(
+        self,
+        root_payload: Dict[str, Any],
+        search_cfg: SearchConfig,
+        model_cfg: ModelConfig,
+        wall_time_seconds: float | None = None,
+    ) -> SearchResult:
+        return super().search(
+            root_payload,
+            None,
+            search_cfg,
+            model_cfg,
+            "cpu",
+            wall_time_seconds=wall_time_seconds,
+        )
+
+
 def run_native_static_mcts(
     root_payload: Dict[str, Any],
     search_cfg: SearchConfig,
@@ -173,6 +214,7 @@ def run_native_static_mcts(
         bool(root_payload.get("is_terminal", False) or root_payload.get("terminal", False)),
         seed,
         int(model_cfg.max_actions),
+        bool(getattr(search_cfg, "use_progressive_widening", True)),
     )
     tree.add_root_dirichlet_noise(float(search_cfg.dirichlet_alpha), float(search_cfg.dirichlet_epsilon))
     max_depth = -1 if int(search_cfg.max_depth) <= 0 else int(search_cfg.max_depth)

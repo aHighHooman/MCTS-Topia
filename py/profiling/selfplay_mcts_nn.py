@@ -196,6 +196,8 @@ def _bot_command(args: argparse.Namespace, cfg: HybridAgentConfig, workdir: Path
     ]
     if args.deterministic:
         command.append("--deterministic")
+    if bool(getattr(cfg.search, "reuse_tree", False)):
+        command.append("--reuse-tree")
     return command
 
 
@@ -395,6 +397,8 @@ def _start_profiled_persistent_bot_server(
     ]
     if cfg.selfplay.profile_selfplay:
         command.append("--profile-selfplay")
+    if bool(getattr(cfg.search, "reuse_tree", False)):
+        command.append("--reuse-tree")
     stdout_handle = stdout_path.open("w", encoding="utf-8")
     stderr_handle = stderr_path.open("w", encoding="utf-8")
     process = subprocess.Popen(command, stdout=stdout_handle, stderr=stderr_handle, text=True)
@@ -431,13 +435,13 @@ def _configure(args: argparse.Namespace) -> HybridAgentConfig:
     cfg.search.max_depth = int(args.max_depth)
     cfg.search.top_k_actions = int(args.top_k_actions)
     cfg.search.seed = int(args.seed_base)
+    cfg.search.reuse_tree = bool(args.reuse_tree)
     if args.no_dirichlet:
         cfg.search.dirichlet_epsilon = 0.0
     cfg.selfplay.profile_selfplay = True
     cfg.selfplay.persistent_bot = bool(args.persistent_bot)
     cfg.selfplay.run_mode = str(args.run_mode)
     cfg.selfplay.game_mode = str(args.game_mode)
-    cfg.selfplay.level_file = str(args.level_file)
     cfg.selfplay.map_type = str(args.map_type)
     cfg.selfplay.map_size = str(args.map_size)
     cfg.selfplay.max_turns_capitals = int(args.max_turns_capitals)
@@ -550,7 +554,6 @@ def main() -> int:
     parser.add_argument("--tribes", nargs=2, default=["Xin Xi", "Imperius"])
     parser.add_argument("--run-mode", default="PlayLG")
     parser.add_argument("--game-mode", default="Capitals")
-    parser.add_argument("--level-file", default="levels/MinimalLevel2.csv")
     parser.add_argument("--map-type", default="Continents")
     parser.add_argument("--map-size", default="Small")
     parser.add_argument("--simulations", type=int, default=192)
@@ -569,6 +572,7 @@ def main() -> int:
     parser.add_argument("--progress-interval-seconds", type=int, default=30)
     parser.add_argument("--wall-clock-per-action-seconds", type=float, default=None)
     parser.add_argument("--wall-clock-per-turn-seconds", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--reuse-tree", action="store_true", help="Experimentally reuse/promote native MCTS subtrees during self-play profiling.")
     parser.add_argument("--persistent-bot", dest="persistent_bot", action="store_true", default=True, help="Use the same persistent shared bot server setup as RL training.")
     parser.add_argument("--no-persistent-bot", dest="persistent_bot", action="store_false", help="Launch one full bot process per player, matching the older non-persistent path.")
     parser.add_argument("--deterministic", action="store_true")

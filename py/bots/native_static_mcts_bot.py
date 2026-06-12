@@ -14,7 +14,7 @@ if str(PY_ROOT) not in sys.path:
 
 from nn.encoding import normalize_message
 from search.config import HybridAgentConfig
-from search.native import run_native_static_mcts
+from search.native import ReusableNativeStaticMCTSSession, run_native_static_mcts
 from search.native.mcts import NativeSearchParityError
 
 
@@ -37,14 +37,23 @@ def choose_action(
     message: Dict[str, Any],
     cfg: HybridAgentConfig,
     wall_clock_per_action_seconds: Optional[float],
+    session: ReusableNativeStaticMCTSSession | None = None,
 ) -> Dict[str, Optional[str]]:
     message = normalize_message(message)
-    result = run_native_static_mcts(
-        message,
-        cfg.search,
-        cfg.model,
-        wall_time_seconds=wall_clock_per_action_seconds,
-    )
+    if bool(getattr(cfg.search, "reuse_tree", False)) and session is not None:
+        result = session.search(
+            message,
+            cfg.search,
+            cfg.model,
+            wall_time_seconds=wall_clock_per_action_seconds,
+        )
+    else:
+        result = run_native_static_mcts(
+            message,
+            cfg.search,
+            cfg.model,
+            wall_time_seconds=wall_clock_per_action_seconds,
+        )
     legal_action_ids = {str(action.get("id")) for action in message.get("actions", [])}
     selected = str(result.action_id) if result.action_id is not None else None
     if selected not in legal_action_ids:
@@ -72,10 +81,14 @@ def main() -> None:
     parser.add_argument("--search-batch-size", type=int, default=64)
     parser.add_argument("--static-eval-variant", choices=("baseline", "experimental"), default="baseline")
     parser.add_argument("--deterministic", action="store_true")
+    parser.add_argument("--reuse-tree", action="store_true", help="Experimentally reuse/promote the selected native MCTS subtree between same-turn action requests.")
     parser.add_argument("--seed", type=int, default=13)
     args = parser.parse_args()
     os.environ["TRIBES_STATIC_EVAL_VARIANT"] = args.static_eval_variant
     cfg = _configure(args)
+    if args.reuse_tree:
+        cfg.search.reuse_tree = True
+    session = ReusableNativeStaticMCTSSession()
 
     for raw_line in sys.stdin:
         line = raw_line.strip()
@@ -86,9 +99,10 @@ def main() -> None:
         except json.JSONDecodeError:
             continue
         if message.get("type") == "action_request":
-            sys.stdout.write(json.dumps(choose_action(message, cfg, args.wall_clock_per_action_seconds)) + "\n")
+            sys.stdout.write(json.dumps(choose_action(message, cfg, args.wall_clock_per_action_seconds, session)) + "\n")
             sys.stdout.flush()
         elif message.get("type") == "game_over":
+            session.reset("game_over")
             break
 
 

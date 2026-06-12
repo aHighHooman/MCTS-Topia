@@ -30,6 +30,7 @@ def main() -> None:
     parser.add_argument("--wall-clock-per-action-seconds", type=float, default=None)
     parser.add_argument("--wall-clock-per-turn-seconds", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--deterministic", action="store_true")
+    parser.add_argument("--reuse-tree", action="store_true", help="Experimentally reuse/promote the selected native MCTS subtree between same-turn action requests.")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--static-eval-variant", choices=("baseline", "experimental"), default=None)
     parser.add_argument(
@@ -61,6 +62,8 @@ def main() -> None:
         # search wrappers read it with getattr(..., "seed", ...), so attaching it
         # here is intentional and compatible.
         cfg.search.seed = int(args.seed)
+    if args.reuse_tree:
+        cfg.search.reuse_tree = True
     if args.static_eval_variant is not None:
         os.environ["TRIBES_STATIC_EVAL_VARIANT"] = args.static_eval_variant
     wall_clock_per_action = args.wall_clock_per_action_seconds

@@ -1,6 +1,10 @@
+#ifdef TRIBES_NATIVE_MCTS_STANDALONE
+#include "native_json_py.hpp"
+#else
 #include <torch/extension.h>
 
 #include <pybind11/stl.h>
+#endif
 
 #include "native_rules.hpp"
 #include "native_static_eval.hpp"
@@ -17,7 +21,9 @@
 #include <unordered_map>
 #include <vector>
 
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
 namespace py = pybind11;
+#endif
 using tribes::native::NativeAction;
 using tribes::native::NativeCity;
 using tribes::native::NativeGameState;
@@ -121,7 +127,11 @@ class NativeMCTS {
       double root_value,
       bool root_terminal,
       uint64_t seed,
-      int max_actions) : max_actions_(max_actions), rng_(seed) {
+      int max_actions,
+      bool use_progressive_widening = true) :
+      max_actions_(max_actions),
+      use_progressive_widening_(use_progressive_widening),
+      rng_(seed) {
     NativeRoot root = parse_root_payload(root_payload, max_actions);
     actions_ = root.actions;
     if (!root_action_indexes.empty()) {
@@ -762,11 +772,13 @@ class NativeMCTS {
     if (frontier <= 0) {
       return py::make_tuple(expanded_nodes, completed_simulations);
     }
+    std::vector<int> path_node_ids;
+    std::vector<int> path_action_indexes;
+    path_node_ids.reserve(max_depth > 0 ? static_cast<size_t>(max_depth) : 32);
+    path_action_indexes.reserve(max_depth > 0 ? static_cast<size_t>(max_depth) : 32);
     for (int i = 0; i < frontier; ++i) {
-      std::vector<int> path_node_ids;
-      std::vector<int> path_action_indexes;
-      path_node_ids.reserve(8);
-      path_action_indexes.reserve(8);
+      path_node_ids.clear();
+      path_action_indexes.clear();
       int turn_depth = 0;
       int current_node_id = 0;
       double leaf_value = leaf_value_for(nodes_[0], states_[nodes_[0].state_index]);
@@ -1157,6 +1169,159 @@ class NativeMCTS {
     return out;
   }
 
+  std::vector<double> root_visit_distribution_by_index(double temperature) const {
+    std::vector<double> probs;
+    if (nodes_.empty()) {
+      return probs;
+    }
+    const Node& root = nodes_[0];
+    if (root.visits.empty()) {
+      return probs;
+    }
+    probs.assign(root.visits.size(), 0.0);
+    if (temperature <= 1e-6) {
+      auto best_it = std::max_element(root.visits.begin(), root.visits.end());
+      probs[std::distance(root.visits.begin(), best_it)] = 1.0;
+      return probs;
+    }
+    double total = 0.0;
+    for (size_t i = 0; i < root.visits.size(); ++i) {
+      probs[i] = std::pow(static_cast<double>(root.visits[i]), 1.0 / temperature);
+      total += probs[i];
+    }
+    if (total <= 0.0) {
+      std::fill(probs.begin(), probs.end(), 1.0 / static_cast<double>(probs.size()));
+    } else {
+      for (double& prob : probs) {
+        prob /= total;
+      }
+    }
+    return probs;
+  }
+
+  py::dict root_payload() const {
+    py::dict out;
+    if (nodes_.empty()) {
+      return out;
+    }
+    return serialize_evaluation_payload(states_[nodes_[0].state_index], actions_);
+  }
+
+  py::list root_action_payloads() const {
+    py::list out;
+    if (nodes_.empty()) {
+      return out;
+    }
+    const NativeGameState& root_state = states_[nodes_[0].state_index];
+    for (int action_index : root_state.legal_action_indexes) {
+      if (action_index >= 0 && action_index < static_cast<int>(actions_.size())) {
+        out.append(actions_[action_index].payload);
+      }
+    }
+    return out;
+  }
+
+  int node_count() const {
+    return static_cast<int>(nodes_.size());
+  }
+
+  py::dict promote_root_child_by_action_id(const std::string& action_id) {
+    py::dict out;
+    out["ok"] = false;
+    out["reason"] = py::str("not_found");
+    out["previous_nodes"] = static_cast<int>(nodes_.size());
+    out["promoted_subtree_nodes"] = 0;
+    if (nodes_.empty()) {
+      out["reason"] = py::str("empty_tree");
+      return out;
+    }
+    const Node& root = nodes_[0];
+    const NativeGameState& root_state = states_[root.state_index];
+    int local_action_index = -1;
+    for (size_t i = 0; i < root_state.legal_action_indexes.size() && i < root.child_node_ids.size(); ++i) {
+      const int global_action_index = root_state.legal_action_indexes[i];
+      if (global_action_index >= 0 &&
+          global_action_index < static_cast<int>(actions_.size()) &&
+          actions_[global_action_index].id == action_id) {
+        local_action_index = static_cast<int>(i);
+        break;
+      }
+    }
+    if (local_action_index < 0) {
+      return out;
+    }
+    const int child_node_id = root.child_node_ids[local_action_index];
+    if (child_node_id < 0) {
+      out["reason"] = py::str("child_not_expanded");
+      return out;
+    }
+    validate_node_id(child_node_id);
+
+    std::vector<int> order;
+    std::vector<int> stack;
+    std::vector<char> seen(nodes_.size(), 0);
+    stack.push_back(child_node_id);
+    seen[child_node_id] = 1;
+    while (!stack.empty()) {
+      const int node_id = stack.back();
+      stack.pop_back();
+      order.push_back(node_id);
+      const Node& node = nodes_[node_id];
+      for (int nested_child_id : node.child_node_ids) {
+        if (nested_child_id >= 0) {
+          validate_node_id(nested_child_id);
+          if (!seen[nested_child_id]) {
+            seen[nested_child_id] = 1;
+            stack.push_back(nested_child_id);
+          }
+        }
+      }
+    }
+
+    std::vector<int> node_remap(nodes_.size(), -1);
+    for (size_t i = 0; i < order.size(); ++i) {
+      node_remap[order[i]] = static_cast<int>(i);
+    }
+    std::unordered_map<int, int> state_remap;
+    std::vector<NativeGameState> compact_states;
+    compact_states.reserve(order.size());
+    for (int old_node_id : order) {
+      const int old_state_index = nodes_[old_node_id].state_index;
+      if (state_remap.find(old_state_index) == state_remap.end()) {
+        const int new_state_index = static_cast<int>(compact_states.size());
+        state_remap.emplace(old_state_index, new_state_index);
+        compact_states.push_back(states_[old_state_index]);
+      }
+    }
+
+    std::vector<Node> compact_nodes;
+    compact_nodes.reserve(order.size());
+    for (int old_node_id : order) {
+      Node node = nodes_[old_node_id];
+      node.state_index = state_remap.at(node.state_index);
+      for (int& nested_child_id : node.child_node_ids) {
+        nested_child_id = nested_child_id >= 0 ? node_remap[nested_child_id] : -1;
+      }
+      compact_nodes.push_back(std::move(node));
+    }
+
+    states_ = std::move(compact_states);
+    nodes_ = std::move(compact_nodes);
+    pending_child_states_.clear();
+    pending_selections_.clear();
+    last_batch_depth_sum_ = 0;
+    last_batch_max_depth_ = 0;
+    last_batch_turn_depth_sum_ = 0;
+    last_batch_max_turn_depth_ = 0;
+    root_action_indexes_ = states_[nodes_[0].state_index].legal_action_indexes;
+
+    out["ok"] = true;
+    out["reason"] = py::str("");
+    out["promoted_subtree_nodes"] = static_cast<int>(nodes_.size());
+    out["root_payload"] = root_payload();
+    return out;
+  }
+
  private:
   std::vector<NativeAction> actions_;
   std::vector<int> root_action_indexes_;
@@ -1169,6 +1334,7 @@ class NativeMCTS {
   int64_t last_batch_turn_depth_sum_ = 0;
   int last_batch_max_turn_depth_ = 0;
   int max_actions_ = 0;
+  bool use_progressive_widening_ = true;
   bool static_timing_enabled_ = false;
   double last_static_select_ms_ = 0.0;
   double last_static_apply_ms_ = 0.0;
@@ -1194,13 +1360,35 @@ class NativeMCTS {
     const NativeGameState& state = states_[state_index];
     Node node;
     node.state_index = state_index;
-    node.priors = terminal ? std::vector<double>() : normalize_priors(priors, state.legal_action_indexes.size());
+    if (!terminal) {
+      normalize_priors_into(node.priors, priors, state.legal_action_indexes.size());
+    }
     node.visits.assign(node.priors.size(), 0);
     node.value_sums.assign(node.priors.size(), 0.0);
     node.child_node_ids.assign(node.priors.size(), -1);
     node.value_estimate = value;
     node.terminal = terminal;
     return node;
+  }
+
+  static void normalize_priors_into(std::vector<double>& out, const std::vector<double>& priors, size_t expected) {
+    if (priors.size() != expected) {
+      throw std::invalid_argument("Prior count does not match legal action count.");
+    }
+    out.resize(expected);
+    double total = 0.0;
+    for (size_t i = 0; i < expected; ++i) {
+      const double value = std::max(0.0, priors[i]);
+      out[i] = value;
+      total += value;
+    }
+    if (total <= 0.0) {
+      std::fill(out.begin(), out.end(), expected > 0 ? 1.0 / static_cast<double>(expected) : 0.0);
+      return;
+    }
+    for (double& value : out) {
+      value /= total;
+    }
   }
 
   std::vector<double> normalize_priors(const std::vector<double>& priors, size_t expected) const {
@@ -1234,6 +1422,9 @@ class NativeMCTS {
 
   py::dict serialize_leaf_payload(const NativeGameState& state) const {
     py::dict payload = serialize_evaluation_payload(state, actions_);
+#ifdef TRIBES_NATIVE_MCTS_STANDALONE
+    return payload;
+#else
     const int board_size = state.board_size;
     if (board_size <= 0) {
       return payload;
@@ -1365,6 +1556,7 @@ class NativeMCTS {
     payload["_native_explored_tiles"] = explored_tiles;
     payload["_native_visible_tiles"] = visible_tiles;
     return payload;
+#endif
   }
 
   using StaticTimingClock = std::chrono::steady_clock;
@@ -1400,11 +1592,11 @@ class NativeMCTS {
     return std::max<size_t>(1, std::min(total, unlocked));
   }
 
-  static int select_action_index(const Node& node, double c_puct) {
+  int select_action_index(const Node& node, double c_puct) const {
     if (node.priors.size() <= 1) {
       return 0;
     }
-    const size_t action_count = progressive_action_count(node);
+    const size_t action_count = use_progressive_widening_ ? progressive_action_count(node) : node.priors.size();
     const double sqrt_total = std::sqrt(std::max(1.0, static_cast<double>(node.total_visits)));
     double best_score = -std::numeric_limits<double>::infinity();
     int best_index = 0;
@@ -1430,6 +1622,7 @@ class NativeMCTS {
 
 }  // namespace
 
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       py::class_<NativeMCTS>(m, "NativeMCTS")
       .def(py::init<
@@ -1439,7 +1632,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            double,
            bool,
            uint64_t,
-           int>())
+           int,
+           bool>(),
+           py::arg("root_payload"),
+           py::arg("root_action_indexes"),
+           py::arg("root_priors"),
+           py::arg("root_value"),
+           py::arg("root_terminal"),
+           py::arg("seed"),
+           py::arg("max_actions"),
+           py::arg("use_progressive_widening") = true)
       .def("add_root_dirichlet_noise", &NativeMCTS::add_root_dirichlet_noise)
       .def("reserve_tree_capacity", &NativeMCTS::reserve_tree_capacity)
       .def("select_leaf", &NativeMCTS::select_leaf)
@@ -1456,7 +1658,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("reserve_path", &NativeMCTS::reserve_path)
       .def("complete_reserved_path", &NativeMCTS::complete_reserved_path)
       .def("complete_selected_paths", &NativeMCTS::complete_selected_paths)
-      .def("root_visit_distribution", &NativeMCTS::root_visit_distribution);
+      .def("root_visit_distribution", &NativeMCTS::root_visit_distribution)
+      .def("root_visit_distribution_by_index", &NativeMCTS::root_visit_distribution_by_index)
+      .def("root_payload", &NativeMCTS::root_payload)
+      .def("root_action_payloads", &NativeMCTS::root_action_payloads)
+      .def("node_count", &NativeMCTS::node_count)
+      .def("promote_root_child_by_action_id", &NativeMCTS::promote_root_child_by_action_id);
   m.def("evaluate_static", &tribes::native::evaluate_static);
   m.def("evaluate_static_batch", &tribes::native::evaluate_static_batch);
 }
+#endif

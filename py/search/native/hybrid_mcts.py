@@ -9,7 +9,7 @@ import torch
 from search.config import ModelConfig, SearchConfig
 from nn.encoding import normalize_message
 from nn.model import HybridPolicyValueNet
-from .mcts import SearchResult, _Evaluation, _evaluate_messages, run_native_mcts
+from .mcts import ReusableNativeMCTSSession, SearchResult, _Evaluation, _evaluate_messages, run_native_mcts
 from .static_mcts import _evaluate_static_messages
 
 
@@ -119,6 +119,68 @@ def _root_hybrid_priors(
     action_ids = [str(root_actions[index].get("id")) for index in indexes]
     priors = _normalize_priors([root_eval.priors[index] for index in indexes])
     return action_ids, priors, root_eval.value, indexes
+
+
+class ReusableNativeHybridMCTSSession(ReusableNativeMCTSSession):
+    def _root_priors(
+        self,
+        root_payload: Dict[str, Any],
+        evaluator: HybridPolicyValueNet,
+        search_cfg: SearchConfig,
+        model_cfg: ModelConfig,
+        device: torch.device | str,
+        root_policy_logits: torch.Tensor | None,
+        root_value: torch.Tensor | float | None,
+        belief_snapshot: Any | None,
+    ) -> tuple[List[str], List[float], float, List[int]]:
+        return _root_hybrid_priors(
+            root_payload,
+            evaluator,
+            search_cfg,
+            model_cfg,
+            device,
+            root_policy_logits,
+            root_value,
+            belief_snapshot,
+        )
+
+    def _evaluate_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        evaluator: HybridPolicyValueNet,
+        model_cfg: ModelConfig,
+        device: torch.device | str,
+    ) -> List[_Evaluation]:
+        return _evaluate_hybrid_messages(messages, evaluator, self._search_cfg, model_cfg, device, None)
+
+    def search(
+        self,
+        root_payload: Dict[str, Any],
+        evaluator: HybridPolicyValueNet,
+        search_cfg: SearchConfig,
+        model_cfg: ModelConfig,
+        device: torch.device | str,
+        root_policy_logits: torch.Tensor | None = None,
+        root_value: torch.Tensor | float | None = None,
+        belief_snapshot: Any | None = None,
+        wall_time_seconds: float | None = None,
+    ) -> SearchResult:
+        self._search_cfg = search_cfg
+        self._belief_snapshot = belief_snapshot
+        try:
+            return super().search(
+                root_payload,
+                evaluator,
+                search_cfg,
+                model_cfg,
+                device,
+                root_policy_logits,
+                root_value,
+                belief_snapshot,
+                wall_time_seconds,
+            )
+        finally:
+            self._belief_snapshot = None
 
 
 def run_native_hybrid_mcts(

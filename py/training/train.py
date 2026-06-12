@@ -828,6 +828,8 @@ def _bot_command(
                 str(max(0.0, float(cfg.selfplay.wall_clock_per_action_seconds))),
             ]
         )
+    if bool(getattr(cfg.search, "reuse_tree", False)):
+        command.append("--reuse-tree")
     return command
 
 
@@ -930,6 +932,8 @@ def _start_persistent_bot_server(
         )
     if cfg.selfplay.profile_selfplay:
         command.append("--profile-selfplay")
+    if bool(getattr(cfg.search, "reuse_tree", False)):
+        command.append("--reuse-tree")
     stdout_handle = stdout_path.open("w", encoding="utf-8")
     stderr_handle = stderr_path.open("w", encoding="utf-8")
     process = subprocess.Popen(
