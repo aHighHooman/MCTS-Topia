@@ -192,9 +192,6 @@ def run_tournament(args: argparse.Namespace) -> tuple[Path, Path, dict[str, floa
     cfg.selfplay.max_actions_per_game = args.max_actions_per_game
     cfg.selfplay.timeout_seconds = args.match_timeout_seconds
     cfg.selfplay.external_action_timeout_ms = args.external_action_timeout_ms
-    if args.level_file is not None:
-        cfg.selfplay.level_file = str(args.level_file)
-
     args.output_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path = args.jsonl or args.output_dir / f"checkpoint_tournament_{int(time.time())}.jsonl"
     csv_path = args.csv or args.output_dir / "checkpoint_tournament_summary.csv"
@@ -300,7 +297,6 @@ def main() -> None:
     parser.add_argument("--max-actions-per-game", type=int, default=512)
     parser.add_argument("--match-timeout-seconds", type=int, default=1800)
     parser.add_argument("--external-action-timeout-ms", type=int, default=120_000)
-    parser.add_argument("--level-file", type=Path, default=None)
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--stop-on-error", action="store_true")
     args = parser.parse_args()

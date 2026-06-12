@@ -47,7 +47,6 @@ class SelfPlayConfig:
     java_main_class: str = "HeadlessPlay"
     run_mode: str = "PlayLG"
     game_mode: str = "Capitals"
-    level_file: str | None = None
     level_seed: int = -1
     map_type: str = "Drylands"
     map_size: str = "Tiny"

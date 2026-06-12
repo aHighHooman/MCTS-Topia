@@ -6,7 +6,6 @@
   "tribes": ["Imperius", "Imperius"],
   "run_mode": "PlayLG",
   "game_mode": "Capitals",
-  "level_file": "levels/MinimalLevel2.csv",
   "map_type": "Drylands",
   "map_size": "Small",
   "simulations": 256,

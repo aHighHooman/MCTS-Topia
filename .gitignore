@@ -27,4 +27,5 @@ logs/
 *.log
 tmp/
 rl/
+tempEmail/
 .aider*

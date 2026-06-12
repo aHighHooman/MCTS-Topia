@@ -199,8 +199,6 @@ External bot action ids are request-scoped. Do not store an action id and reuse 
 - `tournament_static_eval_ab.json`: static evaluator A/B tournament config
 - `tournament_static_eval_ab_swapped.json`: swapped-side A/B tournament config
 - `tournament_static_mcts_iterations.json`: static MCTS iteration tournament config
-- `levels/`: CSV levels and test maps
-- `terrainProbs.json`: terrain/resource probability data
 
 ## Generated Local State
 

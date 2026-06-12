@@ -187,6 +187,33 @@ class SelfPlayConfigTest(unittest.TestCase):
         self.assertEqual(captured["java_cwd"], java_cwd)
         self.assertEqual(Path(captured["play_path"]).parent, RL_ROOT / "playfiles")
 
+    def test_selfplay_config_omits_level_file_entry(self) -> None:
+        cfg = HybridAgentConfig()
+        cfg.training.output_dir = Path(tempfile.mkdtemp()) / "rl"
+        captured: dict[str, object] = {}
+
+        class FakeProcess:
+            returncode = 0
+
+            def poll(self) -> int:
+                return 0
+
+        def fake_popen(command, **kwargs):
+            play_path = Path(command[-1])
+            captured.update(json.loads(play_path.read_text(encoding="utf-8")))
+            return FakeProcess()
+
+        with patch("training.java_selfplay.subprocess.Popen", side_effect=fake_popen):
+            result = run_selfplay_match(
+                cfg,
+                [["python", "bot.py"], ["python", "bot.py"]],
+                ["Xin Xi", "Imperius"],
+                Path.cwd(),
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("Level File", captured)
+
 
 if __name__ == "__main__":
     unittest.main()

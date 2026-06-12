@@ -470,7 +470,6 @@ def _capture_game(args: argparse.Namespace, *, game_index: int, seed: int) -> li
     cfg = HybridAgentConfig()
     cfg.selfplay.run_mode = args.run_mode
     cfg.selfplay.game_mode = args.game_mode
-    cfg.selfplay.level_file = args.level_file
     cfg.selfplay.map_type = args.map_type
     cfg.selfplay.map_size = args.map_size
     cfg.selfplay.game_seed = seed
@@ -611,7 +610,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--game-mode", default="Capitals")
     parser.add_argument("--map-type", default="Drylands")
     parser.add_argument("--map-size", default="Tiny")
-    parser.add_argument("--level-file", default="levels/MinimalLevel2.csv")
     parser.add_argument("--tribes", nargs=2, default=["Xin Xi", "Imperius"])
     parser.add_argument("--max-turns", type=int, default=40)
     parser.add_argument("--max-actions-per-turn", type=int, default=80)

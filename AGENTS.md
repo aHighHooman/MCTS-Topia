@@ -4,7 +4,7 @@
 - Mixed Java/Python workspace for external bots, RL self-play, NN training, profiling, and native/static/hybrid MCTS.
 - This repo does not own the Java game rules source. Use `C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes` as the authoritative external game repo.
 - Java sources come from `$TRIBES_GAME_ROOT\src`; default game root is `C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes`.
-- Python code lives under `py/bots`, `py/nn`, `py/search`, `py/training`, `py/profiling`, and `py/levelgen`.
+- Python code lives under `py/bots`, `py/nn`, `py/search`, `py/training`, and `py/profiling`.
 - Work from the repo root: `C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\Tribes_MCTS`.
 
 ## Setup Gotchas

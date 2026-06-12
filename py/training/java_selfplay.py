@@ -125,9 +125,6 @@ def run_selfplay_match(
         external_env["MCTS_NN_PROFILE"] = "1"
     if external_env:
         play_config["External Env"] = external_env
-    if config.selfplay.run_mode == "PlayFile":
-        play_config["Level File"] = config.selfplay.level_file
-
     playfile_root = (Path(config.training.output_dir) / "playfiles").resolve()
     playfile_root.mkdir(parents=True, exist_ok=True)
     run_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex}"
