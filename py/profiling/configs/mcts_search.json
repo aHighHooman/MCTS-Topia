@@ -22,6 +22,8 @@
   "java_main_class": null,
   "checkpoint": "py/profiling/mcts_search_profiling_random_init_model.pt",
   "static_eval_variant": "experimental",
+  "native_static_exe": "out/native/native_static_mcts_bot.exe",
+  "build_native_static_exe": true,
   "device": "cpu",
   "simulations": null,
   "wall_time_sec": 3,

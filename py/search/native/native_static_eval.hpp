@@ -1,12 +1,18 @@
 #pragma once
 
+#ifdef TRIBES_NATIVE_MCTS_STANDALONE
+#include "native_json_py.hpp"
+#else
 #include <pybind11/pybind11.h>
+#endif
 
 #include "native_rules.hpp"
 
 #include <vector>
 
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
 namespace py = pybind11;
+#endif
 
 namespace tribes::native {
 

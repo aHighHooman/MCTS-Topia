@@ -40,7 +40,6 @@ _MCTS_SEARCH_DEFAULTS: dict[str, Any] = {
     "selfplay_seed_start": 0,
     "selfplay_seeds": None,
     "selfplay_run_mode": "PlayLG",
-    "selfplay_level_file": "levels/MinimalLevel2.csv",
     "selfplay_game_mode": "Capitals",
     "selfplay_map_type": "Drylands",
     "selfplay_map_size": "Tiny",
@@ -58,6 +57,8 @@ _MCTS_SEARCH_DEFAULTS: dict[str, Any] = {
     "java_main_class": None,
     "checkpoint": str(DEFAULT_AUTORESEARCH_CHECKPOINT),
     "static_eval_variant": "baseline",
+    "native_static_exe": "out/native/native_static_mcts_bot.exe",
+    "build_native_static_exe": True,
     "device": None,
     "simulations": None,
     "wall_time_sec": 10.0,
@@ -89,6 +90,7 @@ _PATH_CONFIG_KEYS = {
     "captured_payload_dir",
     "workdir",
     "checkpoint",
+    "native_static_exe",
     "csv",
     "profile_csv",
     "position_csv",
@@ -919,7 +921,6 @@ def _capture_selfplay_start_payload(args: argparse.Namespace, seed: int | None =
     cfg = HybridAgentConfig()
     cfg.selfplay.run_mode = str(args.selfplay_run_mode)
     cfg.selfplay.game_mode = str(args.selfplay_game_mode)
-    cfg.selfplay.level_file = str(args.selfplay_level_file)
     cfg.selfplay.game_seed = run_seed
     cfg.selfplay.agent_seed = run_seed
     cfg.selfplay.level_seed = run_seed
@@ -978,7 +979,7 @@ def _capture_selfplay_start_payload(args: argparse.Namespace, seed: int | None =
             raise RuntimeError(
                 "Self-play capture failed before any action_request was written. "
                 f"workdir={workdir} run_mode={cfg.selfplay.run_mode} map_type={getattr(cfg.selfplay, 'map_type', '?')} "
-                f"map_size={getattr(cfg.selfplay, 'map_size', '?')} level={cfg.selfplay.level_file} seed={cfg.selfplay.level_seed}"
+                f"map_size={getattr(cfg.selfplay, 'map_size', '?')} seed={cfg.selfplay.level_seed}"
             ) from exc
         print(f"[profile_mcts_search] self-play capture ended with {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
 
@@ -1476,8 +1477,8 @@ def _load_mcts_search_config(path: Path = DEFAULT_MCTS_SEARCH_CONFIG) -> argpars
     input_mode = "payload" if values.get("payload") is not None else "selfplay"
     values["input_mode"] = input_mode
     values["synthetic"] = False
-    if str(values.get("evaluator")) not in {"nn", "static", "bot"}:
-        raise ValueError("mcts_search config evaluator must be one of: nn, static, bot")
+    if str(values.get("evaluator")) not in {"nn", "static", "static_exe", "bot"}:
+        raise ValueError("mcts_search config evaluator must be one of: nn, static, static_exe, bot")
     if str(values.get("static_eval_variant")) not in {"baseline", "experimental"}:
         raise ValueError("mcts_search config static_eval_variant must be one of: baseline, experimental")
     for key in _PATH_CONFIG_KEYS:
@@ -1859,6 +1860,118 @@ def _default_mcts_search_output_path(args: argparse.Namespace, filename: str) ->
     return PROJECT_ROOT / "debug-logs" / f"mcts-search-{args.evaluator}" / filename
 
 
+def _ensure_native_static_exe(args: argparse.Namespace) -> Path:
+    exe = Path(args.native_static_exe)
+    if not exe.is_absolute():
+        exe = PROJECT_ROOT / exe
+    if exe.exists():
+        return exe
+    if not bool(getattr(args, "build_native_static_exe", True)):
+        raise FileNotFoundError(f"Native static executable not found: {exe}")
+    build_script = PROJECT_ROOT / "scripts" / "build_native_static_bot.ps1"
+    if not build_script.exists():
+        raise FileNotFoundError(f"Native static executable build script not found: {build_script}")
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(build_script)],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "Failed to build native static executable.\n"
+            f"stdout:\n{completed.stdout[-4000:]}\n"
+            f"stderr:\n{completed.stderr[-4000:]}"
+        )
+    if not exe.exists():
+        raise FileNotFoundError(f"Native static executable build completed but output was not found: {exe}")
+    return exe
+
+
+def _native_static_exe_command(exe: Path, cfg: HybridAgentConfig, args: argparse.Namespace, *, using_walltime: bool) -> list[str]:
+    command = [
+        str(exe),
+        "--simulations",
+        str(int(cfg.search.num_simulations)),
+        "--max-depth",
+        str(int(cfg.search.max_depth)),
+        "--top-k-actions",
+        str(int(cfg.search.top_k_actions)),
+        "--max-actions",
+        str(int(cfg.model.max_actions)),
+        "--search-batch-size",
+        str(int(cfg.search.batch_size)),
+        "--static-eval-variant",
+        str(args.static_eval_variant),
+        "--seed",
+        str(int(getattr(cfg.search, "seed", 123))),
+        "--profile-json",
+    ]
+    if using_walltime:
+        command.extend(["--wall-clock-per-action-seconds", str(max(0.0, float(args.wall_time_sec)))])
+    if bool(args.no_dirichlet):
+        command.append("--deterministic")
+    return command
+
+
+def _run_static_exe_profile_case(
+    case: PayloadCase,
+    *,
+    exe: Path,
+    cfg: HybridAgentConfig,
+    args: argparse.Namespace,
+    collector: TimingCollector,
+    using_walltime: bool,
+    repeats: int,
+) -> tuple[native_mcts.SearchResult | None, SearchStats, float]:
+    stats = SearchStats("walltime" if using_walltime else "simulations", 0.0)
+    last_result: native_mcts.SearchResult | None = None
+    started_at = time.perf_counter()
+    command = _native_static_exe_command(exe, cfg, args, using_walltime=using_walltime)
+    payload = dict(case.payload)
+    payload["type"] = "action_request"
+    input_text = json.dumps(payload, separators=(",", ":")) + "\n"
+    for _ in range(max(1, int(repeats))):
+        completed, elapsed = _time_call(
+            collector,
+            "native_static_exe.process.total",
+            lambda: subprocess.run(
+                command,
+                input=input_text,
+                capture_output=True,
+                text=True,
+                cwd=PROJECT_ROOT,
+                timeout=max(30.0, float(args.wall_time_sec or 0.0) + 30.0),
+                check=False,
+            ),
+            device=torch.device("cpu"),
+            items=1,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "Native static executable profile run failed.\n"
+                f"command={command}\nstdout:\n{completed.stdout[-4000:]}\nstderr:\n{completed.stderr[-4000:]}"
+            )
+        output_lines = [line for line in completed.stdout.splitlines() if line.strip()]
+        if not output_lines:
+            raise RuntimeError("Native static executable produced no stdout response.")
+        response = json.loads(output_lines[-1])
+        last_result = _result_from_bot_response(case.payload, response)
+        profile = response.get("_profile") if isinstance(response, dict) else {}
+        if isinstance(profile, dict):
+            stats.simulations += int(profile.get("simulations", 0) or 0)
+            stats.selected_paths += int(profile.get("selected_paths", 0) or 0)
+            stats.expanded_nodes += int(profile.get("expanded_nodes", 0) or 0)
+            stats.depth_sum += int(profile.get("depth_sum", 0) or 0)
+            stats.max_depth = max(stats.max_depth, int(profile.get("max_depth", 0) or 0))
+            stats.turn_depth_sum += int(profile.get("turn_depth_sum", 0) or 0)
+            stats.max_turn_depth = max(stats.max_turn_depth, int(profile.get("max_turn_depth", 0) or 0))
+            collector.add("native_static_exe.search", float(profile.get("elapsed_sec", elapsed) or 0.0), items=int(profile.get("selected_paths", 0) or 0))
+    stats.elapsed_sec = time.perf_counter() - started_at
+    return last_result, stats, stats.elapsed_sec
+
+
 def _run_bot_profile_case(
     case: PayloadCase,
     *,
@@ -1912,14 +2025,29 @@ def _run_one_profile_case(
     evaluator_mode: str,
     model: HybridPolicyValueNet | None,
     bot: HybridRLBot | None,
+    native_static_exe: Path | None,
     collector: TimingCollector,
     cfg: HybridAgentConfig,
+    args: argparse.Namespace,
     device: torch.device,
     using_walltime: bool,
     wall_time_sec: float,
     repeats: int,
 ) -> tuple[native_mcts.SearchResult | None, SearchStats, float]:
     global _STATIC_TREE_DEPTH_SUM, _STATIC_TREE_MAX_DEPTH, _STATIC_TREE_SELECTED_PATHS, _STATIC_TREE_EXPANDED_NODE_IDS
+    if evaluator_mode == "static_exe":
+        if native_static_exe is None:
+            raise RuntimeError("static_exe evaluator mode requires a native static executable path.")
+        return _run_static_exe_profile_case(
+            case,
+            exe=native_static_exe,
+            cfg=cfg,
+            args=args,
+            collector=collector,
+            using_walltime=using_walltime,
+            repeats=repeats,
+        )
+
     if evaluator_mode in {"bot", "static"}:
         if bot is None:
             raise RuntimeError("Bot evaluator mode requires a HybridRLBot instance.")
@@ -1993,8 +2121,8 @@ def main() -> int:
 
     os.environ["TRIBES_STATIC_EVAL_VARIANT"] = str(args.static_eval_variant)
 
-    extension = load_native_mcts_extension()
-    if extension is None:
+    extension = None if args.evaluator == "static_exe" else load_native_mcts_extension()
+    if extension is None and args.evaluator != "static_exe":
         raise RuntimeError("Native MCTS extension is unavailable; build prerequisites may be missing.")
 
     cfg = HybridAgentConfig()
@@ -2014,6 +2142,7 @@ def main() -> int:
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     model: HybridPolicyValueNet | None = None
     bot: HybridRLBot | None = None
+    native_static_exe: Path | None = None
     bot_replay_tmp: tempfile.TemporaryDirectory[str] | None = None
     checkpoint_status = "random_init"
     if args.evaluator in {"nn", "bot"}:
@@ -2052,6 +2181,9 @@ def main() -> int:
             static_only_bootstrap=True,
         )
         checkpoint_status = "static_eval"
+    elif args.evaluator == "static_exe":
+        native_static_exe = _ensure_native_static_exe(args)
+        checkpoint_status = f"static_exe:{native_static_exe}"
     else:
         checkpoint_status = "unknown"
 
@@ -2064,7 +2196,7 @@ def main() -> int:
     original_evaluator = _install_timed_evaluator(collector, branching) if args.evaluator in {"nn", "bot"} else None
     original_static_evaluator = _install_timed_static_evaluator(collector, branching) if args.evaluator == "static" else None
     profile_device = bot.device if bot is not None else device
-    original_tree_cls = _install_timed_tree(extension, collector, profile_device)
+    original_tree_cls = _install_timed_tree(extension, collector, profile_device) if extension is not None else None
     profile = cProfile.Profile()
     per_position_rows: list[dict[str, Any]] = []
     last_result: native_mcts.SearchResult | None = None
@@ -2077,6 +2209,19 @@ def main() -> int:
             print(f"[warmup] {args.warmup} run(s) per payload; not included in benchmark timing", flush=True)
         for case in cases:
             for _ in range(max(0, int(args.warmup))):
+                if args.evaluator == "static_exe":
+                    if native_static_exe is None:
+                        raise RuntimeError("static_exe evaluator mode requires a native static executable path.")
+                    _run_static_exe_profile_case(
+                        case,
+                        exe=native_static_exe,
+                        cfg=cfg,
+                        args=args,
+                        collector=collector,
+                        using_walltime=using_walltime,
+                        repeats=1,
+                    )
+                    continue
                 if args.evaluator in {"bot", "static"}:
                     if bot is None:
                         raise RuntimeError("Bot evaluator mode requires a HybridRLBot instance.")
@@ -2098,10 +2243,12 @@ def main() -> int:
             native_mcts._evaluate_messages = original_evaluator
         if original_static_evaluator is not None:
             native_static_mcts._evaluate_static_messages = original_static_evaluator
-        extension.NativeMCTS = original_tree_cls
+        if extension is not None and original_tree_cls is not None:
+            extension.NativeMCTS = original_tree_cls
         original_evaluator = _install_timed_evaluator(collector, branching) if args.evaluator in {"nn", "bot"} else None
         original_static_evaluator = _install_timed_static_evaluator(collector, branching) if args.evaluator == "static" else None
-        _install_timed_tree(extension, collector, profile_device)
+        if extension is not None:
+            _install_timed_tree(extension, collector, profile_device)
         if args.nn_module_profile and model is not None:
             nn_profiler = NNModuleProfiler(collector, device)
             nn_profiler.install(model)
@@ -2129,8 +2276,10 @@ def main() -> int:
                 evaluator_mode=args.evaluator,
                 model=model,
                 bot=bot,
+                native_static_exe=native_static_exe,
                 collector=collector,
                 cfg=cfg,
+                args=args,
                 device=device,
                 using_walltime=using_walltime,
                 wall_time_sec=float(args.wall_time_sec),
@@ -2176,7 +2325,8 @@ def main() -> int:
             native_mcts._evaluate_messages = original_evaluator
         if original_static_evaluator is not None:
             native_static_mcts._evaluate_static_messages = original_static_evaluator
-        extension.NativeMCTS = original_tree_cls
+        if extension is not None and original_tree_cls is not None:
+            extension.NativeMCTS = original_tree_cls
         if bot_replay_tmp is not None:
             bot_replay_tmp.cleanup()
 

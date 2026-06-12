@@ -55,6 +55,7 @@ def test_policy_search_alignment_threads_static_eval_variant(monkeypatch, tmp_pa
         device="cpu",
         static_policy_weight=0.5,
         static_value_weight=0.5,
+        progressive_widening=False,
         output_dir=tmp_path / "out",
     )
 
@@ -63,6 +64,7 @@ def test_policy_search_alignment_threads_static_eval_variant(monkeypatch, tmp_pa
     assert os.environ["TRIBES_STATIC_EVAL_VARIANT"] == "experimental"
     assert captured_summary["static_eval_variant"] == "experimental"
     assert captured_summary["simulations"] == 20000
+    assert captured_summary["progressive_widening"] is False
     assert str(captured_summary["outputs"]["positions_csv"]).endswith(
         r"out\experimental\experimental_sims20000_all-actions_positions.csv"
     )

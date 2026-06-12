@@ -329,6 +329,7 @@ def _configure(args: argparse.Namespace) -> HybridAgentConfig:
     cfg.search.dirichlet_epsilon = float(args.dirichlet_epsilon)
     cfg.search.static_policy_weight = float(args.static_policy_weight)
     cfg.search.static_value_weight = float(args.static_value_weight)
+    cfg.search.use_progressive_widening = bool(args.progressive_widening)
     cfg.model.max_actions = int(args.max_actions)
     return cfg
 
@@ -404,6 +405,7 @@ def _run_alignment(args: argparse.Namespace) -> None:
         "positions": len(cases),
         "simulations": int(cfg.search.num_simulations),
         "top_k_actions": int(cfg.search.top_k_actions),
+        "progressive_widening": bool(cfg.search.use_progressive_widening),
         "dirichlet_epsilon": float(cfg.search.dirichlet_epsilon),
         "root_temperature": float(cfg.search.root_temperature),
         "elapsed_sec": elapsed_sec,
@@ -568,9 +570,10 @@ def main() -> int:
     parser.add_argument("--payload-dir", type=Path, default=DEFAULT_PAYLOAD_DIR)
     parser.add_argument("--no-payload-dir", action="store_true", help="Only use explicit --payload files.")
     parser.add_argument("--positions", type=int, default=None, help="Optional max number of payloads to analyze.")
-    parser.add_argument("--simulations", type=int, default=10000)
+    parser.add_argument("--simulations", type=int, default=20000)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--top-k-actions", type=int, default=0)
+    parser.add_argument("--progressive-widening", action="store_true", help="Enable native MCTS progressive widening during alignment search.")
     parser.add_argument("--max-actions", type=int, default=512)
     parser.add_argument("--static-eval-variant", choices=("baseline", "experimental", "all"), default="baseline")
     parser.add_argument("--variant-delay-sec", type=float, default=5.0, help="Delay between variants when using --static-eval-variant all.")
