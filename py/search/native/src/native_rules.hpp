@@ -22,6 +22,19 @@ struct NativeAction {
   std::string type;
   int unit_id = 0;
   int city_id = 0;
+  int tribe_id = 0;
+  int target_unit_id = 0;
+  int target_city_id = 0;
+  int target_player_id = -1;
+  int x = 0;
+  int y = 0;
+  bool has_xy = false;
+  std::string unit_type;
+  std::string building_type;
+  std::string resource_type;
+  std::string capture_type;
+  std::string bonus;
+  std::string tech;
   py::dict payload;
 };
 
@@ -142,12 +155,22 @@ struct NativeRoot {
   NativeGameState state;
 };
 
+struct NativeTransitionTiming {
+  double state_copy_ms = 0.0;
+  double observation_copy_ms = 0.0;
+  double action_mutation_ms = 0.0;
+  double reveal_sync_ms = 0.0;
+  double regenerate_actions_ms = 0.0;
+  double hidden_enemy_ms = 0.0;
+};
+
 NativeRoot parse_root_payload(const py::dict& payload, int max_actions);
 NativeGameState apply_action_strict(
     const NativeGameState& state,
     std::vector<NativeAction>& actions,
     int global_action_index,
     int max_actions);
+NativeTransitionTiming last_transition_timing();
 py::dict serialize_evaluation_payload(
     const NativeGameState& state,
     const std::vector<NativeAction>& actions);

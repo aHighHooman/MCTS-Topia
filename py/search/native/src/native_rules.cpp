@@ -1,6 +1,7 @@
 #include "native_rules.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <map>
 #include <set>
@@ -9,6 +10,13 @@
 namespace tribes::native {
 namespace {
 void sync_observation_ranking(NativeGameState& state);
+
+using TimingClock = std::chrono::steady_clock;
+thread_local NativeTransitionTiming g_last_transition_timing;
+
+double elapsed_ms(TimingClock::time_point started_at) {
+  return std::chrono::duration<double, std::milli>(TimingClock::now() - started_at).count();
+}
 
 int read_int(const py::handle& object, const char* key, int fallback) {
   if (!py::isinstance<py::dict>(object)) {
@@ -233,7 +241,84 @@ std::string canonical_action_type(const NativeAction& action) {
   return type;
 }
 
+int action_scalar_int(const NativeAction& action, const char* key, bool* found) {
+  const std::string name = key == nullptr ? "" : std::string(key);
+  if (name == "unit_id" || name == "u") {
+    if (action.unit_id != 0) {
+      *found = true;
+      return action.unit_id;
+    }
+  } else if (name == "city_id" || name == "c") {
+    if (action.city_id != 0) {
+      *found = true;
+      return action.city_id;
+    }
+  } else if (name == "tribe_id" || name == "p") {
+    if (action.tribe_id != 0) {
+      *found = true;
+      return action.tribe_id;
+    }
+  } else if (name == "target_unit_id" || name == "tu") {
+    if (action.target_unit_id != 0) {
+      *found = true;
+      return action.target_unit_id;
+    }
+  } else if (name == "target_city_id" || name == "tc") {
+    if (action.target_city_id != 0) {
+      *found = true;
+      return action.target_city_id;
+    }
+  } else if (name == "target_player_id" || name == "tp" || name == "target_id" || name == "targetID") {
+    if (action.target_player_id >= 0) {
+      *found = true;
+      return action.target_player_id;
+    }
+  } else if (name == "x") {
+    if (action.has_xy) {
+      *found = true;
+      return action.x;
+    }
+  } else if (name == "y") {
+    if (action.has_xy) {
+      *found = true;
+      return action.y;
+    }
+  }
+  *found = false;
+  return 0;
+}
+
+std::string action_scalar_string(const NativeAction& action, const char* key, bool* found) {
+  const std::string name = key == nullptr ? "" : std::string(key);
+  const std::string* value = nullptr;
+  if (name == "unit_type" || name == "ut") value = &action.unit_type;
+  else if (name == "building_type" || name == "bt") value = &action.building_type;
+  else if (name == "resource_type" || name == "rt") value = &action.resource_type;
+  else if (name == "capture_type" || name == "ct") value = &action.capture_type;
+  else if (name == "bonus" || name == "b") value = &action.bonus;
+  else if (name == "technology" || name == "tech") value = &action.tech;
+  if (value != nullptr && !value->empty()) {
+    *found = true;
+    return *value;
+  }
+  *found = false;
+  return "";
+}
+
 int action_int(const NativeAction& action, const char* primary, const char* fallback = nullptr, int default_value = 0) {
+#ifdef TRIBES_NATIVE_MCTS_STANDALONE
+  bool found = false;
+  int scalar = action_scalar_int(action, primary, &found);
+  if (found) {
+    return scalar;
+  }
+  if (fallback != nullptr) {
+    scalar = action_scalar_int(action, fallback, &found);
+    if (found) {
+      return scalar;
+    }
+  }
+#endif
   int value = read_int(action.payload, primary, default_value);
   if (value == default_value && fallback != nullptr) {
     value = read_int(action.payload, fallback, default_value);
@@ -242,6 +327,19 @@ int action_int(const NativeAction& action, const char* primary, const char* fall
 }
 
 std::string action_string(const NativeAction& action, const char* primary, const char* fallback = nullptr) {
+#ifdef TRIBES_NATIVE_MCTS_STANDALONE
+  bool found = false;
+  std::string scalar = action_scalar_string(action, primary, &found);
+  if (found) {
+    return scalar;
+  }
+  if (fallback != nullptr) {
+    scalar = action_scalar_string(action, fallback, &found);
+    if (found) {
+      return scalar;
+    }
+  }
+#endif
   return read_string_any(action.payload, primary, fallback);
 }
 
@@ -1959,6 +2057,45 @@ py::dict position_payload(int x, int y) {
   return pos;
 }
 
+void populate_action_scalars_from_payload(NativeAction& action) {
+  action.tribe_id = action_int(action, "tribe_id", "p", action.tribe_id);
+  action.unit_id = action_int(action, "unit_id", "u", action.unit_id);
+  action.city_id = action_int(action, "city_id", "c", action.city_id);
+  action.target_unit_id = action_int(action, "target_unit_id", "tu", action.target_unit_id);
+  action.target_city_id = action_int(action, "target_city_id", "tc", action.target_city_id);
+  action.target_player_id = action_int(action, "target_player_id", "tp", action.target_player_id);
+  if (action.target_player_id < 0) {
+    action.target_player_id = action_int(action, "target_id", "targetID", action.target_player_id);
+  }
+  int x = 0;
+  int y = 0;
+  const bool has_x = read_int(action.payload, "x", -999999) != -999999;
+  const bool has_y = read_int(action.payload, "y", -999999) != -999999;
+  if (has_x && has_y) {
+    action.x = read_int(action.payload, "x", 0);
+    action.y = read_int(action.payload, "y", 0);
+    action.has_xy = true;
+  } else if (action.payload.contains("destination") && !action.payload[py::str("destination")].is_none()) {
+    py::handle destination = action.payload[py::str("destination")];
+    if (read_int(destination, "x", -999999) != -999999 && read_int(destination, "y", -999999) != -999999) {
+      action.x = read_int(destination, "x", 0);
+      action.y = read_int(destination, "y", 0);
+      action.has_xy = true;
+    }
+  }
+  (void)x;
+  (void)y;
+  action.unit_type = action_string(action, "unit_type", "ut");
+  action.building_type = action_string(action, "building_type", "bt");
+  action.resource_type = action_string(action, "resource_type", "rt");
+  action.capture_type = action_string(action, "capture_type", "ct");
+  action.bonus = action_string(action, "bonus", "b");
+  action.tech = action_string(action, "technology", "tech");
+  if (action.tech.empty()) {
+    action.tech = action_string(action, "tech");
+  }
+}
+
 void append_generated_action(
     NativeGameState& state,
     std::vector<NativeAction>& actions,
@@ -1991,6 +2128,15 @@ void append_generated_action(
     action.payload["city_id"] = action.city_id;
     action.payload["c"] = action.city_id;
   }
+#ifdef TRIBES_NATIVE_MCTS_STANDALONE
+  populate_action_scalars_from_payload(action);
+  py::dict compact_payload;
+  compact_payload["i"] = index;
+  compact_payload["t"] = action.type;
+  compact_payload["type"] = action.type;
+  compact_payload["id"] = action.id.empty() ? ("A" + std::to_string(index)) : action.id;
+  action.payload = compact_payload;
+#endif
   actions.push_back(std::move(action));
   state.legal_action_indexes.push_back(index);
 }
@@ -5911,6 +6057,9 @@ NativeRoot parse_root_payload(const py::dict& payload, int max_actions) {
       }
     }
     action.payload = action_payload;
+#ifdef TRIBES_NATIVE_MCTS_STANDALONE
+    populate_action_scalars_from_payload(action);
+#endif
     root.state.legal_action_indexes.push_back(static_cast<int>(root.actions.size()));
     root.actions.push_back(action);
   }
@@ -5928,8 +6077,17 @@ NativeGameState apply_action_strict(
     std::vector<NativeAction>& actions,
     int global_action_index,
     int max_actions) {
+  g_last_transition_timing = NativeTransitionTiming{};
+  auto started_at = TimingClock::now();
   NativeGameState next = state;
+  g_last_transition_timing.state_copy_ms += elapsed_ms(started_at);
+  started_at = TimingClock::now();
+#ifdef TRIBES_NATIVE_MCTS_STANDALONE
+  next.observation = py::dict();
+#else
   next.observation = deepish_copy_observation(state.observation);
+#endif
+  g_last_transition_timing.observation_copy_ms += elapsed_ms(started_at);
   next.terminal_reason.clear();
   next.transition_kind.clear();
   next.terminal_value_known = false;
@@ -5943,15 +6101,21 @@ NativeGameState apply_action_strict(
   const NativeAction& applied = actions[global_action_index];
   const std::string type = canonical_action_type(applied);
   if (type == "END_TURN") {
+    started_at = TimingClock::now();
     apply_end_turn_transition(next);
     evaluate_capital_terminal(next);
+    g_last_transition_timing.action_mutation_ms += elapsed_ms(started_at);
     if (next.terminal) {
       return next;
     }
+    started_at = TimingClock::now();
     reveal_from_current_assets(next);
     sync_all_tiles_to_payload(next);
+    g_last_transition_timing.reveal_sync_ms += elapsed_ms(started_at);
     next.transition_kind = "END_TURN";
+    started_at = TimingClock::now();
     regenerate_actions(next, actions, max_actions);
+    g_last_transition_timing.regenerate_actions_ms += elapsed_ms(started_at);
     next.terminal = next.legal_action_indexes.empty();
     if (next.terminal) {
       next.terminal_reason = "no_regenerated_actions";
@@ -5960,6 +6124,7 @@ NativeGameState apply_action_strict(
   }
 
   bool applied_ok = false;
+  started_at = TimingClock::now();
   if (type == "MOVE" || type == "STEP_MOVE") {
     applied_ok = apply_move(next, applied);
   } else if (type == "ATTACK") {
@@ -6019,6 +6184,7 @@ NativeGameState apply_action_strict(
   } else if (type == "CANCEL_TREATY") {
     applied_ok = apply_cancel_treaty(next, applied);
   }
+  g_last_transition_timing.action_mutation_ms += elapsed_ms(started_at);
 
   if (!applied_ok) {
     if (type == "BUILD_EMBASSY") {
@@ -6030,6 +6196,7 @@ NativeGameState apply_action_strict(
   if (next.terminal) {
     return next;
   }
+  started_at = TimingClock::now();
   const int newly_explored = reveal_from_current_assets(next);
   if (type == "MOVE" || type == "STEP_MOVE" || type == "ATTACK" || type == "SPAWN" ||
       type == "UPGRADE_RAMMER" || type == "UPGRADE_SCOUT" || type == "UPGRADE_BOMBER") {
@@ -6044,20 +6211,33 @@ NativeGameState apply_action_strict(
       prune_invisible_enemy_units_payload(next);
     }
   }
+  g_last_transition_timing.reveal_sync_ms += elapsed_ms(started_at);
   if (type == "ATTACK") {
+    started_at = TimingClock::now();
     preserve_hidden_enemy_action_state(state, actions, next);
+    g_last_transition_timing.hidden_enemy_ms += elapsed_ms(started_at);
   }
+  started_at = TimingClock::now();
   sync_all_tiles_to_payload(next);
+  g_last_transition_timing.reveal_sync_ms += elapsed_ms(started_at);
   next.transition_kind = type;
+  started_at = TimingClock::now();
   regenerate_actions(next, actions, max_actions);
+  g_last_transition_timing.regenerate_actions_ms += elapsed_ms(started_at);
   if (type == "ATTACK") {
+    started_at = TimingClock::now();
     preserve_hidden_enemy_visible_actions(state, actions, next, actions, max_actions);
+    g_last_transition_timing.hidden_enemy_ms += elapsed_ms(started_at);
   }
   next.terminal = next.legal_action_indexes.empty();
   if (next.terminal) {
     next.terminal_reason = "no_regenerated_actions";
   }
   return next;
+}
+
+NativeTransitionTiming last_transition_timing() {
+  return g_last_transition_timing;
 }
 
 py::dict serialize_evaluation_payload(

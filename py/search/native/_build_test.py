@@ -8,15 +8,16 @@ if str(PY) not in sys.path:
 from torch.utils.cpp_extension import load
 from pathlib import Path
 
-source = Path(__file__).with_name("native_mcts.cpp")
-rules = Path(__file__).with_name("native_rules.cpp")
-static_eval = Path(__file__).with_name("native_static_eval.cpp")
+source = Path(__file__).with_name("src") / "native_mcts.cpp"
+rules = source.with_name("native_rules.cpp")
+static_eval = source.with_name("native_static_eval.cpp")
 try:
     load(
         name="tribes_rl_native_mcts",
         sources=[str(source), str(rules), str(static_eval)],
         extra_cflags=["/O2", "/std:c++17"],
-        build_directory=str(source.parent / ".build"),
+        extra_include_paths=[str(source.parent), str(Path(__file__).parent)],
+        build_directory=str(Path(__file__).with_name(".build")),
         verbose=True,
     )
     print("loaded")

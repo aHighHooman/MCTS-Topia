@@ -30,9 +30,11 @@ using tribes::native::NativeGameState;
 using tribes::native::NativeRoot;
 using tribes::native::NativeTile;
 using tribes::native::NativeUnit;
+using tribes::native::NativeTransitionTiming;
 using tribes::native::StaticEvaluation;
 using tribes::native::apply_action_strict;
 using tribes::native::evaluate_static_state;
+using tribes::native::last_transition_timing;
 using tribes::native::parse_root_payload;
 using tribes::native::serialize_evaluation_payload;
 using tribes::native::value_to_root_perspective;
@@ -849,6 +851,7 @@ class NativeMCTS {
       NativeGameState child_state = apply_action(
           states_[nodes_[parent_node_id].state_index],
           states_[nodes_[parent_node_id].state_index].legal_action_indexes[parent_action_index]);
+      add_transition_timing(last_transition_timing());
       add_static_timing_ms(last_static_apply_ms_, apply_started_at);
       leaf_terminal = child_state.terminal;
       leaf_active_player_id = child_state.active_player_id;
@@ -899,6 +902,12 @@ class NativeMCTS {
     out["static_eval_ms"] = last_static_eval_ms_;
     out["node_allocation_ms"] = last_static_allocation_ms_;
     out["backup_ms"] = last_static_backup_ms_;
+    out["transition_state_copy_ms"] = last_transition_state_copy_ms_;
+    out["transition_observation_copy_ms"] = last_transition_observation_copy_ms_;
+    out["transition_action_mutation_ms"] = last_transition_action_mutation_ms_;
+    out["transition_reveal_sync_ms"] = last_transition_reveal_sync_ms_;
+    out["transition_regenerate_actions_ms"] = last_transition_regenerate_actions_ms_;
+    out["transition_hidden_enemy_ms"] = last_transition_hidden_enemy_ms_;
     return out;
   }
 
@@ -1372,6 +1381,12 @@ class NativeMCTS {
   double last_static_eval_ms_ = 0.0;
   double last_static_allocation_ms_ = 0.0;
   double last_static_backup_ms_ = 0.0;
+  double last_transition_state_copy_ms_ = 0.0;
+  double last_transition_observation_copy_ms_ = 0.0;
+  double last_transition_action_mutation_ms_ = 0.0;
+  double last_transition_reveal_sync_ms_ = 0.0;
+  double last_transition_regenerate_actions_ms_ = 0.0;
+  double last_transition_hidden_enemy_ms_ = 0.0;
   mutable std::mt19937_64 rng_;
 
   static int64_t pending_child_key(int parent_node_id, int parent_action_index) {
@@ -1611,6 +1626,24 @@ class NativeMCTS {
     last_static_eval_ms_ = 0.0;
     last_static_allocation_ms_ = 0.0;
     last_static_backup_ms_ = 0.0;
+    last_transition_state_copy_ms_ = 0.0;
+    last_transition_observation_copy_ms_ = 0.0;
+    last_transition_action_mutation_ms_ = 0.0;
+    last_transition_reveal_sync_ms_ = 0.0;
+    last_transition_regenerate_actions_ms_ = 0.0;
+    last_transition_hidden_enemy_ms_ = 0.0;
+  }
+
+  void add_transition_timing(const NativeTransitionTiming& timing) {
+    if (!static_timing_enabled_) {
+      return;
+    }
+    last_transition_state_copy_ms_ += timing.state_copy_ms;
+    last_transition_observation_copy_ms_ += timing.observation_copy_ms;
+    last_transition_action_mutation_ms_ += timing.action_mutation_ms;
+    last_transition_reveal_sync_ms_ += timing.reveal_sync_ms;
+    last_transition_regenerate_actions_ms_ += timing.regenerate_actions_ms;
+    last_transition_hidden_enemy_ms_ += timing.hidden_enemy_ms;
   }
 
   static size_t progressive_action_count(const Node& node) {

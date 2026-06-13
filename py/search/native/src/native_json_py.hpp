@@ -1,6 +1,6 @@
 #pragma once
 
-#include "third_party/nlohmann/json.hpp"
+#include "../third_party/nlohmann/json.hpp"
 
 #include <cstddef>
 #include <initializer_list>
@@ -28,7 +28,9 @@ class object {
   object(const std::string& value) : owner_(std::make_shared<json>(value)), value_(owner_.get()) {}
   object(bool value) : owner_(std::make_shared<json>(value)), value_(owner_.get()) {}
   object(int value) : owner_(std::make_shared<json>(value)), value_(owner_.get()) {}
+  object(long value) : owner_(std::make_shared<json>(value)), value_(owner_.get()) {}
   object(long long value) : owner_(std::make_shared<json>(value)), value_(owner_.get()) {}
+  object(unsigned long value) : owner_(std::make_shared<json>(value)), value_(owner_.get()) {}
   object(unsigned long long value) : owner_(std::make_shared<json>(value)), value_(owner_.get()) {}
   object(double value) : owner_(std::make_shared<json>(value)), value_(owner_.get()) {}
   template <typename T>
@@ -61,6 +63,22 @@ class object {
     return *this;
   }
   object& operator=(int value) {
+    data() = value;
+    return *this;
+  }
+  object& operator=(long value) {
+    data() = value;
+    return *this;
+  }
+  object& operator=(long long value) {
+    data() = value;
+    return *this;
+  }
+  object& operator=(unsigned long value) {
+    data() = value;
+    return *this;
+  }
+  object& operator=(unsigned long long value) {
     data() = value;
     return *this;
   }

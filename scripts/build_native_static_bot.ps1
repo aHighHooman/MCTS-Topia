@@ -6,10 +6,11 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repo = Resolve-Path (Join-Path $PSScriptRoot "..")
-$source = Join-Path $repo "py\search\native\native_static_mcts_bot.cpp"
-$rulesSource = Join-Path $repo "py\search\native\native_rules.cpp"
-$staticEvalSource = Join-Path $repo "py\search\native\native_static_eval.cpp"
-$include = Join-Path $repo "py\search\native"
+$nativeRoot = Join-Path $repo "py\search\native"
+$nativeSrc = Join-Path $nativeRoot "src"
+$source = Join-Path $nativeRoot "bot\native_static_mcts_bot.cpp"
+$rulesSource = Join-Path $nativeSrc "native_rules.cpp"
+$staticEvalSource = Join-Path $nativeSrc "native_static_eval.cpp"
 $outDirPath = Join-Path $repo $OutputDir
 New-Item -ItemType Directory -Force -Path $outDirPath | Out-Null
 
@@ -50,7 +51,8 @@ $rulesObj = Join-Path $outDirPath "native_rules.obj"
 $staticEvalObj = Join-Path $outDirPath "native_static_eval.obj"
 
 $includeFlags = @(
-    "/I$include"
+    "/I$nativeRoot",
+    "/I$nativeSrc"
 )
 
 $commonCompileFlags = @(

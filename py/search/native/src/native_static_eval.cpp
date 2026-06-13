@@ -62,16 +62,100 @@ std::string action_type(const NativeAction& action) {
   return action.type.empty() ? read_string(action.payload, "t") : action.type;
 }
 
+std::string action_scalar_string(const NativeAction& action, const char* key, bool* found) {
+  const std::string name = key == nullptr ? "" : std::string(key);
+  const std::string* value = nullptr;
+  if (name == "unit_type" || name == "ut") value = &action.unit_type;
+  else if (name == "building_type" || name == "bt") value = &action.building_type;
+  else if (name == "resource_type" || name == "rt") value = &action.resource_type;
+  else if (name == "capture_type" || name == "ct") value = &action.capture_type;
+  else if (name == "bonus" || name == "b") value = &action.bonus;
+  else if (name == "technology" || name == "tech") value = &action.tech;
+  if (value != nullptr && !value->empty()) {
+    *found = true;
+    return *value;
+  }
+  *found = false;
+  return "";
+}
+
 std::string action_string(const NativeAction& action, const char* primary, const char* fallback = nullptr) {
-  std::string value = read_string(action.payload, primary);
+#ifdef TRIBES_NATIVE_MCTS_STANDALONE
+  bool found = false;
+  std::string value = action_scalar_string(action, primary, &found);
+  if (found) {
+    return value;
+  }
+  if (fallback != nullptr) {
+    value = action_scalar_string(action, fallback, &found);
+    if (found) {
+      return value;
+    }
+  }
+#else
+  std::string value;
+#endif
+  value = read_string(action.payload, primary);
   if (value.empty() && fallback != nullptr) {
     value = read_string(action.payload, fallback);
   }
   return value;
 }
 
+int action_scalar_int(const NativeAction& action, const char* key, bool* found) {
+  const std::string name = key == nullptr ? "" : std::string(key);
+  if ((name == "unit_id" || name == "u") && action.unit_id != 0) {
+    *found = true;
+    return action.unit_id;
+  }
+  if ((name == "city_id" || name == "c") && action.city_id != 0) {
+    *found = true;
+    return action.city_id;
+  }
+  if ((name == "tribe_id" || name == "p") && action.tribe_id != 0) {
+    *found = true;
+    return action.tribe_id;
+  }
+  if ((name == "target_unit_id" || name == "tu") && action.target_unit_id != 0) {
+    *found = true;
+    return action.target_unit_id;
+  }
+  if ((name == "target_city_id" || name == "tc") && action.target_city_id != 0) {
+    *found = true;
+    return action.target_city_id;
+  }
+  if ((name == "target_player_id" || name == "tp" || name == "target_id" || name == "targetID") && action.target_player_id >= 0) {
+    *found = true;
+    return action.target_player_id;
+  }
+  if (name == "x" && action.has_xy) {
+    *found = true;
+    return action.x;
+  }
+  if (name == "y" && action.has_xy) {
+    *found = true;
+    return action.y;
+  }
+  *found = false;
+  return 0;
+}
+
 int action_int(const NativeAction& action, const char* primary, const char* fallback = nullptr) {
+#ifdef TRIBES_NATIVE_MCTS_STANDALONE
+  bool found = false;
+  int value = action_scalar_int(action, primary, &found);
+  if (found) {
+    return value;
+  }
+  if (fallback != nullptr) {
+    value = action_scalar_int(action, fallback, &found);
+    if (found) {
+      return value;
+    }
+  }
+#else
   int value = 0;
+#endif
   if (read_int_key(action.payload, primary, &value)) {
     return value;
   }
@@ -82,7 +166,17 @@ int action_int(const NativeAction& action, const char* primary, const char* fall
 }
 
 bool action_destination(const NativeAction& action, int* x, int* y) {
-  if (x == nullptr || y == nullptr || !py::isinstance<py::dict>(action.payload)) {
+  if (x == nullptr || y == nullptr) {
+    return false;
+  }
+#ifdef TRIBES_NATIVE_MCTS_STANDALONE
+  if (action.has_xy) {
+    *x = action.x;
+    *y = action.y;
+    return true;
+  }
+#endif
+  if (!py::isinstance<py::dict>(action.payload)) {
     return false;
   }
   py::dict payload = py::reinterpret_borrow<py::dict>(action.payload);

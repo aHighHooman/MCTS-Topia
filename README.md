@@ -102,12 +102,14 @@ These tests cover Python bots, self-play config, observation/belief helpers, MCT
 
 ## Native MCTS
 
-Native sources live in `py/search/native/`. The extension is built through PyTorch C++ extension tooling when `load_native_mcts_extension()` is first used; build caches are intentionally ignored under `py/search/native/.build*/`.
+Native Python wrappers live in `py/search/native/`. Shared C++ sources live in `py/search/native/src/`, and the standalone protocol executable entrypoint lives in `py/search/native/bot/`. The extension is built through PyTorch C++ extension tooling when `load_native_mcts_extension()` is first used; build caches are intentionally ignored under `py/search/native/.build*/`.
 
 Useful native files:
 
-- `py/search/native/native_rules.cpp`: native transition/rules implementation
-- `py/search/native/native_mcts.cpp`: native MCTS binding/search code
+- `py/search/native/src/native_rules.cpp`: native transition/rules implementation
+- `py/search/native/src/native_static_eval.cpp`: native static evaluator and action priors
+- `py/search/native/src/native_mcts.cpp`: native MCTS binding/search code
+- `py/search/native/bot/native_static_mcts_bot.cpp`: standalone full static-eval MCTS protocol bot executable
 - `py/search/native/static_mcts.py`: Python static MCTS wrapper
 - `py/search/native/hybrid_mcts.py`: hybrid NN-guided search wrapper
 - `py/search/native/parity_runner.py`: Java-vs-native parity checker
