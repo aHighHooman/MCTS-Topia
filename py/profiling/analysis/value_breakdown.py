@@ -15,18 +15,33 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT = PROJECT_ROOT / "debug-logs" / "analysis" / "value-breakdown"
 
 
+def _repo_relative(path: Path) -> Path:
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
 def run(args: argparse.Namespace) -> Path:
     run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
-    output_dir = Path(args.output_dir) / run_id
+    output_dir = _repo_relative(Path(args.output_dir)) / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
     target = parse_target(args.target)
     payload_store = PROJECT_ROOT / "debug-logs" / "analysis" / "payloads"
     positions = []
     term_rows = []
-    for path in sorted(Path(args.payload_dir).glob("*.json"))[: args.positions]:
+    payload_dir = _repo_relative(Path(args.payload_dir))
+    payload_paths = sorted(payload_dir.glob("*.json"))
+    if not payload_paths:
+        raise RuntimeError(
+            f"no payload JSON files found under {payload_dir}; "
+            "run from the repo root or pass an absolute --payload-dir"
+        )
+    skipped_payloads = 0
+    for path in payload_paths:
         payload = load_payload(path)
         if payload is None:
+            skipped_payloads += 1
             continue
+        if args.positions is not None and len(positions) >= int(args.positions):
+            break
         digest = store_payload(payload, payload_store)
         position = analyze_position(
             payload,
@@ -45,6 +60,11 @@ def run(args: argparse.Namespace) -> Path:
         positions.append(row)
         for term in (row.get("value_breakdown") or {}).get("terms", []):
             term_rows.append({"payload_hash": digest, "label": path.stem, **term})
+    if not positions:
+        raise RuntimeError(
+            f"no valid payload positions loaded from {payload_dir}; "
+            f"checked={len(payload_paths)} skipped={skipped_payloads}"
+        )
     (output_dir / "positions.jsonl").write_text(
         "".join(json.dumps(row, sort_keys=True, default=str) + "\n" for row in positions),
         encoding="utf-8",
