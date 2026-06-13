@@ -343,8 +343,53 @@ std::string action_string(const NativeAction& action, const char* primary, const
   return read_string_any(action.payload, primary, fallback);
 }
 
+void rebuild_state_indexes(NativeGameState& state) {
+  const int board_cells = state.board_size > 0 ? state.board_size * state.board_size : 0;
+  state.tile_coord_index.assign(static_cast<size_t>(board_cells), -1);
+  for (int index = 0; index < static_cast<int>(state.tiles.size()); ++index) {
+    const NativeTile& tile = state.tiles[static_cast<size_t>(index)];
+    if (tile.x >= 0 && tile.y >= 0 && tile.x < state.board_size && tile.y < state.board_size) {
+      state.tile_coord_index[static_cast<size_t>(tile.y * state.board_size + tile.x)] = index;
+    }
+  }
+
+  int max_unit_id = 0;
+  for (const NativeUnit& unit : state.units) {
+    max_unit_id = std::max(max_unit_id, unit.id);
+  }
+  state.unit_id_index.assign(static_cast<size_t>(max_unit_id + 1), -1);
+  for (int index = 0; index < static_cast<int>(state.units.size()); ++index) {
+    const NativeUnit& unit = state.units[static_cast<size_t>(index)];
+    if (unit.id >= 0) {
+      state.unit_id_index[static_cast<size_t>(unit.id)] = index;
+    }
+  }
+
+  int max_city_id = 0;
+  for (const NativeCity& city : state.cities) {
+    max_city_id = std::max(max_city_id, city.id);
+  }
+  state.city_id_index.assign(static_cast<size_t>(max_city_id + 1), -1);
+  for (int index = 0; index < static_cast<int>(state.cities.size()); ++index) {
+    const NativeCity& city = state.cities[static_cast<size_t>(index)];
+    if (city.id >= 0) {
+      state.city_id_index[static_cast<size_t>(city.id)] = index;
+    }
+  }
+}
+
 NativeTile* tile_at(NativeGameState& state, int x, int y) {
   if (x >= 0 && y >= 0 && x < state.board_size && y < state.board_size) {
+    const int coord_index = y * state.board_size + x;
+    if (coord_index >= 0 && coord_index < static_cast<int>(state.tile_coord_index.size())) {
+      const int tile_index = state.tile_coord_index[static_cast<size_t>(coord_index)];
+      if (tile_index >= 0 && tile_index < static_cast<int>(state.tiles.size())) {
+        NativeTile& tile = state.tiles[static_cast<size_t>(tile_index)];
+        if (tile.x == x && tile.y == y) {
+          return &tile;
+        }
+      }
+    }
     int index = y * state.board_size + x;
     if (index >= 0 && index < static_cast<int>(state.tiles.size())) {
       NativeTile& tile = state.tiles[index];
@@ -369,6 +414,15 @@ NativeTile* tile_at(NativeGameState& state, int x, int y) {
 }
 
 NativeUnit* unit_by_id(NativeGameState& state, int id) {
+  if (id >= 0 && id < static_cast<int>(state.unit_id_index.size())) {
+    const int index = state.unit_id_index[static_cast<size_t>(id)];
+    if (index >= 0 && index < static_cast<int>(state.units.size())) {
+      NativeUnit& unit = state.units[static_cast<size_t>(index)];
+      if (unit.id == id) {
+        return &unit;
+      }
+    }
+  }
   for (NativeUnit& unit : state.units) {
     if (unit.id == id) {
       return &unit;
@@ -378,6 +432,15 @@ NativeUnit* unit_by_id(NativeGameState& state, int id) {
 }
 
 const NativeUnit* unit_by_id_const(const NativeGameState& state, int id) {
+  if (id >= 0 && id < static_cast<int>(state.unit_id_index.size())) {
+    const int index = state.unit_id_index[static_cast<size_t>(id)];
+    if (index >= 0 && index < static_cast<int>(state.units.size())) {
+      const NativeUnit& unit = state.units[static_cast<size_t>(index)];
+      if (unit.id == id) {
+        return &unit;
+      }
+    }
+  }
   for (const NativeUnit& unit : state.units) {
     if (unit.id == id) {
       return &unit;
@@ -387,6 +450,15 @@ const NativeUnit* unit_by_id_const(const NativeGameState& state, int id) {
 }
 
 NativeCity* city_by_id(NativeGameState& state, int id) {
+  if (id >= 0 && id < static_cast<int>(state.city_id_index.size())) {
+    const int index = state.city_id_index[static_cast<size_t>(id)];
+    if (index >= 0 && index < static_cast<int>(state.cities.size())) {
+      NativeCity& city = state.cities[static_cast<size_t>(index)];
+      if (city.id == id) {
+        return &city;
+      }
+    }
+  }
   for (NativeCity& city : state.cities) {
     if (city.id == id) {
       return &city;
@@ -2096,6 +2168,103 @@ void populate_action_scalars_from_payload(NativeAction& action) {
   }
 }
 
+void set_generated_actor(NativeAction& action, int tribe_id) {
+  action.tribe_id = tribe_id;
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
+  action.payload["tribe_id"] = tribe_id;
+  action.payload["p"] = tribe_id;
+#endif
+}
+
+void set_generated_xy(NativeAction& action, int x, int y) {
+  action.x = x;
+  action.y = y;
+  action.has_xy = true;
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
+  action.payload["x"] = x;
+  action.payload["y"] = y;
+#endif
+}
+
+void set_generated_target_unit(NativeAction& action, int target_unit_id) {
+  action.target_unit_id = target_unit_id;
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
+  action.payload["target_unit_id"] = target_unit_id;
+  action.payload["tu"] = target_unit_id;
+#endif
+}
+
+void set_generated_target_city(NativeAction& action, int target_city_id) {
+  action.target_city_id = target_city_id;
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
+  action.payload["target_city_id"] = target_city_id;
+  action.payload["tc"] = target_city_id;
+#endif
+}
+
+void set_generated_target_player(NativeAction& action, int target_player_id) {
+  action.target_player_id = target_player_id;
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
+  action.payload["target_player_id"] = target_player_id;
+  action.payload["tp"] = target_player_id;
+#endif
+}
+
+void set_generated_unit_type(NativeAction& action, const std::string& unit_type) {
+  action.unit_type = unit_type;
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
+  action.payload["unit_type"] = unit_type;
+  action.payload["ut"] = unit_type;
+#endif
+}
+
+void set_generated_building_type(NativeAction& action, const std::string& building_type) {
+  action.building_type = building_type;
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
+  action.payload["building_type"] = building_type;
+  action.payload["bt"] = building_type;
+#endif
+}
+
+void set_generated_resource_type(NativeAction& action, const std::string& resource_type) {
+  action.resource_type = resource_type;
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
+  action.payload["resource_type"] = resource_type;
+  action.payload["rt"] = resource_type;
+#endif
+}
+
+void set_generated_capture_type(NativeAction& action, const std::string& capture_type) {
+  action.capture_type = capture_type;
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
+  action.payload["capture_type"] = capture_type;
+  action.payload["ct"] = capture_type;
+#endif
+}
+
+void set_generated_bonus(NativeAction& action, const std::string& bonus) {
+  action.bonus = bonus;
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
+  action.payload["bonus"] = bonus;
+  action.payload["b"] = bonus;
+#endif
+}
+
+void set_generated_tech(NativeAction& action, const std::string& tech) {
+  action.tech = tech;
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
+  action.payload["tech"] = tech;
+#endif
+}
+
+void init_generated_payload(NativeAction& action) {
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
+  action.payload = py::dict();
+#else
+  (void)action;
+#endif
+}
+
 void append_generated_action(
     NativeGameState& state,
     std::vector<NativeAction>& actions,
@@ -2104,6 +2273,12 @@ void append_generated_action(
   if (max_actions >= 0 && static_cast<int>(state.legal_action_indexes.size()) >= max_actions) {
     return;
   }
+  const int index = static_cast<int>(actions.size());
+#ifdef TRIBES_NATIVE_MCTS_STANDALONE
+  if (action.id.empty()) {
+    action.id = "A" + std::to_string(index);
+  }
+#else
   static const std::set<std::string> tribe_payload_actions = {
       "RESEARCH_TECH", "BUILD_ROAD", "BUILD_EMBASSY", "PROPOSE_PEACE", "ACCEPT_PEACE",
       "PROPOSE_TREATY", "ACCEPT_TREATY", "CANCEL_TREATY", "SEND_STARS", "END_TURN"};
@@ -2115,7 +2290,6 @@ void append_generated_action(
       action.payload.attr("pop")("tribe_id");
     }
   }
-  const int index = static_cast<int>(actions.size());
   action.payload["i"] = index;
   action.payload["t"] = action.type;
   action.payload["type"] = action.type;
@@ -2128,14 +2302,6 @@ void append_generated_action(
     action.payload["city_id"] = action.city_id;
     action.payload["c"] = action.city_id;
   }
-#ifdef TRIBES_NATIVE_MCTS_STANDALONE
-  populate_action_scalars_from_payload(action);
-  py::dict compact_payload;
-  compact_payload["i"] = index;
-  compact_payload["t"] = action.type;
-  compact_payload["type"] = action.type;
-  compact_payload["id"] = action.id.empty() ? ("A" + std::to_string(index)) : action.id;
-  action.payload = compact_payload;
 #endif
   actions.push_back(std::move(action));
   state.legal_action_indexes.push_back(index);
@@ -2158,12 +2324,12 @@ void append_tile_action(
   action.type = type;
   action.unit_id = unit_id;
   action.city_id = city_id;
-  action.payload = py::dict();
-  action.payload["tribe_id"] = tribe_id;
-  action.payload["p"] = tribe_id;
-  action.payload["x"] = x;
-  action.payload["y"] = y;
+  init_generated_payload(action);
+  set_generated_actor(action, tribe_id);
+  set_generated_xy(action, x, y);
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
   action.payload[position_key] = position_payload(x, y);
+#endif
   append_generated_action(state, actions, max_actions, std::move(action));
 }
 
@@ -2243,15 +2409,20 @@ std::vector<std::pair<int, int>> reachable_move_targets(const NativeGameState& s
     return targets;
   }
   const double max_cost = static_cast<double>(std::max(1, unit.movement));
-  std::map<std::pair<int, int>, double> best;
+  const int board_size = state.board_size;
+  const int board_cells = board_size * board_size;
+  std::vector<double> best(static_cast<size_t>(board_cells), std::numeric_limits<double>::infinity());
   std::vector<std::pair<int, int>> frontier;
   const std::pair<int, int> start{unit.x, unit.y};
-  best[start] = 0.0;
+  const auto board_index = [board_size](int x, int y) {
+    return y * board_size + x;
+  };
+  best[static_cast<size_t>(board_index(unit.x, unit.y))] = 0.0;
   frontier.push_back(start);
 
   for (size_t cursor = 0; cursor < frontier.size(); ++cursor) {
     const auto [from_x, from_y] = frontier[cursor];
-    const double cost_from = best[{from_x, from_y}];
+    const double cost_from = best[static_cast<size_t>(board_index(from_x, from_y))];
     if (cost_from >= max_cost) {
       continue;
     }
@@ -2302,20 +2473,25 @@ std::vector<std::pair<int, int>> reachable_move_targets(const NativeGameState& s
         if (std::floor(next_cost) > max_cost) {
           continue;
         }
-        const std::pair<int, int> pos{x, y};
-        auto best_it = best.find(pos);
-        if (best_it == best.end() || next_cost + 1e-9 < best_it->second) {
-          best[pos] = next_cost;
-          frontier.push_back(pos);
+        const int next_index = board_index(x, y);
+        if (next_cost + 1e-9 < best[static_cast<size_t>(next_index)]) {
+          best[static_cast<size_t>(next_index)] = next_cost;
+          frontier.emplace_back(x, y);
         }
       }
     }
   }
 
-  for (const auto& entry : best) {
-    NativeTile* tile = tile_at(const_cast<NativeGameState&>(state), entry.first.first, entry.first.second);
-    if (entry.first != start && tile != nullptr && tile->unit_id <= 0) {
-      targets.push_back(entry.first);
+  for (int x = 0; x < board_size; ++x) {
+    for (int y = 0; y < board_size; ++y) {
+      if ((x == start.first && y == start.second) ||
+          !std::isfinite(best[static_cast<size_t>(board_index(x, y))])) {
+        continue;
+      }
+      NativeTile* tile = tile_at(const_cast<NativeGameState&>(state), x, y);
+      if (tile != nullptr && tile->unit_id <= 0) {
+        targets.emplace_back(x, y);
+      }
     }
   }
   return targets;
@@ -3020,11 +3196,9 @@ void append_hidden_enemy_capital_spawn_action(NativeGameState& state, std::vecto
   NativeAction spawn;
   spawn.type = "SPAWN";
   spawn.city_id = active_tribe->capital_id;
-  spawn.payload = py::dict();
-  spawn.payload["x"] = x;
-  spawn.payload["y"] = y;
-  spawn.payload["ut"] = "WARRIOR";
-  spawn.payload["unit_type"] = "WARRIOR";
+  init_generated_payload(spawn);
+  set_generated_xy(spawn, x, y);
+  set_generated_unit_type(spawn, "WARRIOR");
   append_generated_action(state, actions, max_actions, std::move(spawn));
 }
 
@@ -3248,28 +3422,28 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
       NativeAction upgrade;
       upgrade.type = "UPGRADE_RAMMER";
       upgrade.unit_id = unit.id;
-      upgrade.payload = py::dict();
+      init_generated_payload(upgrade);
       append_generated_action(state, actions, max_actions, std::move(upgrade));
     }
     if (has_tech(*tribe, "SAILING") && tribe->stars >= unit_cost("SCOUT")) {
       NativeAction upgrade;
       upgrade.type = "UPGRADE_SCOUT";
       upgrade.unit_id = unit.id;
-      upgrade.payload = py::dict();
+      init_generated_payload(upgrade);
       append_generated_action(state, actions, max_actions, std::move(upgrade));
     }
     if (has_tech(*tribe, "NAVIGATION") && tribe->stars >= unit_cost("BOMBER")) {
       NativeAction upgrade;
       upgrade.type = "UPGRADE_BOMBER";
       upgrade.unit_id = unit.id;
-      upgrade.payload = py::dict();
+      init_generated_payload(upgrade);
       append_generated_action(state, actions, max_actions, std::move(upgrade));
     }
   } else if (unit.type == "SCOUT" && has_tech(*tribe, "NAVIGATION") && tribe->stars >= unit_cost("BOMBER")) {
     NativeAction upgrade;
     upgrade.type = "UPGRADE_BOMBER";
     upgrade.unit_id = unit.id;
-    upgrade.payload = py::dict();
+    init_generated_payload(upgrade);
     append_generated_action(state, actions, max_actions, std::move(upgrade));
   }
   if (unit.status == "FINISHED") {
@@ -3284,9 +3458,8 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
         ":u" + std::to_string(unit.id) + ":examine";
     examine.type = "EXAMINE";
     examine.unit_id = unit.id;
-    examine.payload = py::dict();
-    examine.payload["tribe_id"] = state.active_player_id;
-    examine.payload["p"] = state.active_player_id;
+    init_generated_payload(examine);
+    set_generated_actor(examine, state.active_player_id);
     append_generated_action(state, actions, max_actions, std::move(examine));
   }
 
@@ -3311,11 +3484,9 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
       infiltrate.type = "INFILTRATE";
       infiltrate.unit_id = unit.id;
       infiltrate.city_id = city.id;
-      infiltrate.payload = py::dict();
-      infiltrate.payload["tribe_id"] = state.active_player_id;
-      infiltrate.payload["p"] = state.active_player_id;
-      infiltrate.payload["target_city_id"] = city.id;
-      infiltrate.payload["tc"] = city.id;
+      init_generated_payload(infiltrate);
+      set_generated_actor(infiltrate, state.active_player_id);
+      set_generated_target_city(infiltrate, city.id);
       append_generated_action(state, actions, max_actions, std::move(infiltrate));
     }
   }
@@ -3341,11 +3512,9 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
             ":u" + std::to_string(unit.id) + ":attack:u" + std::to_string(target->id);
         attack.type = "ATTACK";
         attack.unit_id = unit.id;
-        attack.payload = py::dict();
-        attack.payload["tribe_id"] = state.active_player_id;
-        attack.payload["p"] = state.active_player_id;
-        attack.payload["target_unit_id"] = target->id;
-        attack.payload["tu"] = target->id;
+        init_generated_payload(attack);
+        set_generated_actor(attack, state.active_player_id);
+        set_generated_target_unit(attack, target->id);
         append_generated_action(state, actions, max_actions, std::move(attack));
       }
     }
@@ -3362,13 +3531,10 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
       capture.type = "CAPTURE";
       capture.unit_id = unit.id;
       capture.city_id = village_capture || city == nullptr ? 0 : city->id;
-      capture.payload = py::dict();
-      capture.payload["tribe_id"] = state.active_player_id;
-      capture.payload["p"] = state.active_player_id;
-      capture.payload["target_city_id"] = village_capture || city == nullptr ? -1 : city->id;
-      capture.payload["tc"] = village_capture || city == nullptr ? -1 : city->id;
-      capture.payload["capture_type"] = current_tile->terrain;
-      capture.payload["ct"] = current_tile->terrain;
+      init_generated_payload(capture);
+      set_generated_actor(capture, state.active_player_id);
+      set_generated_target_city(capture, village_capture || city == nullptr ? -1 : city->id);
+      set_generated_capture_type(capture, current_tile->terrain);
       append_generated_action(state, actions, max_actions, std::move(capture));
     }
   }
@@ -3394,11 +3560,9 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
             ":u" + std::to_string(unit.id) + ":convert:u" + std::to_string(target->id);
         convert.type = "CONVERT";
         convert.unit_id = unit.id;
-        convert.payload = py::dict();
-        convert.payload["tribe_id"] = state.active_player_id;
-        convert.payload["p"] = state.active_player_id;
-        convert.payload["target_unit_id"] = target->id;
-        convert.payload["tu"] = target->id;
+        init_generated_payload(convert);
+        set_generated_actor(convert, state.active_player_id);
+        set_generated_target_unit(convert, target->id);
         append_generated_action(state, actions, max_actions, std::move(convert));
       }
     }
@@ -3410,9 +3574,8 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
         ":u" + std::to_string(unit.id) + ":heal_others";
     heal.type = "HEAL_OTHERS";
     heal.unit_id = unit.id;
-    heal.payload = py::dict();
-    heal.payload["tribe_id"] = state.active_player_id;
-    heal.payload["p"] = state.active_player_id;
+    init_generated_payload(heal);
+    set_generated_actor(heal, state.active_player_id);
     append_generated_action(state, actions, max_actions, std::move(heal));
   }
 
@@ -3420,7 +3583,7 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
     NativeAction disband;
     disband.type = "DISBAND";
     disband.unit_id = unit.id;
-    disband.payload = py::dict();
+    init_generated_payload(disband);
     append_generated_action(state, actions, max_actions, std::move(disband));
   }
 
@@ -3429,7 +3592,7 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
     NativeAction veteran;
     veteran.type = "MAKE_VETERAN";
     veteran.unit_id = unit.id;
-    veteran.payload = py::dict();
+    init_generated_payload(veteran);
     append_generated_action(state, actions, max_actions, std::move(veteran));
   }
 
@@ -3513,9 +3676,8 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
         ":u" + std::to_string(unit.id) + ":recover";
     recover.type = "RECOVER";
     recover.unit_id = unit.id;
-    recover.payload = py::dict();
-    recover.payload["tribe_id"] = state.active_player_id;
-    recover.payload["p"] = state.active_player_id;
+    init_generated_payload(recover);
+    set_generated_actor(recover, state.active_player_id);
     append_generated_action(state, actions, max_actions, std::move(recover));
   }
 }
@@ -3560,12 +3722,10 @@ void regenerate_city_actions(NativeGameState& state, std::vector<NativeAction>& 
       NativeAction build;
       build.type = "BUILD";
       build.city_id = city.id;
-      build.payload = py::dict();
-      build.payload["p"] = state.active_player_id;
-      build.payload["x"] = tile->x;
-      build.payload["y"] = tile->y;
-      build.payload["bt"] = building;
-      build.payload["building_type"] = building;
+      init_generated_payload(build);
+      set_generated_actor(build, state.active_player_id);
+      set_generated_xy(build, tile->x, tile->y);
+      set_generated_building_type(build, building);
       append_generated_action(state, actions, max_actions, std::move(build));
     }
   }
@@ -3576,10 +3736,9 @@ void regenerate_city_actions(NativeGameState& state, std::vector<NativeAction>& 
       NativeAction burn;
       burn.type = "BURN_FOREST";
       burn.city_id = city.id;
-      burn.payload = py::dict();
-      burn.payload["p"] = state.active_player_id;
-      burn.payload["x"] = tile->x;
-      burn.payload["y"] = tile->y;
+      init_generated_payload(burn);
+      set_generated_actor(burn, state.active_player_id);
+      set_generated_xy(burn, tile->x, tile->y);
       append_generated_action(state, actions, max_actions, std::move(burn));
     }
   }
@@ -3589,10 +3748,9 @@ void regenerate_city_actions(NativeGameState& state, std::vector<NativeAction>& 
       NativeAction clear;
       clear.type = "CLEAR_FOREST";
       clear.city_id = city.id;
-      clear.payload = py::dict();
-      clear.payload["p"] = state.active_player_id;
-      clear.payload["x"] = tile->x;
-      clear.payload["y"] = tile->y;
+      init_generated_payload(clear);
+      set_generated_actor(clear, state.active_player_id);
+      set_generated_xy(clear, tile->x, tile->y);
       append_generated_action(state, actions, max_actions, std::move(clear));
     }
   }
@@ -3603,10 +3761,9 @@ void regenerate_city_actions(NativeGameState& state, std::vector<NativeAction>& 
       NativeAction destroy;
       destroy.type = "DESTROY";
       destroy.city_id = city.id;
-      destroy.payload = py::dict();
-      destroy.payload["p"] = state.active_player_id;
-      destroy.payload["x"] = tile->x;
-      destroy.payload["y"] = tile->y;
+      init_generated_payload(destroy);
+      set_generated_actor(destroy, state.active_player_id);
+      set_generated_xy(destroy, tile->x, tile->y);
       append_generated_action(state, actions, max_actions, std::move(destroy));
     }
   }
@@ -3616,10 +3773,9 @@ void regenerate_city_actions(NativeGameState& state, std::vector<NativeAction>& 
       NativeAction grow;
       grow.type = "GROW_FOREST";
       grow.city_id = city.id;
-      grow.payload = py::dict();
-      grow.payload["p"] = state.active_player_id;
-      grow.payload["x"] = tile->x;
-      grow.payload["y"] = tile->y;
+      init_generated_payload(grow);
+      set_generated_actor(grow, state.active_player_id);
+      set_generated_xy(grow, tile->x, tile->y);
       append_generated_action(state, actions, max_actions, std::move(grow));
     }
   }
@@ -3629,12 +3785,10 @@ void regenerate_city_actions(NativeGameState& state, std::vector<NativeAction>& 
       NativeAction gather;
       gather.type = "RESOURCE_GATHERING";
       gather.city_id = city.id;
-      gather.payload = py::dict();
-      gather.payload["p"] = state.active_player_id;
-      gather.payload["x"] = tile->x;
-      gather.payload["y"] = tile->y;
-      gather.payload["rt"] = tile->resource;
-      gather.payload["resource_type"] = tile->resource;
+      init_generated_payload(gather);
+      set_generated_actor(gather, state.active_player_id);
+      set_generated_xy(gather, tile->x, tile->y);
+      set_generated_resource_type(gather, tile->resource);
       append_generated_action(state, actions, max_actions, std::move(gather));
     }
   }
@@ -3650,11 +3804,9 @@ void regenerate_city_actions(NativeGameState& state, std::vector<NativeAction>& 
       NativeAction spawn;
       spawn.type = "SPAWN";
       spawn.city_id = city.id;
-      spawn.payload = py::dict();
-      spawn.payload["x"] = city.x;
-      spawn.payload["y"] = city.y;
-      spawn.payload["ut"] = unit_type;
-      spawn.payload["unit_type"] = unit_type;
+      init_generated_payload(spawn);
+      set_generated_xy(spawn, city.x, city.y);
+      set_generated_unit_type(spawn, unit_type);
       append_generated_action(state, actions, max_actions, std::move(spawn));
     }
   }
@@ -3690,10 +3842,9 @@ void regenerate_tribe_actions(NativeGameState& state, std::vector<NativeAction>&
       }
       NativeAction road;
       road.type = "BUILD_ROAD";
-      road.payload = py::dict();
-      road.payload["p"] = state.active_player_id;
-      road.payload["x"] = tile->x;
-      road.payload["y"] = tile->y;
+      init_generated_payload(road);
+      set_generated_actor(road, state.active_player_id);
+      set_generated_xy(road, tile->x, tile->y);
       append_generated_action(state, actions, max_actions, std::move(road));
     }
   }
@@ -3705,10 +3856,9 @@ void regenerate_tribe_actions(NativeGameState& state, std::vector<NativeAction>&
     if (can_build_embassy(state, state.active_player_id, target)) {
       NativeAction embassy;
       embassy.type = "BUILD_EMBASSY";
-      embassy.payload = py::dict();
-      embassy.payload["p"] = state.active_player_id;
-      embassy.payload["tp"] = target;
-      embassy.payload["target_player_id"] = target;
+      init_generated_payload(embassy);
+      set_generated_actor(embassy, state.active_player_id);
+      set_generated_target_player(embassy, target);
       append_generated_action(state, actions, max_actions, std::move(embassy));
     }
   }
@@ -3725,9 +3875,9 @@ void regenerate_tribe_actions(NativeGameState& state, std::vector<NativeAction>&
     }
     NativeAction research;
     research.type = "RESEARCH_TECH";
-    research.payload = py::dict();
-    research.payload["p"] = state.active_player_id;
-    research.payload["tech"] = tech;
+    init_generated_payload(research);
+    set_generated_actor(research, state.active_player_id);
+    set_generated_tech(research, tech);
     append_generated_action(state, actions, max_actions, std::move(research));
   }
 
@@ -3741,18 +3891,18 @@ void regenerate_tribe_actions(NativeGameState& state, std::vector<NativeAction>&
         !has_pending_offer(state, target, state.active_player_id)) {
       NativeAction propose;
       propose.type = "PROPOSE_PEACE";
-      propose.payload = py::dict();
-      propose.payload["p"] = state.active_player_id;
-      propose.payload["tp"] = target;
+      init_generated_payload(propose);
+      set_generated_actor(propose, state.active_player_id);
+      set_generated_target_player(propose, target);
       append_generated_action(state, actions, max_actions, std::move(propose));
     }
     if (has_pending_offer(state, target, state.active_player_id) &&
         state.pending_offer_types[static_cast<size_t>(target)][static_cast<size_t>(state.active_player_id)] == "PEACE") {
       NativeAction accept;
       accept.type = "ACCEPT_PEACE";
-      accept.payload = py::dict();
-      accept.payload["p"] = state.active_player_id;
-      accept.payload["tp"] = target;
+      init_generated_payload(accept);
+      set_generated_actor(accept, state.active_player_id);
+      set_generated_target_player(accept, target);
       append_generated_action(state, actions, max_actions, std::move(accept));
     }
     if (is_action_unlocked(*tribe, "PROPOSE_TREATY") &&
@@ -3761,26 +3911,26 @@ void regenerate_tribe_actions(NativeGameState& state, std::vector<NativeAction>&
         !has_pending_offer(state, target, state.active_player_id)) {
       NativeAction propose;
       propose.type = "PROPOSE_TREATY";
-      propose.payload = py::dict();
-      propose.payload["p"] = state.active_player_id;
-      propose.payload["tp"] = target;
+      init_generated_payload(propose);
+      set_generated_actor(propose, state.active_player_id);
+      set_generated_target_player(propose, target);
       append_generated_action(state, actions, max_actions, std::move(propose));
     }
     if (has_pending_offer(state, target, state.active_player_id) &&
         state.pending_offer_types[static_cast<size_t>(target)][static_cast<size_t>(state.active_player_id)] == "TREATY") {
       NativeAction accept;
       accept.type = "ACCEPT_TREATY";
-      accept.payload = py::dict();
-      accept.payload["p"] = state.active_player_id;
-      accept.payload["tp"] = target;
+      init_generated_payload(accept);
+      set_generated_actor(accept, state.active_player_id);
+      set_generated_target_player(accept, target);
       append_generated_action(state, actions, max_actions, std::move(accept));
     }
     if (relationship_between(state, state.active_player_id, target) == "TREATY") {
       NativeAction cancel;
       cancel.type = "CANCEL_TREATY";
-      cancel.payload = py::dict();
-      cancel.payload["p"] = state.active_player_id;
-      cancel.payload["tp"] = target;
+      init_generated_payload(cancel);
+      set_generated_actor(cancel, state.active_player_id);
+      set_generated_target_player(cancel, target);
       append_generated_action(state, actions, max_actions, std::move(cancel));
     }
   }
@@ -3789,9 +3939,8 @@ void regenerate_tribe_actions(NativeGameState& state, std::vector<NativeAction>&
     NativeAction end_turn;
     end_turn.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) + ":end";
     end_turn.type = "END_TURN";
-    end_turn.payload = py::dict();
-    end_turn.payload["p"] = state.active_player_id;
-    end_turn.payload["tribe_id"] = state.active_player_id;
+    init_generated_payload(end_turn);
+    set_generated_actor(end_turn, state.active_player_id);
     append_generated_action(state, actions, max_actions, std::move(end_turn));
   }
 }
@@ -3826,12 +3975,10 @@ void regenerate_actions(NativeGameState& state, std::vector<NativeAction>& actio
         NativeAction level_up;
         level_up.type = "LEVEL_UP";
         level_up.city_id = city->id;
-        level_up.payload = py::dict();
-        level_up.payload["p"] = state.active_player_id;
-        level_up.payload["x"] = city->x;
-        level_up.payload["y"] = city->y;
-        level_up.payload["b"] = bonus;
-        level_up.payload["bonus"] = bonus;
+        init_generated_payload(level_up);
+        set_generated_actor(level_up, state.active_player_id);
+        set_generated_xy(level_up, city->x, city->y);
+        set_generated_bonus(level_up, bonus);
         append_generated_action(state, actions, max_actions, std::move(level_up));
       }
       sync_observation_turn_flags(state);
@@ -5983,6 +6130,7 @@ void parse_observation_state(NativeGameState& state) {
   state.leveling_up = read_bool(state.observation, "leveling_up", read_bool(state.observation, "lvlup", false));
   state.can_end_turn = read_bool(state.observation, "can_end_turn", read_bool(state.observation, "end", true));
   validate_typed_state(state);
+  rebuild_state_indexes(state);
 }
 
 }  // namespace
@@ -6114,6 +6262,7 @@ NativeGameState apply_action_strict(
     g_last_transition_timing.reveal_sync_ms += elapsed_ms(started_at);
     next.transition_kind = "END_TURN";
     started_at = TimingClock::now();
+    rebuild_state_indexes(next);
     regenerate_actions(next, actions, max_actions);
     g_last_transition_timing.regenerate_actions_ms += elapsed_ms(started_at);
     next.terminal = next.legal_action_indexes.empty();
@@ -6222,6 +6371,7 @@ NativeGameState apply_action_strict(
   g_last_transition_timing.reveal_sync_ms += elapsed_ms(started_at);
   next.transition_kind = type;
   started_at = TimingClock::now();
+  rebuild_state_indexes(next);
   regenerate_actions(next, actions, max_actions);
   g_last_transition_timing.regenerate_actions_ms += elapsed_ms(started_at);
   if (type == "ATTACK") {

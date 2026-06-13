@@ -223,6 +223,17 @@ constexpr double kExperimentalResourceValueWeight = 1.0;
 constexpr double kExperimentalMissingTechResourceOptionScale = 0.25;
 
 StaticEvalVariant static_eval_variant() {
+#ifdef TRIBES_NATIVE_MCTS_STANDALONE
+  static const StaticEvalVariant cached = []() {
+    const char* value = std::getenv("TRIBES_STATIC_EVAL_VARIANT");
+    if (value == nullptr) {
+      return StaticEvalVariant::Baseline;
+    }
+    const std::string variant(value);
+    return variant == "experimental" ? StaticEvalVariant::Experimental : StaticEvalVariant::Baseline;
+  }();
+  return cached;
+#else
   const char* value = std::getenv("TRIBES_STATIC_EVAL_VARIANT");
   if (value == nullptr) {
     return StaticEvalVariant::Baseline;
@@ -232,9 +243,19 @@ StaticEvalVariant static_eval_variant() {
     return StaticEvalVariant::Experimental;
   }
   return StaticEvalVariant::Baseline;
+#endif
 }
 
 const NativeUnit* unit_by_id(const NativeGameState& state, int id) {
+  if (id >= 0 && id < static_cast<int>(state.unit_id_index.size())) {
+    const int index = state.unit_id_index[static_cast<size_t>(id)];
+    if (index >= 0 && index < static_cast<int>(state.units.size())) {
+      const NativeUnit& unit = state.units[static_cast<size_t>(index)];
+      if (unit.id == id) {
+        return &unit;
+      }
+    }
+  }
   for (const NativeUnit& unit : state.units) {
     if (unit.id == id) {
       return &unit;
@@ -244,6 +265,15 @@ const NativeUnit* unit_by_id(const NativeGameState& state, int id) {
 }
 
 const NativeCity* city_by_id(const NativeGameState& state, int id) {
+  if (id >= 0 && id < static_cast<int>(state.city_id_index.size())) {
+    const int index = state.city_id_index[static_cast<size_t>(id)];
+    if (index >= 0 && index < static_cast<int>(state.cities.size())) {
+      const NativeCity& city = state.cities[static_cast<size_t>(index)];
+      if (city.id == id) {
+        return &city;
+      }
+    }
+  }
   for (const NativeCity& city : state.cities) {
     if (city.id == id) {
       return &city;
@@ -263,6 +293,16 @@ const NativeTribe* tribe_by_id(const NativeGameState& state, int id) {
 
 const NativeTile* tile_at(const NativeGameState& state, int x, int y) {
   if (x >= 0 && y >= 0 && x < state.board_size && y < state.board_size) {
+    const int coord_index = y * state.board_size + x;
+    if (coord_index >= 0 && coord_index < static_cast<int>(state.tile_coord_index.size())) {
+      const int tile_index = state.tile_coord_index[static_cast<size_t>(coord_index)];
+      if (tile_index >= 0 && tile_index < static_cast<int>(state.tiles.size())) {
+        const NativeTile& tile = state.tiles[static_cast<size_t>(tile_index)];
+        if (tile.x == x && tile.y == y) {
+          return &tile;
+        }
+      }
+    }
     int index = y * state.board_size + x;
     if (index >= 0 && index < static_cast<int>(state.tiles.size())) {
       const NativeTile& tile = state.tiles[index];

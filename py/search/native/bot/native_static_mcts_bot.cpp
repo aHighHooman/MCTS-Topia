@@ -338,7 +338,69 @@ json normalize_action_json(const json& action) {
   return out;
 }
 
+bool board_tiles_look_expanded(const json& board) {
+  if (!board.is_object() || !board.contains("tiles") || !board["tiles"].is_array() || board["tiles"].empty()) {
+    return false;
+  }
+  const json& first_row = board["tiles"][0];
+  if (!first_row.is_array() || first_row.empty() || !first_row[0].is_object()) {
+    return false;
+  }
+  const json& tile = first_row[0];
+  return tile.contains("x") && tile.contains("y") && tile.contains("terrain") &&
+      tile.contains("city_id") && tile.contains("unit_id") && tile.contains("explored");
+}
+
+bool entries_have_required_keys(const json& values, std::initializer_list<const char*> keys) {
+  if (!values.is_array()) {
+    return false;
+  }
+  for (const json& value : values) {
+    if (!value.is_object()) {
+      return false;
+    }
+    for (const char* key : keys) {
+      if (!value.contains(key)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool message_looks_normalized(const json& message) {
+  if (!message.is_object() || !message.contains("observation") || !message["observation"].is_object()) {
+    return false;
+  }
+  const json& observation = message["observation"];
+  if (!observation.contains("board") || !board_tiles_look_expanded(observation["board"])) {
+    return false;
+  }
+  if (!entries_have_required_keys(value_or(observation, "units", json::array()), {"id", "tribe_id", "city_id", "type", "current_hp", "max_hp", "status"})) {
+    return false;
+  }
+  if (!entries_have_required_keys(value_or(observation, "cities", json::array()), {"id", "tribe_id", "x", "y", "level", "population", "population_need", "production"})) {
+    return false;
+  }
+  if (!entries_have_required_keys(value_or(observation, "tribes", json::array()), {"id", "stars", "score", "researched_tech_ids"})) {
+    return false;
+  }
+  const json& actions = value_or(message, "actions", json::array());
+  if (!actions.is_array()) {
+    return false;
+  }
+  for (const json& action : actions) {
+    if (!action.is_object() || !action.contains("id") || !action.contains("type")) {
+      return false;
+    }
+  }
+  return true;
+}
+
 json normalize_cli_message(const json& message) {
+  if (message_looks_normalized(message)) {
+    return message;
+  }
   json out = message.is_object() ? message : json::object();
   if (!out.contains("observation") && out.contains("obs")) out["observation"] = out["obs"];
   if (!out.contains("forward_model") && out.contains("fm")) out["forward_model"] = out["fm"];
@@ -560,7 +622,10 @@ json choose_action_with_native_tree(const json& message, const CliConfig& cfg, s
     tree.set_static_timing_enabled(true);
   }
   tree.add_root_dirichlet_noise(cfg.dirichlet_alpha, cfg.dirichlet_epsilon);
-  tree.reserve_tree_capacity(std::max(2, cfg.simulations + 1));
+  const int reserve_capacity = cfg.wall_clock_seconds > 0.0
+      ? std::max(cfg.simulations + 1, static_cast<int>(std::ceil(cfg.wall_clock_seconds * 25000.0)))
+      : cfg.simulations + 1;
+  tree.reserve_tree_capacity(std::max(2, reserve_capacity));
   if (collect_timing) {
     timing_ms["root_setup_ms"] = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - root_setup_started).count();

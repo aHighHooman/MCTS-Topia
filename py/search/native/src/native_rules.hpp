@@ -35,7 +35,11 @@ struct NativeAction {
   std::string capture_type;
   std::string bonus;
   std::string tech;
+#ifdef TRIBES_NATIVE_MCTS_STANDALONE
+  py::object payload;
+#else
   py::dict payload;
+#endif
 };
 
 struct NativeTile {
@@ -131,6 +135,9 @@ struct NativeGameState {
   std::vector<NativeUnit> units;
   std::vector<NativeCity> cities;
   std::vector<NativeTribe> tribes;
+  std::vector<int> tile_coord_index;
+  std::vector<int> unit_id_index;
+  std::vector<int> city_id_index;
   std::vector<int> capital_city_ids;
   std::vector<std::vector<std::string>> relationships;
   std::vector<std::vector<int>> pending_offer_from;
