@@ -55,6 +55,7 @@ class SearchResult:
     visit_distribution: Dict[str, float]
     visit_target: List[float]
     value: float
+    root_stats: List[Dict[str, Any]] | None = None
 
 
 @dataclass
@@ -427,6 +428,13 @@ def _root_visit_distribution_by_index(tree: Any, temperature: float) -> List[flo
     return [float(distribution.get(str(action.get("id")), 0.0)) for action in native_actions]
 
 
+def _root_action_stats(tree: Any) -> List[Dict[str, Any]]:
+    stats_fn = getattr(tree, "root_action_stats", None)
+    if stats_fn is None:
+        return []
+    return [dict(row) for row in list(_native_call(stats_fn))]
+
+
 def _node_count(tree: Any) -> int:
     node_count = getattr(tree, "node_count", None)
     if node_count is None:
@@ -662,7 +670,14 @@ def _run_native_tree_search(
         f"root_actions={len(root_actions)} searched_actions={len(searched_action_ids)} {telemetry.log_fields()}"
     )
     return _TreeSearchResult(
-        SearchResult(action_id=action_id, action_index=action_index, visit_distribution=visit_distribution, visit_target=visit_target, value=float(root_value)),
+        SearchResult(
+            action_id=action_id,
+            action_index=action_index,
+            visit_distribution=visit_distribution,
+            visit_target=visit_target,
+            value=float(root_value),
+            root_stats=_root_action_stats(tree),
+        ),
         native_action_id=str(native_action_id),
         selected_local_index=int(selected_local_index),
         selected_paths=int(selected_paths),
@@ -1157,4 +1172,5 @@ def run_native_mcts(
         visit_distribution=visit_distribution,
         visit_target=visit_target,
         value=float(root_value),
+        root_stats=_root_action_stats(tree),
     )

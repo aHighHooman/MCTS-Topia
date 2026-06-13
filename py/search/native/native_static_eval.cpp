@@ -1847,7 +1847,8 @@ double state_raw_value(
     const NativeGameState& state,
     double power_weight,
     double city_capital_bonus,
-    double income_weight) {
+    double income_weight,
+    std::vector<std::pair<std::string, double>>* terms = nullptr) {
   const int player_id = state.active_player_id;
   const NativeTribe* me = tribe_by_id(state, player_id);
   const bool experimental_eval = static_eval_variant() == StaticEvalVariant::Experimental;
@@ -2019,21 +2020,32 @@ double state_raw_value(
   const double experimental_resource_term = experimental_eval
       ? kExperimentalResourceValueWeight * (my_exploitable_resource_value - enemy_exploitable_resource_value)
       : 0.0;
-  const double raw =
-      material_weight * (my_material - enemy_material) +
-      power_weight * (my_power - enemy_power) +
-      18.103448275862 * static_cast<double>(my_cities - enemy_cities) +
-      city_quality_weight * (my_city_quality - enemy_city_quality) +
-      income_weight * (my_income - enemy_income) +
-      experimental_population_term + experimental_unit_capacity_term + experimental_resource_term +
-      my_stars - 0.413793103448 * best_enemy_stars +
-      current_score_weight * my_score + score_diff_weight * (my_score - best_enemy_score) +
-      2.155172413793 * my_tech +
-      2.672413793103 * static_cast<double>(visible_villages) + 2.413793103448 * village_control +
-      visible_resource_term + exploration +
-      0.948275862069 * enemy_city_pressure -
-      2.672413793103 * vulnerable_penalty - 2.931034482759 * capital_threat - 1.465517241379 * city_threat -
-      wounded_units_weight * static_cast<double>(wounded_units);
+  const std::vector<std::pair<std::string, double>> raw_terms = {
+      {"military.own_unit_material", material_weight * (my_material - enemy_material)},
+      {"military.unit_power", power_weight * (my_power - enemy_power)},
+      {"territory.city_count", 18.103448275862 * static_cast<double>(my_cities - enemy_cities)},
+      {"economy.city_quality", city_quality_weight * (my_city_quality - enemy_city_quality)},
+      {"economy.income", income_weight * (my_income - enemy_income)},
+      {"economy.production", experimental_population_term + experimental_unit_capacity_term},
+      {"economy.resource_potential", experimental_resource_term + visible_resource_term},
+      {"economy.stars", my_stars - 0.413793103448 * best_enemy_stars},
+      {"score_terminal.score", current_score_weight * my_score + score_diff_weight * (my_score - best_enemy_score)},
+      {"technology.researched_tech", 2.155172413793 * my_tech},
+      {"territory.villages", 2.672413793103 * static_cast<double>(visible_villages) + 2.413793103448 * village_control},
+      {"territory.exploration", exploration},
+      {"threat.city_pressure", 0.948275862069 * enemy_city_pressure},
+      {"threat.vulnerable_units", -2.672413793103 * vulnerable_penalty},
+      {"threat.capital_threat", -2.931034482759 * capital_threat},
+      {"threat.city_threat", -1.465517241379 * city_threat},
+      {"military.wounded_penalty", -wounded_units_weight * static_cast<double>(wounded_units)},
+  };
+  double raw = 0.0;
+  for (const auto& term : raw_terms) {
+    raw += term.second;
+  }
+  if (terms != nullptr) {
+    *terms = raw_terms;
+  }
   return raw;
 }
 
@@ -2147,6 +2159,40 @@ py::dict evaluation_to_dict(const StaticEvaluation& evaluation) {
   return out;
 }
 
+py::dict breakdown_to_dict(
+    const StaticEvaluation& evaluation,
+    const std::vector<std::pair<std::string, double>>& raw_terms,
+    double raw_total) {
+  py::dict out = evaluation_to_dict(evaluation);
+  const double scale = kValueTanhDenominatorStars;
+  const double tanh_input = raw_total / scale;
+  const double final_value = std::tanh(tanh_input);
+  const double squash_sensitivity = (1.0 - final_value * final_value) / scale;
+  double abs_total = 0.0;
+  for (const auto& term : raw_terms) {
+    abs_total += std::abs(term.second);
+  }
+  py::dict breakdown;
+  breakdown["raw_total"] = raw_total;
+  breakdown["scale"] = scale;
+  breakdown["tanh_input"] = tanh_input;
+  breakdown["final_value"] = final_value;
+  breakdown["squash_sensitivity"] = squash_sensitivity;
+  py::list terms;
+  for (const auto& term : raw_terms) {
+    py::dict row;
+    row["name"] = py::str(term.first);
+    row["raw"] = term.second;
+    row["normalized"] = term.second / scale;
+    row["abs_share"] = abs_total > 0.0 ? std::abs(term.second) / abs_total : 0.0;
+    row["linearized_value"] = squash_sensitivity * term.second;
+    terms.append(row);
+  }
+  breakdown["terms"] = terms;
+  out["value_breakdown"] = breakdown;
+  return out;
+}
+
 }  // namespace
 
 StaticEvaluation evaluate_static_state(
@@ -2160,6 +2206,24 @@ py::dict evaluate_static(const py::dict& payload, int max_actions) {
   return evaluation_to_dict(static_evaluation_for_state(root.state, root.actions));
 }
 
+py::dict evaluate_static_breakdown(const py::dict& payload, int max_actions) {
+  NativeRoot root = parse_root_payload(payload, max_actions);
+  StaticEvaluation evaluation;
+  evaluation.priors = priors_for_state(root.state, root.actions);
+  std::vector<std::pair<std::string, double>> terms;
+  if (root.state.terminal && root.state.terminal_value_known) {
+    evaluation.value = root.state.terminal_value;
+    terms.push_back({"score_terminal.terminal_win_loss", root.state.terminal_value * kValueTanhDenominatorStars});
+    return breakdown_to_dict(evaluation, terms, terms.front().second);
+  }
+  const StaticEvalVariant variant = static_eval_variant();
+  const double raw_total = variant == StaticEvalVariant::Experimental
+      ? state_raw_value(root.state, 5.517241379310, 0.0, 0.0, &terms)
+      : state_raw_value(root.state, 1.810344827586, 4.310344827586, 0.0, &terms);
+  evaluation.value = std::tanh(raw_total / kValueTanhDenominatorStars);
+  return breakdown_to_dict(evaluation, terms, raw_total);
+}
+
 py::list evaluate_static_batch(const py::list& payloads, int max_actions) {
   py::list out;
   for (const auto& item : payloads) {
@@ -2169,6 +2233,22 @@ py::list evaluate_static_batch(const py::list& payloads, int max_actions) {
       py::dict empty;
       empty["priors"] = py::list();
       empty["value"] = 0.0;
+      out.append(empty);
+    }
+  }
+  return out;
+}
+
+py::list evaluate_static_breakdown_batch(const py::list& payloads, int max_actions) {
+  py::list out;
+  for (const auto& item : payloads) {
+    if (py::isinstance<py::dict>(item)) {
+      out.append(evaluate_static_breakdown(py::reinterpret_borrow<py::dict>(item), max_actions));
+    } else {
+      py::dict empty;
+      empty["priors"] = py::list();
+      empty["value"] = 0.0;
+      empty["value_breakdown"] = py::none();
       out.append(empty);
     }
   }

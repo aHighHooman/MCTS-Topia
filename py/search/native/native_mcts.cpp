@@ -1193,6 +1193,43 @@ class NativeMCTS {
     return probs;
   }
 
+  py::list root_action_stats() const {
+    py::list out;
+    if (nodes_.empty()) {
+      return out;
+    }
+    const Node& root = nodes_[0];
+    const NativeGameState& root_state = states_[root.state_index];
+    const std::vector<int>& output_indexes = root_action_indexes_.empty()
+        ? root_state.legal_action_indexes
+        : root_action_indexes_;
+    int total_visits = 0;
+    for (int visits : root.visits) {
+      total_visits += visits;
+    }
+    for (size_t local = 0; local < output_indexes.size() && local < root.visits.size(); ++local) {
+      const int global = output_indexes[local];
+      py::dict row;
+      row["action_id"] = global >= 0 && global < static_cast<int>(actions_.size())
+          ? py::str(actions_[global].id)
+          : py::str("");
+      row["global_action_index"] = global;
+      row["local_action_index"] = static_cast<int>(local);
+      row["prior"] = local < root.priors.size() ? root.priors[local] : 0.0;
+      row["visits"] = root.visits[local];
+      row["visit_share"] = total_visits > 0
+          ? static_cast<double>(root.visits[local]) / static_cast<double>(total_visits)
+          : 0.0;
+      row["value_sum"] = local < root.value_sums.size() ? root.value_sums[local] : 0.0;
+      row["q_mean"] = root.visits[local] > 0 && local < root.value_sums.size()
+          ? root.value_sums[local] / static_cast<double>(root.visits[local])
+          : 0.0;
+      row["child_node_id"] = local < root.child_node_ids.size() ? root.child_node_ids[local] : -1;
+      out.append(row);
+    }
+    return out;
+  }
+
   py::dict root_payload() const {
     py::dict out;
     if (nodes_.empty()) {
@@ -1654,11 +1691,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("complete_selected_paths", &NativeMCTS::complete_selected_paths)
       .def("root_visit_distribution", &NativeMCTS::root_visit_distribution)
       .def("root_visit_distribution_by_index", &NativeMCTS::root_visit_distribution_by_index)
+      .def("root_action_stats", &NativeMCTS::root_action_stats)
       .def("root_payload", &NativeMCTS::root_payload)
       .def("root_action_payloads", &NativeMCTS::root_action_payloads)
       .def("node_count", &NativeMCTS::node_count)
       .def("promote_root_child_by_action_id", &NativeMCTS::promote_root_child_by_action_id);
   m.def("evaluate_static", &tribes::native::evaluate_static);
   m.def("evaluate_static_batch", &tribes::native::evaluate_static_batch);
+  m.def("evaluate_static_breakdown", &tribes::native::evaluate_static_breakdown);
+  m.def("evaluate_static_breakdown_batch", &tribes::native::evaluate_static_breakdown_batch);
 }
 #endif
