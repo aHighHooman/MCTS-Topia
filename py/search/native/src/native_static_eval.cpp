@@ -2156,7 +2156,9 @@ double state_raw_value(
       : 0.0;
   const std::vector<std::pair<std::string, double>> raw_terms = {
       {"military.own_unit_material", material_weight * (my_material - enemy_material)},
-      {"military.unit_power", power_weight * (my_power - enemy_power)},
+      {"military.unit_power",
+       power_weight * (experimental_eval ? kExperimentalUnitPowerScale : 1.0) *
+           (my_power - enemy_power)},
       {"territory.city_count", 18.103448275862 * static_cast<double>(my_cities - enemy_cities)},
       {"economy.city_quality", city_quality_weight * (my_city_quality - enemy_city_quality)},
       {"economy.income", income_weight * (my_income - enemy_income)},
@@ -2247,9 +2249,6 @@ double unit_power(const NativeGameState& state, const NativeUnit& unit) {
   const double projection_power = reach * attack * hp_frac * survival_attacks;
   const double defensive_anchor = defence * hp_frac;
   const double raw_power = projection_power + defensive_anchor + (unit.veteran ? 0.8 : 0.0);
-  if (static_eval_variant() == StaticEvalVariant::Experimental) {
-    return raw_power * kExperimentalUnitPowerScale;
-  }
   return raw_power;
 }
 

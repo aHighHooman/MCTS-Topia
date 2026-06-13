@@ -57,8 +57,18 @@ _MCTS_SEARCH_DEFAULTS: dict[str, Any] = {
     "java_main_class": None,
     "checkpoint": str(DEFAULT_AUTORESEARCH_CHECKPOINT),
     "static_eval_variant": "baseline",
+    "native_static_search_mode": "primitive",
     "native_static_exe": "out/native/native_static_mcts_bot.exe",
     "build_native_static_exe": True,
+    "turn_cmab_simulations": None,
+    "turn_cmab_max_turn_depth": 3,
+    "turn_cmab_max_primitives_per_turn": 32,
+    "turn_cmab_max_edges_per_node": 64,
+    "turn_cmab_outer_c": 1.4,
+    "turn_cmab_c": 1.0,
+    "turn_cmab_prior_weight": 0.35,
+    "turn_cmab_temperature": 1.0,
+    "turn_cmab_opponent_mode": "root-adversarial",
     "device": None,
     "simulations": None,
     "wall_time_sec": 10.0,
@@ -1480,6 +1490,10 @@ def _load_mcts_search_config(path: Path = DEFAULT_MCTS_SEARCH_CONFIG) -> argpars
         raise ValueError("mcts_search config evaluator must be one of: nn, static, static_exe, bot")
     if str(values.get("static_eval_variant")) not in {"baseline", "experimental"}:
         raise ValueError("mcts_search config static_eval_variant must be one of: baseline, experimental")
+    if str(values.get("native_static_search_mode")) not in {"primitive", "turn-cmab"}:
+        raise ValueError("mcts_search config native_static_search_mode must be one of: primitive, turn-cmab")
+    if str(values.get("turn_cmab_opponent_mode")) not in {"root-max", "root-adversarial"}:
+        raise ValueError("mcts_search config turn_cmab_opponent_mode must be one of: root-max, root-adversarial")
     for key in _PATH_CONFIG_KEYS:
         value = values.get(key)
         if isinstance(value, str) and value:
@@ -1891,6 +1905,8 @@ def _ensure_native_static_exe(args: argparse.Namespace) -> Path:
 def _native_static_exe_command(exe: Path, cfg: HybridAgentConfig, args: argparse.Namespace, *, using_walltime: bool) -> list[str]:
     command = [
         str(exe),
+        "--search-mode",
+        str(getattr(args, "native_static_search_mode", "primitive")),
         "--simulations",
         str(int(cfg.search.num_simulations)),
         "--top-k-actions",
@@ -1907,6 +1923,30 @@ def _native_static_exe_command(exe: Path, cfg: HybridAgentConfig, args: argparse
     ]
     if using_walltime:
         command.extend(["--wall-clock-per-action-seconds", str(max(0.0, float(args.wall_time_sec)))])
+    if str(getattr(args, "native_static_search_mode", "primitive")) == "turn-cmab":
+        turn_cmab_simulations = getattr(args, "turn_cmab_simulations", None)
+        if turn_cmab_simulations is not None:
+            command.extend(["--turn-cmab-simulations", str(int(turn_cmab_simulations))])
+        command.extend(
+            [
+                "--turn-cmab-max-turn-depth",
+                str(int(getattr(args, "turn_cmab_max_turn_depth", 3))),
+                "--turn-cmab-max-primitives-per-turn",
+                str(int(getattr(args, "turn_cmab_max_primitives_per_turn", 32))),
+                "--turn-cmab-max-edges-per-node",
+                str(int(getattr(args, "turn_cmab_max_edges_per_node", 64))),
+                "--turn-cmab-outer-c",
+                str(float(getattr(args, "turn_cmab_outer_c", 1.4))),
+                "--turn-cmab-c",
+                str(float(getattr(args, "turn_cmab_c", 1.0))),
+                "--turn-cmab-prior-weight",
+                str(float(getattr(args, "turn_cmab_prior_weight", 0.35))),
+                "--turn-cmab-temperature",
+                str(float(getattr(args, "turn_cmab_temperature", 1.0))),
+                "--turn-cmab-opponent-mode",
+                str(getattr(args, "turn_cmab_opponent_mode", "root-adversarial")),
+            ]
+        )
     if bool(args.no_dirichlet):
         command.append("--deterministic")
     return command
@@ -1925,6 +1965,8 @@ _NATIVE_STATIC_EXE_TIMING_ROWS = {
     "transition_regenerate_actions_ms": ("native_static_exe.transition.regenerate_actions", "paths"),
     "transition_hidden_enemy_ms": ("native_static_exe.transition.hidden_enemy", "paths"),
     "search_loop_ms": ("native_static_exe.search_loop", "paths"),
+    "factor_build_ms": ("native_static_exe.turn_cmab.factor_build", "paths"),
+    "cmab_select_ms": ("native_static_exe.turn_cmab.select", "paths"),
     "root_static_eval_ms": ("native_static_exe.root_static_eval", "root"),
     "root_setup_ms": ("native_static_exe.root_setup", "root"),
     "result_distribution_ms": ("native_static_exe.result_distribution", "root"),
@@ -2336,6 +2378,8 @@ def main() -> int:
                 "simulations_per_sec": _format_rate(run_stats.simulations, elapsed),
                 "selected_paths": run_stats.selected_paths,
                 "selected_paths_per_sec": _format_rate(run_stats.selected_paths, elapsed),
+                "expanded_nodes": run_stats.expanded_nodes,
+                "expanded_nodes_per_sec": _format_rate(run_stats.expanded_nodes, elapsed),
                 "avg_depth": f"{run_stats.average_depth:.2f}",
                 "max_depth": run_stats.max_depth,
                 "avg_turn_depth": f"{run_stats.average_turn_depth:.2f}",
@@ -2394,6 +2438,8 @@ def main() -> int:
                 ("simulations_per_sec", "sims/s"),
                 ("selected_paths", "paths"),
                 ("selected_paths_per_sec", "paths/s"),
+                ("expanded_nodes", "nodes"),
+                ("expanded_nodes_per_sec", "nodes/s"),
                 ("avg_depth", "avg_depth"),
                 ("max_depth", "max_depth"),
                 ("avg_turn_depth", "avg_turn_depth"),

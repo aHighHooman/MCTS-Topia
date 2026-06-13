@@ -16,6 +16,7 @@
 #define TRIBES_NATIVE_MCTS_STANDALONE
 #endif
 #include "../src/native_mcts.cpp"
+#include "../src/native_turn_cmab.cpp"
 
 using json = nlohmann::json;
 
@@ -38,6 +39,9 @@ struct CliConfig {
   bool profile_timing = false;
   uint64_t seed = 13;
   std::string static_eval_variant = "baseline";
+  std::string search_mode = "primitive";
+  tribes::native::TurnCmabConfig turn_cmab;
+  bool turn_cmab_simulations_set = false;
 };
 
 py::object py_from_json(const json& value) {
@@ -731,6 +735,39 @@ json choose_action_with_native_tree(const json& message, const CliConfig& cfg, s
   return response;
 }
 
+json choose_action_with_turn_cmab_tree(const json& message, const CliConfig& cfg, std::mt19937_64& rng) {
+  tribes::native::TurnCmabConfig cmab_cfg = cfg.turn_cmab;
+  cmab_cfg.max_actions = cfg.max_actions;
+  cmab_cfg.simulations = cfg.turn_cmab_simulations_set ? cfg.turn_cmab.simulations : cfg.simulations;
+  cmab_cfg.deterministic = !cfg.sample_action;
+  cmab_cfg.profile_json = cfg.profile_json;
+
+  py::dict root_payload = py::reinterpret_borrow<py::dict>(py_from_json(message));
+  tribes::native::TurnCmabMCTS tree(root_payload, cmab_cfg, cfg.seed);
+  if (cfg.wall_clock_seconds > 0.0) {
+    const auto started = std::chrono::steady_clock::now();
+    const int chunk = std::max(1, cfg.batch_size);
+    while (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() < cfg.wall_clock_seconds) {
+      tree.run(chunk);
+    }
+  } else {
+    tree.run(cmab_cfg.simulations);
+  }
+  json response = json_from_py(tree.result_py(cfg.root_temperature, cfg.sample_action));
+  if (!response.contains("actionId") || response["actionId"].is_null() || tree.root_edge_count() <= 0) {
+    json fallback = choose_action_with_native_tree(message, cfg, rng);
+    if (cfg.profile_json) {
+      json profile = response.value("_profile", json::object());
+      if (!profile.is_object()) profile = json::object();
+      profile["search_mode"] = "turn-cmab";
+      profile["fallback_used"] = true;
+      fallback["_profile"] = profile;
+    }
+    return fallback;
+  }
+  return response;
+}
+
 void parse_args(int argc, char** argv, CliConfig& cfg) {
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -739,6 +776,12 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
       return argv[++i];
     };
     if (arg == "--simulations") cfg.simulations = std::stoi(next());
+    else if (arg == "--search-mode") {
+      cfg.search_mode = next();
+      if (cfg.search_mode != "primitive" && cfg.search_mode != "turn-cmab") {
+        throw std::runtime_error("Unsupported --search-mode: " + cfg.search_mode);
+      }
+    }
     else if (arg == "--wall-clock-per-action-seconds") cfg.wall_clock_seconds = std::stod(next());
     else if (arg == "--top-k-actions") cfg.top_k_actions = std::stoi(next());
     else if (arg == "--max-actions") cfg.max_actions = std::stoi(next());
@@ -757,12 +800,43 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
       cfg.profile_timing = true;
     } else if (arg == "--seed") {
       cfg.seed = static_cast<uint64_t>(std::stoull(next()));
+    } else if (arg == "--turn-cmab-simulations") {
+      cfg.turn_cmab.simulations = std::stoi(next());
+      cfg.turn_cmab_simulations_set = true;
+    } else if (arg == "--turn-cmab-max-turn-depth") {
+      cfg.turn_cmab.max_turn_depth = std::stoi(next());
+    } else if (arg == "--turn-cmab-max-primitives-per-turn") {
+      cfg.turn_cmab.max_primitives_per_turn = std::stoi(next());
+    } else if (arg == "--turn-cmab-max-edges-per-node") {
+      cfg.turn_cmab.max_new_edges_per_node = std::stoi(next());
+    } else if (arg == "--turn-cmab-outer-c") {
+      cfg.turn_cmab.outer_c = std::stod(next());
+    } else if (arg == "--turn-cmab-c") {
+      cfg.turn_cmab.cmab_c = std::stod(next());
+    } else if (arg == "--turn-cmab-prior-weight") {
+      cfg.turn_cmab.cmab_prior_weight = std::stod(next());
+    } else if (arg == "--turn-cmab-temperature") {
+      cfg.turn_cmab.cmab_temperature = std::stod(next());
+    } else if (arg == "--turn-cmab-opponent-mode") {
+      const std::string mode = next();
+      if (mode == "root-max") {
+        cfg.turn_cmab.opponent_mode = tribes::native::TurnCmabOpponentMode::RootMax;
+      } else if (mode == "root-adversarial") {
+        cfg.turn_cmab.opponent_mode = tribes::native::TurnCmabOpponentMode::RootAdversarial;
+      } else {
+        throw std::runtime_error("Unsupported --turn-cmab-opponent-mode: " + mode);
+      }
     } else if (arg == "--help" || arg == "-h") {
       std::cout
-          << "native_static_mcts_bot.exe [--simulations N] [--wall-clock-per-action-seconds SEC]\n"
+          << "native_static_mcts_bot.exe [--search-mode primitive|turn-cmab] [--simulations N]\n"
+          << "  [--wall-clock-per-action-seconds SEC]\n"
           << "  [--top-k-actions N] [--max-actions N] [--search-batch-size N]\n"
           << "  [--static-eval-variant baseline|experimental] [--deterministic] [--reuse-tree]\n"
-          << "  [--profile-json] [--profile-timing] [--seed N]\n";
+          << "  [--profile-json] [--profile-timing] [--seed N]\n"
+          << "  [--turn-cmab-simulations N] [--turn-cmab-max-turn-depth N]\n"
+          << "  [--turn-cmab-max-primitives-per-turn N] [--turn-cmab-max-edges-per-node N]\n"
+          << "  [--turn-cmab-outer-c X] [--turn-cmab-c X] [--turn-cmab-prior-weight X]\n"
+          << "  [--turn-cmab-temperature X] [--turn-cmab-opponent-mode root-max|root-adversarial]\n";
       std::exit(0);
     }
   }
@@ -792,7 +866,11 @@ int main(int argc, char** argv) {
       const std::string type = message.value("type", "");
       if (type == "action_request") {
         message = normalize_cli_message(message);
-        std::cout << choose_action_with_native_tree(message, cfg, rng).dump() << std::endl;
+        if (cfg.search_mode == "turn-cmab") {
+          std::cout << choose_action_with_turn_cmab_tree(message, cfg, rng).dump() << std::endl;
+        } else {
+          std::cout << choose_action_with_native_tree(message, cfg, rng).dump() << std::endl;
+        }
       } else if (type == "game_over") {
         break;
       }
