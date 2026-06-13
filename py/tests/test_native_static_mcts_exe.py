@@ -163,6 +163,25 @@ def test_native_static_mcts_exe_uses_native_tree_without_forward_model_protocol(
     assert response["rankedActionIds"][0] == "capture"
 
 
+def test_native_static_mcts_exe_profile_json_includes_root_action_stats() -> None:
+    message = _message_with_capital_capture(second_action={"id": "end", "type": "END_TURN"})
+    message["type"] = "action_request"
+    completed = subprocess.run(
+        [str(_require_exe()), "--simulations", "4", "--search-batch-size", "2", "--deterministic", "--profile-json", "--seed", "1"],
+        input=json.dumps(message) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+
+    response = json.loads(completed.stdout.strip().splitlines()[-1])
+    stats = response["_profile"]["root_action_stats"]
+
+    assert stats
+    assert {"action_id", "visits", "visit_share", "value_sum", "q_mean"} <= set(stats[0])
+
+
 
 def test_native_static_mcts_exe_accepts_java_compact_protocol() -> None:
     message = _message_with_capital_capture(second_action={"id": "end", "type": "END_TURN"})
@@ -180,3 +199,37 @@ def test_native_static_mcts_exe_accepts_java_compact_protocol() -> None:
 
     assert response["actionId"] == "capture"
     assert response["rankedActionIds"][:2] == ["capture", "end"]
+
+
+def test_native_static_mcts_exe_turn_cmab_returns_legal_root_action() -> None:
+    message = _message_with_capital_capture(second_action={"id": "end", "type": "END_TURN"})
+    message["type"] = "action_request"
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode",
+            "turn-cmab",
+            "--simulations",
+            "16",
+            "--turn-cmab-max-turn-depth",
+            "1",
+            "--turn-cmab-max-primitives-per-turn",
+            "8",
+            "--deterministic",
+            "--profile-json",
+            "--seed",
+            "13",
+        ],
+        input=json.dumps(message) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+
+    response = json.loads(completed.stdout.strip().splitlines()[-1])
+    legal_ids = {action["id"] for action in message["actions"]}
+
+    assert response["actionId"] in legal_ids
+    assert response["rankedActionIds"][0] in legal_ids
+    assert response["_profile"]["search_mode"] == "turn-cmab"

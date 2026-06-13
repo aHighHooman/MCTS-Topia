@@ -715,6 +715,7 @@ json choose_action_with_native_tree(const json& message, const CliConfig& cfg, s
         std::chrono::steady_clock::now() - result_started).count();
   }
   if (cfg.profile_json) {
+    json root_stats = json_from_py(tree.root_action_stats());
     response["_profile"] = {
         {"elapsed_sec", search_elapsed},
         {"simulations", expanded},
@@ -729,6 +730,7 @@ json choose_action_with_native_tree(const json& message, const CliConfig& cfg, s
         {"avg_selected_depth", completed_paths > 0 ? static_cast<double>(depth_sum) / completed_paths : 0.0},
         {"avg_turn_depth", completed_paths > 0 ? static_cast<double>(turn_depth_sum) / completed_paths : 0.0},
         {"node_count", tree.node_count()},
+        {"root_action_stats", root_stats},
         {"timing_ms", timing_ms},
     };
   }

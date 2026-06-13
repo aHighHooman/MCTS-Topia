@@ -6,12 +6,14 @@ import json
 import time
 from pathlib import Path
 
+from profiling.config import load_config_defaults
 from profiling.analysis.distributions import jaccard, js_bits, normalize
 from profiling.analysis.payload_store import load_payload
 from profiling.analysis.position_analyzer import analyze_position, parse_target
 from profiling.analysis.report_html import write_report
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_CONFIG = PROJECT_ROOT / "py" / "profiling" / "configs" / "overlay_match.json"
 
 
 def _payload_by_hash(digest: str) -> dict | None:
@@ -52,6 +54,9 @@ def run(args: argparse.Namespace) -> Path:
                     top_k_actions=args.top_k_actions,
                     max_actions=args.max_actions,
                     seed=args.seed,
+                    native_static_exe=getattr(args, "native_static_exe", PROJECT_ROOT / "out" / "native" / "native_static_mcts_bot.exe"),
+                    build_native_static_exe=bool(getattr(args, "build_native_static_exe", True)),
+                    native_static_search_mode=str(getattr(args, "native_static_search_mode", "primitive")),
                 ).__dict__
                 cache[key]["actions"] = [action.__dict__ for action in cache[key]["actions"]]
             analyses.append(cache[key])
@@ -89,18 +94,25 @@ def run(args: argparse.Namespace) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Overlay target analyses onto a recorded match timeline.")
-    parser.add_argument("--match-dir", type=Path, required=True)
-    parser.add_argument("--target", action="append", required=True)
+    parser.add_argument("--match-dir", type=Path)
+    parser.add_argument("--target", action="append")
     parser.add_argument("--simulations", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--top-k-actions", type=int, default=0)
     parser.add_argument("--max-actions", type=int, default=512)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--native-static-exe", type=Path, default=PROJECT_ROOT / "out" / "native" / "native_static_mcts_bot.exe")
+    parser.add_argument("--build-native-static-exe", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--native-static-search-mode", choices=("primitive", "turn-cmab"), default="primitive")
     parser.add_argument("--output-dir", type=Path, default=None)
-    run(parser.parse_args())
+    args = load_config_defaults(parser, default_config=DEFAULT_CONFIG)
+    if args.match_dir is None:
+        raise RuntimeError("overlay_match requires match_dir in config or --match-dir")
+    if not args.target:
+        raise RuntimeError("overlay_match requires target list in config or --target")
+    run(args)
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

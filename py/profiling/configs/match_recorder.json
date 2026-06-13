@@ -1,0 +1,16 @@
+{
+  "seed": 0,
+  "branch0": "baseline",
+  "branch1": "experimental",
+  "seats": "both",
+  "payload_dir": "debug-logs/mcts-profile-payloads",
+  "simulations": 512,
+  "batch_size": 64,
+  "top_k_actions": 0,
+  "max_actions": 512,
+  "native_static_exe": "out/native/native_static_mcts_bot.exe",
+  "build_native_static_exe": true,
+  "native_static_search_mode": "primitive",
+  "match_id": "",
+  "output_dir": "debug-logs/analysis/matches"
+}

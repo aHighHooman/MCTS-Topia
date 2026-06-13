@@ -8,6 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from profiling.config import load_config_defaults
 from profiling.analysis.actions import top_mass_keys
 from profiling.analysis.distributions import jaccard, js_bits, normalize, top_overlap
 from profiling.analysis.payload_store import load_payload, store_payload
@@ -16,6 +17,7 @@ from profiling.analysis.report_html import write_report
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT = PROJECT_ROOT / "debug-logs" / "analysis" / "branch-compare"
+DEFAULT_CONFIG = PROJECT_ROOT / "py" / "profiling" / "configs" / "compare_branches.json"
 
 
 def _repo_relative(path: Path) -> Path:
@@ -109,6 +111,9 @@ def run(args: argparse.Namespace) -> Path:
                     max_actions=args.max_actions,
                     seed=args.seed,
                     c_puct=args.c_puct,
+                    native_static_exe=getattr(args, "native_static_exe", PROJECT_ROOT / "out" / "native" / "native_static_mcts_bot.exe"),
+                    build_native_static_exe=bool(getattr(args, "build_native_static_exe", True)),
+                    native_static_search_mode=str(getattr(args, "native_static_search_mode", "primitive")),
                 )
                 row = asdict(position)
                 positions.append(row)
@@ -181,7 +186,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Compare root action distributions across static-eval targets.")
     parser.add_argument("--payload", action="append", default=[])
     parser.add_argument("--payload-dir", type=Path, default=PROJECT_ROOT / "debug-logs" / "mcts-profile-payloads")
-    parser.add_argument("--target", action="append", required=True)
+    parser.add_argument("--target", action="append")
     parser.add_argument("--positions", type=int, default=None)
     parser.add_argument("--simulations", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -189,9 +194,17 @@ def main() -> int:
     parser.add_argument("--max-actions", type=int, default=512)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--c-puct", type=float, default=1.5)
+    parser.add_argument("--native-static-exe", type=Path, default=PROJECT_ROOT / "out" / "native" / "native_static_mcts_bot.exe")
+    parser.add_argument("--build-native-static-exe", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--native-static-search-mode", choices=("primitive", "turn-cmab"), default="primitive")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
-    run(parser.parse_args())
+    args = load_config_defaults(parser, default_config=DEFAULT_CONFIG)
+    if args.payload is None:
+        args.payload = []
+    if not args.target:
+        raise RuntimeError("compare_branches requires target list in config or --target")
+    run(args)
     return 0
 
 

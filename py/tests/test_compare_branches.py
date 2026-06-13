@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from profiling.analysis import compare_branches as cb
+from profiling.analysis import position_analyzer as pa
 from profiling.analysis.schema import ActionAnalysis, PositionAnalysis
 
 
@@ -26,7 +27,7 @@ def test_compare_branches_resolves_payload_dir_from_repo_root(monkeypatch, tmp_p
 
     calls: list[tuple[str, str]] = []
 
-    def analyze(payload, *, payload_hash, label, target, simulations, batch_size, top_k_actions, max_actions, seed, c_puct):
+    def analyze(payload, *, payload_hash, label, target, simulations, batch_size, top_k_actions, max_actions, seed, c_puct, **kwargs):
         calls.append((label, str(target["name"])))
         return PositionAnalysis(
             analysis_version=1,
@@ -108,5 +109,86 @@ def test_compare_branches_fails_when_payload_dir_is_empty(monkeypatch, tmp_path)
                 max_actions=512,
                 seed=0,
                 c_puct=1.5,
+                native_static_exe=repo_root / "out" / "native" / "native_static_mcts_bot.exe",
+                build_native_static_exe=True,
+                native_static_search_mode="primitive",
             )
         )
+
+
+def test_parse_target_branch_aliases_route_to_native_static_exe() -> None:
+    assert pa.parse_target("baseline") == {
+        "name": "baseline",
+        "variant": "baseline",
+        "mcts_impl": "native_static_exe",
+    }
+    assert pa.parse_target("experimental") == {
+        "name": "experimental",
+        "variant": "experimental",
+        "mcts_impl": "native_static_exe",
+    }
+    assert pa.parse_target("static-baseline:variant=baseline") == {
+        "name": "static-baseline",
+        "variant": "baseline",
+        "mcts_impl": "native_static_exe",
+    }
+
+
+def test_analyze_position_native_static_exe_maps_profile_stats(monkeypatch, tmp_path) -> None:
+    payload = {
+        "player_id": 0,
+        "observation": {"board": {"size": 2}, "tick": 0},
+        "actions": [{"id": "a", "type": "END_TURN"}, {"id": "b", "type": "MOVE", "x": 1, "y": 0}],
+    }
+    exe = tmp_path / "native_static_mcts_bot.exe"
+    exe.write_text("", encoding="utf-8")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "actionId": "b",
+                    "rankedActionIds": ["b", "a"],
+                    "_profile": {
+                        "root_action_stats": [
+                            {"action_id": "a", "visits": 1, "visit_share": 0.25, "value_sum": 0.1, "q_mean": 0.1},
+                            {"action_id": "b", "visits": 3, "visit_share": 0.75, "value_sum": 1.2, "q_mean": 0.4},
+                        ]
+                    },
+                }
+            )
+            + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(pa.subprocess, "run", fake_run)
+    monkeypatch.setattr(pa, "_evaluate_static_messages", lambda messages, max_actions: [SimpleNamespace(priors=[0.2, 0.8], value=0.5)])
+
+    row = pa.analyze_position(
+        payload,
+        payload_hash="hash",
+        label="case",
+        target=pa.parse_target("baseline"),
+        simulations=4,
+        batch_size=2,
+        top_k_actions=0,
+        max_actions=512,
+        seed=7,
+        include_breakdown=False,
+        native_static_exe=exe,
+        build_native_static_exe=False,
+    )
+
+    assert calls
+    assert "--static-eval-variant" in calls[0]
+    assert calls[0][calls[0].index("--static-eval-variant") + 1] == "baseline"
+    assert row.mcts_impl == "native_static_exe"
+    assert row.selected_action_id == "b"
+    assert row.root_value == 0.5
+    by_id = {action.action_id: action for action in row.actions}
+    assert by_id["b"].visits == 3
+    assert by_id["b"].visit_share == 0.75
+    assert by_id["b"].q_mean == 0.4

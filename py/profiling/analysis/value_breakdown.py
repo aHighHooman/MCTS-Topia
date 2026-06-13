@@ -7,12 +7,14 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from profiling.config import load_config_defaults
 from profiling.analysis.payload_store import load_payload, store_payload
 from profiling.analysis.position_analyzer import analyze_position, parse_target
 from profiling.analysis.report_html import write_report
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT = PROJECT_ROOT / "debug-logs" / "analysis" / "value-breakdown"
+DEFAULT_CONFIG = PROJECT_ROOT / "py" / "profiling" / "configs" / "value_breakdown.json"
 
 
 def _repo_relative(path: Path) -> Path:
@@ -55,6 +57,9 @@ def run(args: argparse.Namespace) -> Path:
             seed=args.seed,
             c_puct=args.c_puct,
             include_breakdown=True,
+            native_static_exe=getattr(args, "native_static_exe", PROJECT_ROOT / "out" / "native" / "native_static_mcts_bot.exe"),
+            build_native_static_exe=bool(getattr(args, "build_native_static_exe", True)),
+            native_static_search_mode=str(getattr(args, "native_static_search_mode", "primitive")),
         )
         row = asdict(position)
         positions.append(row)
@@ -89,7 +94,7 @@ def run(args: argparse.Namespace) -> Path:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Report native static-eval value term breakdowns.")
     parser.add_argument("--payload-dir", type=Path, default=PROJECT_ROOT / "debug-logs" / "mcts-profile-payloads")
-    parser.add_argument("--target", required=True)
+    parser.add_argument("--target")
     parser.add_argument("--positions", type=int, default=100)
     parser.add_argument("--simulations", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -97,12 +102,17 @@ def main() -> int:
     parser.add_argument("--max-actions", type=int, default=512)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--c-puct", type=float, default=1.5)
+    parser.add_argument("--native-static-exe", type=Path, default=PROJECT_ROOT / "out" / "native" / "native_static_mcts_bot.exe")
+    parser.add_argument("--build-native-static-exe", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--native-static-search-mode", choices=("primitive", "turn-cmab"), default="primitive")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
-    run(parser.parse_args())
+    args = load_config_defaults(parser, default_config=DEFAULT_CONFIG)
+    if not args.target:
+        raise RuntimeError("value_breakdown requires target in config or --target")
+    run(args)
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
