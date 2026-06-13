@@ -1,11 +1,10 @@
 # AGENTS.md
 ## Project Shape
 
-- Mixed Java/Python workspace for external bots, RL self-play, NN training, profiling, and native/static/hybrid MCTS.
-- This repo does not own the Java game rules source. Use `C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes` as the authoritative external game repo.
-- Java sources come from `$TRIBES_GAME_ROOT\src`; default game root is `C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes`.
+- Workspace RL self-play, NN training, profiling, and native/static/hybrid MCTS.
+- `C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\TribesTopia\Tribes` is the authoritative external game repo.
 - Python code lives under `py/bots`, `py/nn`, `py/search`, `py/training`, and `py/profiling`.
-- Work from the repo root: `C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\Tribes_MCTS`.
+- Run commands from the repo root: `C:\Users\Umair\OneDrive\Desktop\Work\Self_Projects\Tribes_MCTS`.
 
 ## Setup Gotchas
 
@@ -17,7 +16,6 @@
 - Generated/local dirs are ignored: `out/`, `save/`, `logs/`, `debug-logs/`, `tmp/`, `rl/`, `.pytest_cache/`, and native build/debug caches.
 
 ## Build And Test Commands
-
 Compile Java from the external game checkout into `out/`:
 
 ```powershell
@@ -27,7 +25,6 @@ Compile Java from the external game checkout into `out/`:
 Run core checks:
 
 ```powershell
-& "$env:JAVA_HOME\bin\java.exe" -cp "out;lib/json.jar" core.game.RegressionHarness
 $env:PYTHONPATH = "$PWD\py"
 python -m pytest py/tests
 ```
@@ -54,17 +51,16 @@ python -m training.checkpoint_tournament
 ## Native MCTS Notes
 
 - Native extension sources are in `py/search/native/`; `load_native_mcts_extension()` auto-builds with PyTorch C++ extension tooling.
-- Main native files: `native_rules.cpp`, `native_static_eval.cpp`, `native_mcts.cpp`, `static_mcts.py`, `hybrid_mcts.py`.
+- Shared native C++ files live in `py/search/native/src/`: `native_rules.cpp`, `native_static_eval.cpp`, `native_mcts.cpp`.
+- The standalone full static-eval protocol bot lives in `py/search/native/bot/native_static_mcts_bot.cpp`; build it with `scripts/build_native_static_bot.ps1`.
 - Parity/debug entrypoint: `python -m search.native.parity_runner --fixture debug-logs\some-fixture\game.json --depth 1`.
 - Java parity oracle: `py/search/native/java/core/game/NativeParityOracle.java`.
 
 ## Important Files
 
 - `docs/external-bot-protocol.md`: JSON stdin/stdout protocol and forward-model command loop.
-- External Java: `src/core/game/RegressionHarness.java`, `src/HeadlessPlay.java`, `src/Tournament.java`.
 - `play.json`: default single-game config.
 - `tournament.json`: default tournament config.
-- `tournament_static_eval_ab*.json`, `tournament_static_mcts_iterations.json`: static eval/MCTS tournament configs.
 - `py/profiling/`: MCTS profiler implementations and configs.
 - `py/training/config.py`: training, replay, diagnostics, and Java self-play defaults.
 - `py/search/config.py`: search/model defaults used by bots and training.
