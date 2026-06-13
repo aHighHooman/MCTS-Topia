@@ -96,7 +96,6 @@ def run_selfplay_match(
         "Tribes": list(tribes),
         "Verbose": False,
         "Rollouts": config.selfplay.rollouts,
-        "Search Depth": config.selfplay.search_depth,
         "Force End": config.selfplay.force_end,
         "Population Size": config.selfplay.population_size,
         "Progressive Bias": config.selfplay.progressive_bias,

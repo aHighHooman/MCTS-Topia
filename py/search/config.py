@@ -49,7 +49,6 @@ class ModelConfig:
 class SearchConfig:
     num_simulations: int = 64
     batch_size: int = 64
-    max_depth: int = 0
     c_puct: float = 1.5
     dirichlet_alpha: float = 0.15
     dirichlet_epsilon: float = 0.2

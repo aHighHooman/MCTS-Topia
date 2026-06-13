@@ -40,7 +40,6 @@ def _load_checkpoint(model: HybridPolicyValueNet, checkpoint_path: Path) -> None
 def _configure(args: argparse.Namespace) -> HybridAgentConfig:
     cfg = HybridAgentConfig()
     cfg.search.num_simulations = int(args.simulations)
-    cfg.search.max_depth = int(args.max_depth)
     cfg.search.top_k_actions = int(args.top_k_actions)
     cfg.search.batch_size = int(args.search_batch_size)
     cfg.search.static_policy_weight = max(0.0, min(1.0, float(getattr(args, "static_policy_weight", 0.0) or 0.0)))
@@ -151,7 +150,6 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--replay-dir", type=Path, required=True)
     parser.add_argument("--simulations", type=int, required=True)
-    parser.add_argument("--max-depth", type=int, required=True)
     parser.add_argument("--top-k-actions", type=int, required=True)
     parser.add_argument("--search-batch-size", type=int, required=True)
     parser.add_argument("--static-policy-weight", type=float, default=0.0)

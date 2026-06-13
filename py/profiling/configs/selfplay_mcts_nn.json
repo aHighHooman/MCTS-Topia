@@ -10,7 +10,6 @@
   "map_size": "Small",
   "simulations": 256,
   "search_batch_size": 64,
-  "max_depth": 0,
   "top_k_actions": 64,
   "max_turns_capitals": 20,
   "max_actions_per_turn": 80,

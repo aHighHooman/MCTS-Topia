@@ -16,6 +16,7 @@ from .mcts import (
     _SearchTelemetry,
     _apply_end_turn_visit_guard,
     _native_call,
+    _root_action_stats,
 )
 
 
@@ -217,7 +218,6 @@ def run_native_static_mcts(
         bool(getattr(search_cfg, "use_progressive_widening", True)),
     )
     tree.add_root_dirichlet_noise(float(search_cfg.dirichlet_alpha), float(search_cfg.dirichlet_epsilon))
-    max_depth = -1 if int(search_cfg.max_depth) <= 0 else int(search_cfg.max_depth)
     wall_time_budget = 0.0 if wall_time_seconds is None else max(0.0, float(wall_time_seconds))
     deadline = time.perf_counter() + wall_time_budget if wall_time_budget > 0.0 else None
     simulation_budget = max(0, int(search_cfg.num_simulations))
@@ -238,7 +238,6 @@ def run_native_static_mcts(
             expanded_count, completed_frontier = _native_call(
                 native_static_batch,
                 int(frontier),
-                int(max_depth),
                 float(search_cfg.c_puct),
             )
             selected_paths += int(completed_frontier)
@@ -255,9 +254,9 @@ def run_native_static_mcts(
         evals_only_batches = getattr(tree, "select_leaf_batches_evals_only", None)
         completed_frontier = frontier
         if evals_only_batches is not None:
-            raw_selections, completed_frontier = _native_call(evals_only_batches, frontier, 1, max_depth, float(search_cfg.c_puct))
+            raw_selections, completed_frontier = _native_call(evals_only_batches, frontier, 1, float(search_cfg.c_puct))
         else:
-            raw_selections = _native_call(tree.select_leaf_batch_evals_only, frontier, max_depth, float(search_cfg.c_puct))
+            raw_selections = _native_call(tree.select_leaf_batch_evals_only, frontier, float(search_cfg.c_puct))
 
         for raw_selection in raw_selections:
             if len(raw_selection) == 7:
@@ -360,4 +359,5 @@ def run_native_static_mcts(
         visit_distribution=visit_distribution,
         visit_target=visit_target,
         value=float(root_value),
+        root_stats=_root_action_stats(tree),
     )

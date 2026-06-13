@@ -1053,7 +1053,6 @@ def _run_native_mcts_walltime(
     tree.add_root_dirichlet_noise(float(search_cfg.dirichlet_alpha), float(search_cfg.dirichlet_epsilon))
 
     stats = SearchStats(mode, 0.0, expanded_nodes=0)
-    max_depth = -1 if int(search_cfg.max_depth) <= 0 else int(search_cfg.max_depth)
     batch_size = max(1, int(search_cfg.batch_size))
     reserve_tree_capacity = getattr(tree, "reserve_tree_capacity", None)
     if reserve_tree_capacity is not None:
@@ -1080,10 +1079,10 @@ def _run_native_mcts_walltime(
         completed_frontier = frontier
         if evals_only_batches is not None:
             max_batches = 128 if remaining_nodes is None else 1
-            raw_selections, completed_frontier = evals_only_batches(frontier, max_batches, max_depth, float(search_cfg.c_puct))
+            raw_selections, completed_frontier = evals_only_batches(frontier, max_batches, float(search_cfg.c_puct))
         else:
             select_leaf_batch = evals_only_batch or getattr(tree, "select_leaf_batch_compact", tree.select_leaf_batch)
-            raw_selections = select_leaf_batch(frontier, max_depth, float(search_cfg.c_puct))
+            raw_selections = select_leaf_batch(frontier, float(search_cfg.c_puct))
         for raw_selection in raw_selections:
             if evals_only_batch is not None:
                 if len(raw_selection) == 7:
@@ -1894,8 +1893,6 @@ def _native_static_exe_command(exe: Path, cfg: HybridAgentConfig, args: argparse
         str(exe),
         "--simulations",
         str(int(cfg.search.num_simulations)),
-        "--max-depth",
-        str(int(cfg.search.max_depth)),
         "--top-k-actions",
         str(int(cfg.search.top_k_actions)),
         "--max-actions",

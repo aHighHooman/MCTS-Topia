@@ -21,7 +21,6 @@ from search.native.mcts import NativeSearchParityError
 def _configure(args: argparse.Namespace) -> HybridAgentConfig:
     cfg = HybridAgentConfig()
     cfg.search.num_simulations = int(args.simulations)
-    cfg.search.max_depth = int(args.max_depth)
     cfg.search.top_k_actions = int(args.top_k_actions)
     cfg.search.batch_size = int(args.search_batch_size)
     cfg.search.seed = int(args.seed)
@@ -75,7 +74,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Protocol-facing native static-eval MCTS bot for Tribes.")
     parser.add_argument("--simulations", type=int, default=64)
     parser.add_argument("--wall-clock-per-action-seconds", type=float, default=None)
-    parser.add_argument("--max-depth", type=int, default=0)
     parser.add_argument("--top-k-actions", type=int, default=64)
     parser.add_argument("--max-actions", type=int, default=512, help="Maximum actions to parse/search; use -1 for no cap.")
     parser.add_argument("--search-batch-size", type=int, default=64)

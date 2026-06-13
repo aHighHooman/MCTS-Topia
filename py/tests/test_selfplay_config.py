@@ -56,7 +56,6 @@ class SelfPlayConfigTest(unittest.TestCase):
             (),
             {
                 "simulations": 64,
-                "max_depth": 0,
                 "top_k_actions": 32,
                 "search_batch_size": 16,
                 "static_policy_weight": 0.25,
@@ -79,7 +78,6 @@ class SelfPlayConfigTest(unittest.TestCase):
             (),
             {
                 "simulations": 64,
-                "max_depth": 0,
                 "top_k_actions": 32,
                 "search_batch_size": 16,
                 "max_game_actions": 512,

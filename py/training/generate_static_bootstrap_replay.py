@@ -64,8 +64,6 @@ def _static_bot_command(
         "--static-only-hybrid-nn",
         "--simulations",
         str(int(cfg.search.num_simulations)),
-        "--max-depth",
-        str(int(cfg.search.max_depth)),
         "--top-k-actions",
         str(int(cfg.search.top_k_actions)),
         "--search-batch-size",
@@ -324,7 +322,6 @@ def main() -> None:
     parser.add_argument("--static-eval-variant", choices=("baseline", "experimental"), default=None)
 
     parser.add_argument("--simulations", "--mcts-sims", dest="simulations", type=int, default=256)
-    parser.add_argument("--max-depth", type=int, default=0)
     parser.add_argument("--top-k-actions", type=int, default=64)
     parser.add_argument("--search-batch-size", type=int, default=64)
     parser.add_argument("--reuse-tree", action="store_true", help="Experimentally reuse/promote native MCTS subtrees during static bootstrap self-play.")
@@ -359,7 +356,6 @@ def main() -> None:
         cfg.replay.shard_prefix = args.shard_prefix
 
     cfg.search.num_simulations = int(args.simulations)
-    cfg.search.max_depth = int(args.max_depth)
     cfg.search.top_k_actions = int(args.top_k_actions)
     cfg.search.batch_size = int(args.search_batch_size)
     cfg.search.reuse_tree = bool(args.reuse_tree)

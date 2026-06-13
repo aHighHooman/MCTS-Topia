@@ -20,7 +20,6 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path, default=rl_path("checkpoints", "latest.pt"))
     parser.add_argument("--replay-dir", type=Path, default=rl_path("replay"))
     parser.add_argument("--simulations", type=int, default=None)
-    parser.add_argument("--max-depth", type=int, default=None)
     parser.add_argument("--top-k-actions", type=int, default=None)
     parser.add_argument("--search-batch-size", type=int, default=None)
     parser.add_argument("--static-policy-weight", type=float, default=None)
@@ -43,8 +42,6 @@ def main() -> None:
     cfg = HybridAgentConfig()
     if args.simulations is not None:
         cfg.search.num_simulations = args.simulations
-    if args.max_depth is not None:
-        cfg.search.max_depth = args.max_depth
     if args.top_k_actions is not None:
         cfg.search.top_k_actions = args.top_k_actions
     if args.search_batch_size is not None:

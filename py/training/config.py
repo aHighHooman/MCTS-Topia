@@ -67,7 +67,6 @@ class SelfPlayConfig:
     external_action_timeout_ms: int = 120_000
     external_shutdown_timeout_ms: int = 30_000
     wall_clock_per_action_seconds: Optional[float] = None
-    search_depth: int = 0
     force_end: bool = False
     rollouts: bool = False
     population_size: int = 1

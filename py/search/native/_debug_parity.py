@@ -21,7 +21,7 @@ for child in oracle["children"]:
         continue
     idx = child["action_index"]
     tree = ext.NativeMCTS(root, [idx], [1.0], 0.0, False, 7, 256)
-    sel = dict(tree.select_leaf(1, 1.0))
+    sel = dict(tree.select_leaf(1.0))
     cpp = normalize_message({"player_id": player_id, **dict(sel["leaf_payload"])})
     java = normalize_message({"player_id": player_id, **dict(child["state"])})
     print("java actions", len(java["actions"]), [a.get("type") for a in java["actions"]])

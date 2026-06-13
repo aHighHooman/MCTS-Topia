@@ -24,7 +24,6 @@ namespace {
 struct CliConfig {
   int simulations = 64;
   double wall_clock_seconds = 0.0;
-  int max_depth = 0;
   int top_k_actions = 64;
   int max_actions = 512;
   int batch_size = 64;
@@ -250,7 +249,6 @@ json choose_action_with_native_tree(const json& message, const CliConfig& cfg, s
   tree.add_root_dirichlet_noise(cfg.dirichlet_alpha, cfg.dirichlet_epsilon);
   tree.reserve_tree_capacity(std::max(2, cfg.simulations + 1));
 
-  const int max_depth = cfg.max_depth <= 0 ? -1 : cfg.max_depth;
   const auto started = std::chrono::steady_clock::now();
   int expanded = 0;
   int completed_paths = 0;
@@ -261,7 +259,7 @@ json choose_action_with_native_tree(const json& message, const CliConfig& cfg, s
   while ((cfg.wall_clock_seconds > 0.0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() < cfg.wall_clock_seconds) ||
          (cfg.wall_clock_seconds <= 0.0 && expanded < cfg.simulations)) {
     const int frontier = cfg.wall_clock_seconds > 0.0 ? std::max(1, cfg.batch_size) : std::min(std::max(1, cfg.batch_size), std::max(1, cfg.simulations - expanded));
-    py::tuple batch = tree.run_static_search_batch(frontier, max_depth, cfg.c_puct);
+    py::tuple batch = tree.run_static_search_batch(frontier, cfg.c_puct);
     const int expanded_count = py::cast<int>(batch[0]);
     const int completed = py::cast<int>(batch[1]);
     py::tuple batch_stats = tree.last_batch_stats();
@@ -331,7 +329,6 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
     };
     if (arg == "--simulations") cfg.simulations = std::stoi(next());
     else if (arg == "--wall-clock-per-action-seconds") cfg.wall_clock_seconds = std::stod(next());
-    else if (arg == "--max-depth") cfg.max_depth = std::stoi(next());
     else if (arg == "--top-k-actions") cfg.top_k_actions = std::stoi(next());
     else if (arg == "--max-actions") cfg.max_actions = std::stoi(next());
     else if (arg == "--search-batch-size") cfg.batch_size = std::stoi(next());
@@ -349,7 +346,7 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
     } else if (arg == "--help" || arg == "-h") {
       std::cout
           << "native_static_mcts_bot.exe [--simulations N] [--wall-clock-per-action-seconds SEC]\n"
-          << "  [--max-depth N] [--top-k-actions N] [--max-actions N] [--search-batch-size N]\n"
+          << "  [--top-k-actions N] [--max-actions N] [--search-batch-size N]\n"
           << "  [--static-eval-variant baseline|experimental] [--deterministic] [--reuse-tree] [--seed N]\n";
       std::exit(0);
     }

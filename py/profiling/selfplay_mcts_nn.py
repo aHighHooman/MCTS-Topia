@@ -45,7 +45,6 @@ SEARCH_PATTERN = re.compile(
     r"\[mcts_nn\.search_profile\]\s+mcts\s+"
     r"sims=(?P<sims>\d+)\s+"
     r"batch=(?P<batch>\d+)\s+"
-    r"max_depth=(?P<max_depth>-?\d+)\s+"
     r"(?:paths=(?P<paths>\d+)\s+)?"
     r"(?:nodes=(?P<nodes>\d+)\s+)?"
     r"eval_batches=(?P<eval_batches>\d+)\s+"
@@ -137,7 +136,6 @@ def _parse_profile(stderr: str) -> tuple[list[dict[str, Any]], list[dict[str, An
                     row[key] = int(value) if key in {
                         "sims",
                         "batch",
-                        "max_depth",
                         "paths",
                         "nodes",
                         "eval_batches",
@@ -183,8 +181,6 @@ def _bot_command(args: argparse.Namespace, cfg: HybridAgentConfig, workdir: Path
         str(cfg.replay.replay_dir),
         "--simulations",
         str(cfg.search.num_simulations),
-        "--max-depth",
-        str(cfg.search.max_depth),
         "--top-k-actions",
         str(cfg.search.top_k_actions),
         "--search-batch-size",
@@ -382,8 +378,6 @@ def _start_profiled_persistent_bot_server(
         str(replay_dir),
         "--simulations",
         str(cfg.search.num_simulations),
-        "--max-depth",
-        str(cfg.search.max_depth),
         "--top-k-actions",
         str(cfg.search.top_k_actions),
         "--search-batch-size",
@@ -432,7 +426,6 @@ def _configure(args: argparse.Namespace) -> HybridAgentConfig:
     cfg = HybridAgentConfig()
     cfg.search.num_simulations = int(args.simulations)
     cfg.search.batch_size = int(args.search_batch_size)
-    cfg.search.max_depth = int(args.max_depth)
     cfg.search.top_k_actions = int(args.top_k_actions)
     cfg.search.seed = int(args.seed_base)
     cfg.search.reuse_tree = bool(args.reuse_tree)
@@ -558,7 +551,6 @@ def main() -> int:
     parser.add_argument("--map-size", default="Small")
     parser.add_argument("--simulations", type=int, default=192)
     parser.add_argument("--search-batch-size", type=int, default=64)
-    parser.add_argument("--max-depth", type=int, default=0)
     parser.add_argument("--top-k-actions", type=int, default=64)
     parser.add_argument("--max-turns-capitals", type=int, default=20)
     parser.add_argument("--max-actions-per-turn", type=int, default=80)

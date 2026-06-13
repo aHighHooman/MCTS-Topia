@@ -547,7 +547,7 @@ def _check_child(
                 int(args.seed),
                 int(args.max_actions),
             )
-            selection = dict(tree.select_leaf(1, 1.0))
+            selection = dict(tree.select_leaf(1.0))
             cpp_payload = dict(selection.get("leaf_payload") or {})
             java_canonical = _canonical_state(dict(child["state"]), player_id)
             cpp_canonical = _canonical_state(cpp_payload, player_id)

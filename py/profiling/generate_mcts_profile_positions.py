@@ -190,7 +190,6 @@ def main() -> int:
     parser.add_argument("--player-slot", type=int, required=True)
     parser.add_argument("--simulations", type=int, default=64)
     parser.add_argument("--wall-clock-per-action-seconds", type=float, default=None)
-    parser.add_argument("--max-depth", type=int, default=0)
     parser.add_argument("--top-k-actions", type=int, default=64)
     parser.add_argument("--max-actions", type=int, default=512)
     parser.add_argument("--search-batch-size", type=int, default=64)
@@ -507,8 +506,6 @@ def _capture_game(args: argparse.Namespace, *, game_index: int, seed: int) -> li
             str(player_slot),
             "--simulations",
             str(args.bot_simulations),
-            "--max-depth",
-            str(args.bot_max_depth),
             "--top-k-actions",
             str(args.bot_top_k_actions),
             "--max-actions",
@@ -617,7 +614,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout-sec", type=int, default=1800)
     parser.add_argument("--bot-simulations", type=int, default=64)
     parser.add_argument("--bot-wall-time-sec", type=float, default=None)
-    parser.add_argument("--bot-max-depth", type=int, default=1)
     parser.add_argument("--bot-top-k-actions", type=int, default=64)
     parser.add_argument("--bot-max-actions", type=int, default=512)
     parser.add_argument("--bot-batch-size", type=int, default=64)

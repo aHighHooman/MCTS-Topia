@@ -72,8 +72,6 @@ def _bot_command(
         str(replay_dir),
         "--simulations",
         str(cfg.search.num_simulations),
-        "--max-depth",
-        str(cfg.search.max_depth),
         "--top-k-actions",
         str(cfg.search.top_k_actions),
         "--search-batch-size",
@@ -185,7 +183,6 @@ def run_tournament(args: argparse.Namespace) -> tuple[Path, Path, dict[str, floa
     cfg.training.output_dir = args.output_dir
     cfg.search.num_simulations = args.simulations
     cfg.search.batch_size = args.search_batch_size
-    cfg.search.max_depth = args.max_depth
     cfg.search.top_k_actions = args.top_k_actions
     cfg.selfplay.max_turns_capitals = args.max_turns_capitals
     cfg.selfplay.max_actions_per_turn = args.max_actions_per_turn
@@ -290,7 +287,6 @@ def main() -> None:
     parser.add_argument("--csv", type=Path, default=None)
     parser.add_argument("--simulations", type=int, default=64)
     parser.add_argument("--search-batch-size", type=int, default=32)
-    parser.add_argument("--max-depth", type=int, default=20)
     parser.add_argument("--top-k-actions", type=int, default=32)
     parser.add_argument("--max-turns-capitals", type=int, default=80)
     parser.add_argument("--max-actions-per-turn", type=int, default=80)

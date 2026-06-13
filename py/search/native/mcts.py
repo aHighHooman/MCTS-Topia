@@ -450,7 +450,6 @@ def _run_native_tree_search(
     evaluate_fn: Any = None,
 ) -> _TreeSearchResult:
     evaluate_fn = evaluate_fn or _evaluate_messages
-    max_depth = -1 if int(search_cfg.max_depth) <= 0 else int(search_cfg.max_depth)
     wall_time_budget = 0.0 if wall_time_seconds is None else max(0.0, float(wall_time_seconds))
     deadline = time.perf_counter() + wall_time_budget if wall_time_budget > 0.0 else None
     simulation_budget = max(0, int(search_cfg.num_simulations))
@@ -484,14 +483,14 @@ def _run_native_tree_search(
         evals_only_batches = getattr(tree, "select_leaf_batches_evals_only", None)
         completed_frontier = frontier
         if evals_only_batches is not None:
-            raw_selections, completed_frontier = _native_call(evals_only_batches, frontier, 1, max_depth, float(search_cfg.c_puct))
+            raw_selections, completed_frontier = _native_call(evals_only_batches, frontier, 1, float(search_cfg.c_puct))
             batch_stats = _native_call(tree.last_batch_stats)
             batch_depth_sum, batch_max_depth = batch_stats[:2]
             depth_sum += int(batch_depth_sum)
             max_selected_depth = max(max_selected_depth, int(batch_max_depth))
         else:
             select_leaf_batch = evals_only_batch or getattr(tree, "select_leaf_batch_compact", tree.select_leaf_batch)
-            raw_selections = _native_call(select_leaf_batch, frontier, max_depth, float(search_cfg.c_puct))
+            raw_selections = _native_call(select_leaf_batch, frontier, float(search_cfg.c_puct))
             if evals_only_batch is not None:
                 batch_stats = _native_call(tree.last_batch_stats)
                 batch_depth_sum, batch_max_depth = batch_stats[:2]
@@ -653,7 +652,7 @@ def _run_native_tree_search(
     root_visit_entropy = _visit_entropy_bits(visit_distribution)
     top_visit_share = max((float(share) for share in visit_distribution.values()), default=0.0)
     _profile_search_log(
-        f"mcts sims={int(search_cfg.num_simulations)} batch={batch_size} max_depth={max_depth} "
+        f"mcts sims={int(search_cfg.num_simulations)} batch={batch_size} "
         f"paths={selected_paths} nodes={expanded_nodes} eval_batches={eval_batches} eval_positions={eval_positions} "
         f"eval_cache_hits={eval_cache_hits} eval_cache_size={len(eval_cache)} "
         f"avg_depth={avg_depth:.3f} selected_max_depth={max_selected_depth} "
@@ -879,7 +878,7 @@ def run_native_mcts(
         visit_distribution = {only_action_id: 1.0}
         visit_target = [1.0 if candidate_id == only_action_id else 0.0 for candidate_id in root_action_ids]
         _profile_search_log(
-            f"mcts sims=0 batch={int(search_cfg.batch_size)} max_depth=0 "
+            f"mcts sims=0 batch={int(search_cfg.batch_size)} "
             f"paths=0 eval_batches=0 eval_positions=0 eval_cache_hits=0 eval_cache_size=0 "
             f"avg_depth=0.000 selected_max_depth=0 root_visit_entropy=0.000000 top_visit_share=1.000000 "
             f"select_ms=0.0 eval_ms=0.0 expand_ms=0.0 total_inner_ms=0.0 "
@@ -907,7 +906,6 @@ def run_native_mcts(
         bool(getattr(search_cfg, "use_progressive_widening", True)),
     )
     tree.add_root_dirichlet_noise(float(search_cfg.dirichlet_alpha), float(search_cfg.dirichlet_epsilon))
-    max_depth = -1 if int(search_cfg.max_depth) <= 0 else int(search_cfg.max_depth)
     wall_time_budget = 0.0 if wall_time_seconds is None else max(0.0, float(wall_time_seconds))
     deadline = time.perf_counter() + wall_time_budget if wall_time_budget > 0.0 else None
     simulation_budget = max(0, int(search_cfg.num_simulations))
@@ -943,14 +941,14 @@ def run_native_mcts(
         evals_only_batches = getattr(tree, "select_leaf_batches_evals_only", None)
         completed_frontier = frontier
         if evals_only_batches is not None:
-            raw_selections, completed_frontier = _native_call(evals_only_batches, frontier, 1, max_depth, float(search_cfg.c_puct))
+            raw_selections, completed_frontier = _native_call(evals_only_batches, frontier, 1, float(search_cfg.c_puct))
             batch_stats = _native_call(tree.last_batch_stats)
             batch_depth_sum, batch_max_depth = batch_stats[:2]
             depth_sum += int(batch_depth_sum)
             max_selected_depth = max(max_selected_depth, int(batch_max_depth))
         else:
             select_leaf_batch = evals_only_batch or getattr(tree, "select_leaf_batch_compact", tree.select_leaf_batch)
-            raw_selections = _native_call(select_leaf_batch, frontier, max_depth, float(search_cfg.c_puct))
+            raw_selections = _native_call(select_leaf_batch, frontier, float(search_cfg.c_puct))
             if evals_only_batch is not None:
                 batch_stats = _native_call(tree.last_batch_stats)
                 batch_depth_sum, batch_max_depth = batch_stats[:2]
@@ -1144,7 +1142,7 @@ def run_native_mcts(
     root_visit_entropy = _visit_entropy_bits(visit_distribution)
     top_visit_share = max((float(share) for share in visit_distribution.values()), default=0.0)
     _profile_search_log(
-        f"mcts sims={int(search_cfg.num_simulations)} batch={batch_size} max_depth={max_depth} "
+        f"mcts sims={int(search_cfg.num_simulations)} batch={batch_size} "
         f"paths={selected_paths} nodes={expanded_nodes} eval_batches={eval_batches} eval_positions={eval_positions} "
         f"eval_cache_hits={eval_cache_hits} eval_cache_size={len(eval_cache)} "
         f"avg_depth={avg_depth:.3f} selected_max_depth={max_selected_depth} "

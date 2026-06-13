@@ -785,7 +785,7 @@ class NativeMCTSTest(unittest.TestCase):
         tree = extension.NativeMCTS(message, [1, 2], [0.75, 0.25], 0.1, False, 7, 64)
 
         with self.assertRaisesRegex(RuntimeError, "unsupported_or_failed_transition:SPAWN"):
-            tree.select_leaf(4, 1.5)
+            tree.select_leaf(1.5)
 
     def test_native_spawn_cloak_uses_authoritative_stats(self) -> None:
         extension = load_native_mcts_extension()
@@ -797,7 +797,7 @@ class NativeMCTSTest(unittest.TestCase):
         ]
         tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         leaf_payload = dict(selection["leaf_payload"])
         unit = next(unit for unit in leaf_payload["observation"]["units"] if unit["type"] == "CLOAK")
 
@@ -816,7 +816,7 @@ class NativeMCTSTest(unittest.TestCase):
         )
         tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         leaf_payload = dict(selection["leaf_payload"])
         tribe = next(item for item in leaf_payload["observation"]["tribes"] if item["id"] == 0)
 
@@ -836,7 +836,7 @@ class NativeMCTSTest(unittest.TestCase):
         )
         tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         leaf_payload = dict(selection["leaf_payload"])
         tribe = next(item for item in leaf_payload["observation"]["tribes"] if item["id"] == 0)
 
@@ -862,7 +862,7 @@ class NativeMCTSTest(unittest.TestCase):
         tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
 
         with self.assertRaisesRegex(RuntimeError, "unsupported_or_failed_transition:BOGUS"):
-            tree.select_leaf(4, 1.5)
+            tree.select_leaf(1.5)
 
     def test_strict_native_tree_rejects_invalid_root_action_index(self) -> None:
         extension = load_native_mcts_extension()
@@ -886,7 +886,7 @@ class NativeMCTSTest(unittest.TestCase):
                     64,
                 )
 
-                selection = dict(tree.select_leaf(4, 1.5))
+                selection = dict(tree.select_leaf(1.5))
 
                 self.assertTrue(selection["needs_expansion"])
                 self.assertTrue(selection["leaf_terminal"])
@@ -910,7 +910,7 @@ class NativeMCTSTest(unittest.TestCase):
             64,
         )
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
 
         self.assertTrue(selection["needs_expansion"])
         self.assertTrue(selection["leaf_terminal"])
@@ -934,7 +934,7 @@ class NativeMCTSTest(unittest.TestCase):
             64,
         )
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         leaf_payload = dict(selection["leaf_payload"])
 
         self.assertFalse(selection["leaf_terminal"])
@@ -955,9 +955,9 @@ class NativeMCTSTest(unittest.TestCase):
         )
         tree = extension.NativeMCTS(message, [0, 1], [0.95, 0.05], 0.0, False, 7, 64)
 
-        batch = tree.select_leaf_batch_evals_only(1, 4, 1.5)
+        batch = tree.select_leaf_batch_evals_only(1, 1.5)
         self.assertEqual(len(batch), 0)
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
 
         self.assertEqual(selection["path_action_indexes"], [1])
 
@@ -966,7 +966,7 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertIsNotNone(extension)
         tree = extension.NativeMCTS(_message_with_unit_move(), [0, 1], [1.0, 0.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
 
         self.assertTrue(selection["needs_expansion"])
         self.assertFalse(selection["leaf_terminal"])
@@ -985,7 +985,7 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertIsNotNone(extension)
         tree = extension.NativeMCTS(_message_with_unit_move(), [0, 1], [1.0, 0.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         leaf_payload = dict(selection["leaf_payload"])
         child_id = tree.expand(
             selection["parent_node_id"],
@@ -1034,7 +1034,7 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertIsNotNone(extension)
         tree = extension.NativeMCTS(_message_with_end_turn(), [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         self.assertTrue(selection["needs_expansion"])
         self.assertFalse(selection["leaf_terminal"])
         leaf_payload = dict(selection["leaf_payload"])
@@ -1046,21 +1046,21 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertIsNotNone(extension)
         first_tree = extension.NativeMCTS(_message_with_end_turn(), [0], [1.0], 0.1, False, 7, 64)
         
-        selection = dict(first_tree.select_leaf(4, 1.5))
+        selection = dict(first_tree.select_leaf(1.5))
         self.assertTrue(selection["needs_expansion"])
         leaf_payload = dict(selection["leaf_payload"])
         self.assertEqual(leaf_payload["active_player_id"], 1)
         
         first_tree.expand(selection["parent_node_id"], selection["parent_action_index"], [1.0], 0.0, False)
         
-        selection = dict(first_tree.select_leaf(4, 1.5))
+        selection = dict(first_tree.select_leaf(1.5))
         self.assertTrue(selection["needs_expansion"])
         leaf_payload = dict(selection["leaf_payload"])
         self.assertEqual(leaf_payload["active_player_id"], 2)
         
         first_tree.expand(selection["parent_node_id"], selection["parent_action_index"], [1.0], 0.0, False)
         
-        selection = dict(first_tree.select_leaf(4, 1.5))
+        selection = dict(first_tree.select_leaf(1.5))
         self.assertTrue(selection["needs_expansion"])
         leaf_payload = dict(selection["leaf_payload"])
         self.assertEqual(leaf_payload["active_player_id"], 0)
@@ -1089,7 +1089,7 @@ class NativeMCTSTest(unittest.TestCase):
         message["actions"] = [{"id": "attack", "type": "ATTACK", "unit_id": 1, "target_unit_id": 2, "tu": 2}]
         tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         leaf_payload = dict(selection["leaf_payload"])
 
         self.assertFalse(selection["leaf_terminal"])
@@ -1120,7 +1120,7 @@ class NativeMCTSTest(unittest.TestCase):
         message["actions"] = [{"id": "attack", "type": "ATTACK", "unit_id": 1, "u": 1, "target_unit_id": 2, "tu": 2}]
         tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         leaf_payload = dict(selection["leaf_payload"])
         target = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 2)
 
@@ -1152,7 +1152,7 @@ class NativeMCTSTest(unittest.TestCase):
         message["actions"] = [{"id": "attack", "type": "ATTACK", "unit_id": 1, "u": 1, "target_unit_id": 2, "tu": 2}]
         tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         leaf_payload = dict(selection["leaf_payload"])
         target = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 2)
 
@@ -1171,7 +1171,7 @@ class NativeMCTSTest(unittest.TestCase):
         message["actions"] = [{"id": "attack", "type": "ATTACK", "unit_id": 1, "u": 1, "target_unit_id": 2, "tu": 2}]
         tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         leaf_payload = dict(selection["leaf_payload"])
         target = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 2)
 
@@ -1190,7 +1190,7 @@ class NativeMCTSTest(unittest.TestCase):
         message["actions"] = [{"id": "attack", "type": "ATTACK", "unit_id": 1, "u": 1, "target_unit_id": 2, "tu": 2}]
         tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         leaf_payload = dict(selection["leaf_payload"])
         target = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 2)
 
@@ -1217,7 +1217,7 @@ class NativeMCTSTest(unittest.TestCase):
         message["actions"] = [{"id": "attack", "type": "ATTACK", "unit_id": 1, "u": 1, "target_unit_id": 2, "tu": 2}]
         tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         leaf_payload = dict(selection["leaf_payload"])
         splash_target = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 3)
 
@@ -1238,7 +1238,7 @@ class NativeMCTSTest(unittest.TestCase):
         message["actions"] = [{"id": "attack", "type": "ATTACK", "unit_id": 1, "u": 1, "target_unit_id": 2, "tu": 2}]
         tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         leaf_payload = dict(selection["leaf_payload"])
         attacker_tribe = next(tribe for tribe in leaf_payload["observation"]["tribes"] if tribe["id"] == 0)
 
@@ -1258,7 +1258,7 @@ class NativeMCTSTest(unittest.TestCase):
         message["actions"] = [{"id": "attack", "type": "ATTACK", "unit_id": 1, "u": 1, "target_unit_id": 2, "tu": 2}]
         tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         leaf_payload = dict(selection["leaf_payload"])
         knight = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 1)
 
@@ -1278,7 +1278,7 @@ class NativeMCTSTest(unittest.TestCase):
         message["actions"] = [{"id": "attack", "type": "ATTACK", "unit_id": 1, "u": 1, "target_unit_id": 2, "tu": 2}]
         tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         leaf_payload = dict(selection["leaf_payload"])
         defender = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 2)
         defender_tribe = next(tribe for tribe in leaf_payload["observation"]["tribes"] if tribe["id"] == 1)
@@ -1291,7 +1291,7 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertIsNotNone(extension)
         tree = extension.NativeMCTS(_message_with_infiltrate(), [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         leaf_payload = dict(selection["leaf_payload"])
 
         self.assertFalse(selection["leaf_terminal"])
@@ -1331,7 +1331,7 @@ class NativeMCTSTest(unittest.TestCase):
                     64,
                 )
 
-                selection = dict(tree.select_leaf(4, 1.5))
+                selection = dict(tree.select_leaf(1.5))
                 leaf_payload = dict(selection["leaf_payload"])
                 unit = next(unit for unit in leaf_payload["observation"]["units"] if unit["type"] == expected_type)
                 city = next(city for city in leaf_payload["observation"]["cities"] if city["id"] == 10)
@@ -1350,7 +1350,7 @@ class NativeMCTSTest(unittest.TestCase):
         message["actions"] = [{"id": "road", "type": "BUILD_ROAD", "tribe_id": 0, "p": 0, "x": 0, "y": 0}]
 
         tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         leaf_payload = dict(selection["leaf_payload"])
 
         self.assertIn("UPGRADE_RAMMER", [action["type"] for action in leaf_payload["actions"]])
@@ -1453,7 +1453,7 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertIsNotNone(extension)
         tree = extension.NativeMCTS(_message_with_end_turn(unit_owner=1), [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         self.assertTrue(selection["needs_expansion"])
         leaf_payload = dict(selection["leaf_payload"])
         self.assertEqual(leaf_payload["active_player_id"], 1)
@@ -1464,7 +1464,7 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertIsNotNone(extension)
         tree = extension.NativeMCTS(_message_with_end_turn(city_owner=1), [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         self.assertTrue(selection["needs_expansion"])
         leaf_payload = dict(selection["leaf_payload"])
         self.assertEqual(leaf_payload["active_player_id"], 1)
@@ -1475,7 +1475,7 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertIsNotNone(extension)
         tree = extension.NativeMCTS(_message_with_two_visible_enemies(), [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         self.assertTrue(selection["needs_expansion"])
         leaf_payload = dict(selection["leaf_payload"])
         self.assertEqual(leaf_payload["active_player_id"], 2)
@@ -1485,7 +1485,7 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertIsNotNone(extension)
         tree = extension.NativeMCTS(_message_with_end_turn(unit_owner=1), [0], [1.0], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf(4, 1.5))
+        selection = dict(tree.select_leaf(1.5))
         self.assertTrue(selection["needs_expansion"])
         leaf_payload = dict(selection["leaf_payload"])
         cfg = HybridAgentConfig()
@@ -1511,7 +1511,7 @@ class NativeMCTSTest(unittest.TestCase):
         message["actions"].append({"id": "road", "type": "BUILD_ROAD", "tribe_id": 0, "x": 0, "y": 0, "position": {"x": 0, "y": 0}})
         tree = extension.NativeMCTS(message, [0, 1], [0.5, 0.5], 0.1, False, 7, 64)
 
-        selection = dict(tree.select_leaf_batch(1, 4, 1.5)[0])
+        selection = dict(tree.select_leaf_batch(1, 1.5)[0])
         self.assertTrue(selection["needs_expansion"])
         leaf_payload = dict(selection["leaf_payload"])
         self.assertEqual(leaf_payload["active_player_id"], 1)
@@ -1847,7 +1847,7 @@ class NativeMCTSTest(unittest.TestCase):
             with self.subTest(action=message["actions"][0]):
                 tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
 
-                raw_selection = tree.select_leaf_batch_evals_only(1, 4, 1.0)[0]
+                raw_selection = tree.select_leaf_batch_evals_only(1, 1.0)[0]
                 leaf_payload = dict(raw_selection[-1])
                 cities = list(leaf_payload["observation"]["cities"])
 
@@ -1866,7 +1866,7 @@ class NativeMCTSTest(unittest.TestCase):
             with self.subTest(action_index=action_index):
                 tree = extension.NativeMCTS(_message_with_embassy_actions(), [0, 1], priors, 0.1, False, 7, 64)
 
-                raw_selection = tree.select_leaf_batch_evals_only(1, 4, 1.0)[0]
+                raw_selection = tree.select_leaf_batch_evals_only(1, 1.0)[0]
                 leaf_payload = dict(raw_selection[-1])
                 city = next(city for city in leaf_payload["observation"]["cities"] if city["id"] == target_city_id)
                 tribe = next(tribe for tribe in leaf_payload["observation"]["tribes"] if tribe["id"] == 0)
@@ -1885,14 +1885,14 @@ class NativeMCTSTest(unittest.TestCase):
         tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
 
         with self.assertRaisesRegex(RuntimeError, "unsupported_or_failed_transition:BUILD_EMBASSY"):
-            tree.select_leaf(4, 1.5)
+            tree.select_leaf(1.5)
 
     def test_native_tree_simulates_ruin_examine_without_parity_crash(self) -> None:
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)
         tree = extension.NativeMCTS(_message_with_village_and_ruin_choices(), [1], [1.0], 0.1, False, 7, 64)
 
-        raw_selection = tree.select_leaf_batch_evals_only(1, 4, 1.0)[0]
+        raw_selection = tree.select_leaf_batch_evals_only(1, 1.0)[0]
         leaf_payload = dict(raw_selection[-1])
         observation = leaf_payload["observation"]
         tribes = {tribe["id"]: tribe for tribe in observation["tribes"]}

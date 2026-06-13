@@ -180,7 +180,6 @@ The current v1 observation includes:
   "Tribes": ["Xin Xi", "Imperius"],
   "Verbose": false,
   "Rollouts": false,
-  "Search Depth": 20,
   "Force End": false,
   "Population Size": 1,
   "Progressive Bias": true,

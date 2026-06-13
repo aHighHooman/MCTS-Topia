@@ -182,7 +182,7 @@ class NativeMCTS {
     pending_selections_.reserve(std::max(pending_selections_.capacity(), target));
   }
 
-  py::dict select_leaf(int max_depth, double c_puct) {
+  py::dict select_leaf(double c_puct) {
     std::vector<int> path_node_ids;
     std::vector<int> path_action_indexes;
     path_node_ids.reserve(8);
@@ -195,9 +195,8 @@ class NativeMCTS {
     std::vector<int> leaf_action_indexes;
     bool leaf_terminal = nodes_[0].terminal;
     const NativeGameState* selected_pending_child_state = nullptr;
-    const bool unlimited_depth = max_depth <= 0;
 
-    for (int depth = 0; unlimited_depth || depth < max_depth; ++depth) {
+    while (true) {
       const Node& node = nodes_[current_node_id];
       const NativeGameState& state = states_[node.state_index];
       leaf_terminal = node.terminal || state.terminal;
@@ -274,7 +273,7 @@ class NativeMCTS {
     return out;
   }
 
-  py::list select_leaf_batch(int frontier, int max_depth, double c_puct) {
+  py::list select_leaf_batch(int frontier, double c_puct) {
     py::list out;
     if (frontier <= 0) {
       return out;
@@ -294,9 +293,8 @@ class NativeMCTS {
       bool leaf_value_root_perspective = states_[nodes_[0].state_index].terminal_value_known;
       const NativeGameState* selected_leaf_state = &states_[nodes_[0].state_index];
       const NativeGameState* selected_pending_child_state = nullptr;
-      const bool unlimited_depth = max_depth <= 0;
 
-      for (int depth = 0; unlimited_depth || depth < max_depth; ++depth) {
+      while (true) {
         const Node& node = nodes_[current_node_id];
         const NativeGameState& state = states_[node.state_index];
         leaf_terminal = node.terminal || state.terminal;
@@ -375,7 +373,7 @@ class NativeMCTS {
     return out;
   }
 
-  py::list select_leaf_batch_compact(int frontier, int max_depth, double c_puct) {
+  py::list select_leaf_batch_compact(int frontier, double c_puct) {
     py::list out;
     if (frontier <= 0) {
       return out;
@@ -395,9 +393,8 @@ class NativeMCTS {
       bool leaf_value_root_perspective = states_[nodes_[0].state_index].terminal_value_known;
       const NativeGameState* selected_leaf_state = &states_[nodes_[0].state_index];
       const NativeGameState* selected_pending_child_state = nullptr;
-      const bool unlimited_depth = max_depth <= 0;
 
-      for (int depth = 0; unlimited_depth || depth < max_depth; ++depth) {
+      while (true) {
         const Node& node = nodes_[current_node_id];
         const NativeGameState& state = states_[node.state_index];
         leaf_terminal = node.terminal || state.terminal;
@@ -477,7 +474,7 @@ class NativeMCTS {
     return out;
   }
 
-  py::list select_leaf_batch_evals_only(int frontier, int max_depth, double c_puct) {
+  py::list select_leaf_batch_evals_only(int frontier, double c_puct) {
     py::list out;
     last_batch_depth_sum_ = 0;
     last_batch_max_depth_ = 0;
@@ -502,9 +499,8 @@ class NativeMCTS {
       bool leaf_value_root_perspective = states_[nodes_[0].state_index].terminal_value_known;
       const NativeGameState* selected_leaf_state = &states_[nodes_[0].state_index];
       const NativeGameState* selected_pending_child_state = nullptr;
-      const bool unlimited_depth = max_depth <= 0;
 
-      for (int depth = 0; unlimited_depth || depth < max_depth; ++depth) {
+      while (true) {
         const Node& node = nodes_[current_node_id];
         const NativeGameState& state = states_[node.state_index];
         leaf_terminal = node.terminal || state.terminal;
@@ -606,7 +602,7 @@ class NativeMCTS {
         last_batch_max_turn_depth_);
   }
 
-  py::tuple select_leaf_batches_evals_only(int frontier, int max_batches, int max_depth, double c_puct) {
+  py::tuple select_leaf_batches_evals_only(int frontier, int max_batches, double c_puct) {
     py::list out;
     last_batch_depth_sum_ = 0;
     last_batch_max_depth_ = 0;
@@ -637,10 +633,9 @@ class NativeMCTS {
         bool leaf_value_root_perspective = states_[nodes_[0].state_index].terminal_value_known;
         const NativeGameState* selected_leaf_state = &states_[nodes_[0].state_index];
         const NativeGameState* selected_pending_child_state = nullptr;
-        const bool unlimited_depth = max_depth <= 0;
         bool grouped_duplicate = false;
 
-        for (int depth = 0; unlimited_depth || depth < max_depth; ++depth) {
+        while (true) {
           const Node& node = nodes_[current_node_id];
           const NativeGameState& state = states_[node.state_index];
           leaf_terminal = node.terminal || state.terminal;
@@ -761,7 +756,7 @@ class NativeMCTS {
     return py::make_tuple(out, completed_simulations);
   }
 
-  py::tuple run_static_search_batch(int frontier, int max_depth, double c_puct) {
+  py::tuple run_static_search_batch(int frontier, double c_puct) {
     last_batch_depth_sum_ = 0;
     last_batch_max_depth_ = 0;
     last_batch_turn_depth_sum_ = 0;
@@ -774,8 +769,8 @@ class NativeMCTS {
     }
     std::vector<int> path_node_ids;
     std::vector<int> path_action_indexes;
-    path_node_ids.reserve(max_depth > 0 ? static_cast<size_t>(max_depth) : 32);
-    path_action_indexes.reserve(max_depth > 0 ? static_cast<size_t>(max_depth) : 32);
+    path_node_ids.reserve(32);
+    path_action_indexes.reserve(32);
     for (int i = 0; i < frontier; ++i) {
       path_node_ids.clear();
       path_action_indexes.clear();
@@ -789,10 +784,9 @@ class NativeMCTS {
       int leaf_active_player_id = states_[nodes_[0].state_index].active_player_id;
       bool leaf_value_root_perspective = states_[nodes_[0].state_index].terminal_value_known;
       const NativeGameState* selected_leaf_state = &states_[nodes_[0].state_index];
-      const bool unlimited_depth = max_depth <= 0;
 
       const auto select_started_at = static_timing_now();
-      for (int depth = 0; unlimited_depth || depth < max_depth; ++depth) {
+      while (true) {
         const Node& node = nodes_[current_node_id];
         const NativeGameState& state = states_[node.state_index];
         leaf_terminal = node.terminal || state.terminal;
