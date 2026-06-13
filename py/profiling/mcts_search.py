@@ -1912,6 +1912,43 @@ def _native_static_exe_command(exe: Path, cfg: HybridAgentConfig, args: argparse
     return command
 
 
+_NATIVE_STATIC_EXE_TIMING_ROWS = {
+    "select_ms": ("native_static_exe.select", "paths"),
+    "apply_action_ms": ("native_static_exe.apply_action", "paths"),
+    "static_eval_ms": ("native_static_exe.static_eval", "paths"),
+    "node_allocation_ms": ("native_static_exe.node_allocation", "paths"),
+    "backup_ms": ("native_static_exe.backup", "paths"),
+    "transition_state_copy_ms": ("native_static_exe.transition.state_copy", "paths"),
+    "transition_observation_copy_ms": ("native_static_exe.transition.observation_copy", "paths"),
+    "transition_action_mutation_ms": ("native_static_exe.transition.action_mutation", "paths"),
+    "transition_reveal_sync_ms": ("native_static_exe.transition.reveal_sync", "paths"),
+    "transition_regenerate_actions_ms": ("native_static_exe.transition.regenerate_actions", "paths"),
+    "transition_hidden_enemy_ms": ("native_static_exe.transition.hidden_enemy", "paths"),
+    "search_loop_ms": ("native_static_exe.search_loop", "paths"),
+    "root_static_eval_ms": ("native_static_exe.root_static_eval", "root"),
+    "root_setup_ms": ("native_static_exe.root_setup", "root"),
+    "result_distribution_ms": ("native_static_exe.result_distribution", "root"),
+}
+
+
+def _add_native_static_exe_timing_rows(
+    collector: TimingCollector,
+    profile: dict[str, Any],
+    *,
+    selected_paths: int,
+) -> None:
+    raw_timing = profile.get("timing_ms")
+    if not isinstance(raw_timing, dict):
+        return
+    for key, (row_name, item_mode) in _NATIVE_STATIC_EXE_TIMING_ROWS.items():
+        try:
+            elapsed_sec = float(raw_timing.get(key, 0.0) or 0.0) / 1000.0
+        except (TypeError, ValueError):
+            continue
+        items = max(0, int(selected_paths)) if item_mode == "paths" else 1
+        collector.add(row_name, elapsed_sec, items=items)
+
+
 def _run_static_exe_profile_case(
     case: PayloadCase,
     *,
@@ -1964,7 +2001,9 @@ def _run_static_exe_profile_case(
             stats.max_depth = max(stats.max_depth, int(profile.get("max_depth", 0) or 0))
             stats.turn_depth_sum += int(profile.get("turn_depth_sum", 0) or 0)
             stats.max_turn_depth = max(stats.max_turn_depth, int(profile.get("max_turn_depth", 0) or 0))
-            collector.add("native_static_exe.search", float(profile.get("elapsed_sec", elapsed) or 0.0), items=int(profile.get("selected_paths", 0) or 0))
+            selected_paths = int(profile.get("selected_paths", 0) or profile.get("completed_paths", 0) or 0)
+            collector.add("native_static_exe.search", float(profile.get("elapsed_sec", elapsed) or 0.0), items=selected_paths)
+            _add_native_static_exe_timing_rows(collector, profile, selected_paths=selected_paths)
     stats.elapsed_sec = time.perf_counter() - started_at
     return last_result, stats, stats.elapsed_sec
 

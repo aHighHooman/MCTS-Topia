@@ -1,5 +1,5 @@
 {
-  "evaluator": "static",
+  "evaluator": "static_exe",
   "payload": null,
   "positions": 36,
   "selfplay_seed_start": 0,

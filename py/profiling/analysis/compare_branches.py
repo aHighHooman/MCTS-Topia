@@ -18,8 +18,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT = PROJECT_ROOT / "debug-logs" / "analysis" / "branch-compare"
 
 
-def _payload_paths(payload_dir: Path, explicit: list[Path], limit: int | None) -> list[Path]:
-    paths = list(explicit) + sorted(payload_dir.glob("*.json"))
+def _repo_relative(path: Path) -> Path:
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _payload_paths(payload_dir: Path, explicit: list[Path]) -> list[Path]:
+    payload_dir = _repo_relative(payload_dir)
+    paths = [_repo_relative(path) for path in explicit] + sorted(payload_dir.glob("*.json"))
     seen: set[Path] = set()
     out: list[Path] = []
     for path in paths:
@@ -28,8 +33,6 @@ def _payload_paths(payload_dir: Path, explicit: list[Path], limit: int | None) -
             continue
         seen.add(resolved)
         out.append(resolved)
-        if limit is not None and len(out) >= limit:
-            break
     return out
 
 
@@ -68,7 +71,7 @@ def _position_metrics(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
 
 def run(args: argparse.Namespace) -> Path:
     run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
-    output_dir = Path(args.output_dir) / run_id
+    output_dir = _repo_relative(Path(args.output_dir)) / run_id
     payload_store = PROJECT_ROOT / "debug-logs" / "analysis" / "payloads"
     targets = [parse_target(spec) for spec in args.target]
     if len(targets) < 2:
@@ -76,11 +79,23 @@ def run(args: argparse.Namespace) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "targets.json").write_text(json.dumps(targets, indent=2, sort_keys=True), encoding="utf-8")
     positions: list[dict[str, Any]] = []
+    payload_paths = _payload_paths(Path(args.payload_dir), [Path(p) for p in args.payload])
+    if not payload_paths:
+        raise RuntimeError(
+            f"no payload JSON files found under {_repo_relative(Path(args.payload_dir))}; "
+            "run from the repo root or pass an absolute --payload-dir"
+        )
     with (output_dir / "positions.jsonl").open("w", encoding="utf-8") as jsonl:
-        for path in _payload_paths(Path(args.payload_dir), [Path(p) for p in args.payload], args.positions):
+        loaded_positions = 0
+        skipped_payloads = 0
+        for path in payload_paths:
             payload = load_payload(path)
             if payload is None:
+                skipped_payloads += 1
                 continue
+            if args.positions is not None and loaded_positions >= int(args.positions):
+                break
+            loaded_positions += 1
             digest = store_payload(payload, payload_store)
             for target in targets:
                 position = analyze_position(
@@ -98,6 +113,11 @@ def run(args: argparse.Namespace) -> Path:
                 row = asdict(position)
                 positions.append(row)
                 jsonl.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+    if not positions:
+        raise RuntimeError(
+            f"no valid payload positions loaded from {_repo_relative(Path(args.payload_dir))}; "
+            f"checked={len(payload_paths)} skipped={skipped_payloads}"
+        )
     grouped: dict[str, list[dict[str, Any]]] = {}
     for position in positions:
         grouped.setdefault(str(position["payload_hash"]), []).append(position)
@@ -177,4 +197,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
