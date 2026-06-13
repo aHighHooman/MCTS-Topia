@@ -15,7 +15,7 @@ if str(PY_ROOT) not in sys.path:
     sys.path.insert(0, str(PY_ROOT))
 
 from nn.belief import BeliefTracker
-from nn.bot_agent import HybridRLBot
+from nn.bot_agent import BotOutputClosed, HybridRLBot
 from project_paths import game_src_root
 from search.config import HybridAgentConfig
 from nn.encoding import (
@@ -39,6 +39,14 @@ from nn.encoding import (
 )
 from nn.model import HybridPolicyValueNet
 from search.native.mcts import SearchResult
+
+
+class _BrokenStdout:
+    def write(self, _value: str) -> int:
+        raise OSError(22, "Invalid argument")
+
+    def flush(self) -> None:
+        raise OSError(22, "Invalid argument")
 
 
 def _message() -> dict:
@@ -279,6 +287,11 @@ class BeliefEncoderTest(unittest.TestCase):
 
 
 class BeliefBotFlowTest(unittest.TestCase):
+    def test_emit_raises_protocol_signal_when_stdout_is_closed(self) -> None:
+        with patch("nn.bot_agent.sys.stdout", _BrokenStdout()):
+            with self.assertRaises(BotOutputClosed):
+                HybridRLBot.emit({"actionId": "A1"})
+
     def test_choose_action_stores_belief_and_passes_snapshot(self) -> None:
         cfg = HybridAgentConfig()
         cfg.search.num_simulations = 1

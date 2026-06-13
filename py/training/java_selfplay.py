@@ -8,6 +8,8 @@ import uuid
 from pathlib import Path
 from typing import Sequence
 
+from project_paths import game_json_jar
+
 from .config import HybridAgentConfig
 
 
@@ -79,6 +81,17 @@ def _resolve_java_executable(config: HybridAgentConfig) -> str:
     return "java"
 
 
+def _resolve_java_classpath(classpath: str, workdir: Path) -> str:
+    resolved_parts: list[str] = []
+    for part in classpath.split(";"):
+        path = Path(part)
+        resolved = path if path.is_absolute() else workdir / path
+        if part.replace("\\", "/") == "lib/json.jar" and not resolved.exists():
+            resolved = game_json_jar()
+        resolved_parts.append(str(resolved))
+    return ";".join(resolved_parts)
+
+
 def run_selfplay_match(
     config: HybridAgentConfig,
     bot_commands: Sequence[Sequence[str]],
@@ -133,8 +146,7 @@ def run_selfplay_match(
     external_log_dir = playfile_root / f"external_{run_id}"
     play_config["External Log Dir"] = str(external_log_dir)
     play_path.write_text(json.dumps(play_config, indent=2), encoding="utf-8")
-    classpath_parts = [workdir / part for part in config.selfplay.java_classpath.split(";")]
-    resolved_classpath = ";".join(str(path) for path in classpath_parts)
+    resolved_classpath = _resolve_java_classpath(config.selfplay.java_classpath, workdir)
     java_executable = _resolve_java_executable(config)
     command = [java_executable, "-cp", resolved_classpath, config.selfplay.java_main_class, str(play_path)]
     try:

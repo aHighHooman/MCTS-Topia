@@ -10,7 +10,7 @@ PY_ROOT = Path(__file__).resolve().parents[1]
 if str(PY_ROOT) not in sys.path:
     sys.path.insert(0, str(PY_ROOT))
 
-from nn.bot_agent import HybridRLBot
+from nn.bot_agent import BotOutputClosed, HybridRLBot
 from search.config import HybridAgentConfig
 from training.config import rl_path
 
@@ -83,7 +83,7 @@ def main() -> None:
     while True:
         try:
             raw_line = input()
-        except EOFError:
+        except (EOFError, OSError):
             break
         line = raw_line.strip()
         if not line:
@@ -95,9 +95,18 @@ def main() -> None:
 
         msg_type = message.get("type")
         if msg_type == "action_request":
-            HybridRLBot.emit(bot.choose_action(message))
+            try:
+                HybridRLBot.emit(bot.choose_action(message))
+            except BotOutputClosed:
+                try:
+                    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+                except OSError:
+                    pass
+                break
         elif msg_type == "game_over":
             bot.finish_episode(message)
+            break
+        elif msg_type == "shutdown":
             break
 
 

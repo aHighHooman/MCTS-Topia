@@ -41,6 +41,10 @@ from training.replay import (
 )
 
 
+class BotOutputClosed(RuntimeError):
+    """Raised when the Java host has closed the bot stdout pipe."""
+
+
 def _profile_enabled() -> bool:
     return os.environ.get("TRIBES_RL_PROFILE", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -424,4 +428,10 @@ class HybridRLBot:
 
     @staticmethod
     def emit(payload: Dict[str, Any]) -> None:
-        print(json.dumps(payload), flush=True)
+        try:
+            sys.stdout.write(json.dumps(payload) + "\n")
+            sys.stdout.flush()
+        except OSError as exc:
+            # During tournament early-stop/cancellation the Java host may close
+            # the bot stdout pipe while a search response is being emitted.
+            raise BotOutputClosed() from exc

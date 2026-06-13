@@ -19,3 +19,8 @@ New-Item -ItemType Directory -Force (Join-Path $repoRoot "out") | Out-Null
 
 $sources = Get-ChildItem -LiteralPath $gameSrc -Recurse -Filter *.java | ForEach-Object { $_.FullName }
 & "$env:JAVA_HOME\bin\javac.exe" -cp $jsonJar -d (Join-Path $repoRoot "out") $sources
+
+$terrainProbs = Join-Path $gameRoot "terrainProbs.json"
+if (Test-Path -LiteralPath $terrainProbs) {
+    Copy-Item -LiteralPath $terrainProbs -Destination (Join-Path $repoRoot "terrainProbs.json") -Force
+}

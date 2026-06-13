@@ -185,6 +185,43 @@ class SelfPlayConfigTest(unittest.TestCase):
         self.assertEqual(captured["java_cwd"], java_cwd)
         self.assertEqual(Path(captured["play_path"]).parent, RL_ROOT / "playfiles")
 
+    def test_selfplay_uses_external_json_jar_when_repo_lib_missing(self) -> None:
+        cfg = HybridAgentConfig()
+        captured: dict[str, object] = {}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            java_cwd = root / "repo"
+            game_root = root / "game"
+            java_cwd.mkdir()
+            (java_cwd / "out").mkdir()
+            (game_root / "lib").mkdir(parents=True)
+            game_json = game_root / "lib" / "json.jar"
+            game_json.write_text("", encoding="utf-8")
+            cfg.training.output_dir = RL_ROOT
+
+            class FakeProcess:
+                returncode = 0
+
+                def poll(self) -> int:
+                    return 0
+
+            def fake_popen(command, **kwargs):
+                captured["classpath"] = command[command.index("-cp") + 1]
+                return FakeProcess()
+
+            with patch.dict(os.environ, {"TRIBES_GAME_ROOT": str(game_root)}):
+                with patch("training.java_selfplay.subprocess.Popen", side_effect=fake_popen):
+                    result = run_selfplay_match(
+                        cfg,
+                        [["python", "bot.py"], ["python", "bot.py"]],
+                        ["Xin Xi", "Imperius"],
+                        java_cwd,
+                    )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(captured["classpath"], f"{java_cwd / 'out'};{game_json}")
+
     def test_selfplay_config_omits_level_file_entry(self) -> None:
         cfg = HybridAgentConfig()
         cfg.training.output_dir = Path(tempfile.mkdtemp()) / "rl"
