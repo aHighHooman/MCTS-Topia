@@ -213,14 +213,35 @@ enum class StaticEvalVariant {
   Experimental,
 };
 
-constexpr double kValueTanhDenominatorStars = 163.793103448276;
-constexpr double kExperimentalUnitPowerScale = 1.0 / 21.0;
-constexpr double kCityQualityWeightStars = 1.068965517241;
-constexpr double kExperimentalIncomeValueStars = 7.91;
-constexpr double kExperimentalUnitCapacityValueStars = 1.0;
-constexpr double kExperimentalPopulationValueWeight = 1.0;
-constexpr double kExperimentalResourceValueWeight = 1.0;
+constexpr double kValueTanhDenominatorStars = 200;
+constexpr double kCityQualityWeightStars = 1;
+
+// Experimental feature-shaping constants. These are used inside derived inputs before
+// the value head sees a top-level term.
+constexpr double experimentalIncomeFactor = 8;
 constexpr double kExperimentalMissingTechResourceOptionScale = 0.25;
+
+// Experimental value-head top-level coefficients. Each term is:
+//   experimentalValueHead<Thing>Coeff * input
+constexpr double experimentalValueHeadOwnUnitMaterialCoeff =          0.0;
+constexpr double experimentalValueHeadUnitPowerCoeff =                1.0;
+constexpr double experimentalValueHeadCityCountCoeff =                18.103448275862;
+constexpr double experimentalValueHeadCityQualityCoeff =              2.0;
+constexpr double experimentalValueHeadIncomeCoeff =                   0.0;
+constexpr double experimentalValueHeadUnitCapacityCoeff =             1.0;
+constexpr double experimentalValueHeadVisibleResourcesCoeff =         0.0;
+constexpr double experimentalValueHeadResourcePotentialCoeff =        1.0;
+constexpr double experimentalValueHeadStarsCoeff =                    1.0;
+constexpr double experimentalValueHeadCurrentScoreCoeff =             0.0;
+constexpr double experimentalValueHeadScoreDiffCoeff =                0.0;
+constexpr double experimentalValueHeadResearchedTechCoeff =           2.5;
+constexpr double experimentalValueHeadVillagesCoeff =                 1.0;
+constexpr double experimentalValueHeadExplorationCoeff =              10;
+constexpr double experimentalValueHeadCityPressureCoeff =             0.5;
+constexpr double experimentalValueHeadVulnerableUnitsCoeff =          0.0;
+constexpr double experimentalValueHeadCapitalThreatCoeff =            -1.0;
+constexpr double experimentalValueHeadCityThreatCoeff =               -1.0;
+constexpr double experimentalValueHeadWoundedPenaltyCoeff =           0.0;
 
 StaticEvalVariant static_eval_variant() {
 #ifdef TRIBES_NATIVE_MCTS_STANDALONE
@@ -1845,7 +1866,7 @@ bool tribe_has_tech(const NativeTribe* tribe, const std::string& tech) {
 
 double city_level_choice_value_stars(int new_level) {
   if (new_level == 2) {
-    return kExperimentalIncomeValueStars;
+    return experimentalIncomeFactor;
   }
   if (new_level == 3) {
     return 5.0;
@@ -1860,7 +1881,7 @@ double city_level_choice_value_stars(int new_level) {
 }
 
 double city_level_progress_value_stars(int new_level) {
-  return kExperimentalIncomeValueStars + city_level_choice_value_stars(new_level);
+  return experimentalIncomeFactor + city_level_choice_value_stars(new_level);
 }
 
 double current_population_progress_for_city(const NativeCity& city) {
@@ -2143,37 +2164,86 @@ double state_raw_value(
   }
 
   const double board_area = static_cast<double>(std::max(1, state.board_size * state.board_size));
-  const double exploration = 8.620689655172 * static_cast<double>(explored) / board_area;
+  const double exploration_input = static_cast<double>(explored) / board_area;
   const double visible_resource_term = experimental_eval
       ? 0.0
       : 0.551724137931 * static_cast<double>(visible_resources);
   const double experimental_population_term = 0.0;
   const double experimental_unit_capacity_term = experimental_eval
-      ? kExperimentalUnitCapacityValueStars * (my_unit_capacity - enemy_unit_capacity)
+      ? (my_unit_capacity - enemy_unit_capacity)
       : 0.0;
   const double experimental_resource_term = experimental_eval
-      ? kExperimentalResourceValueWeight * (my_exploitable_resource_value - enemy_exploitable_resource_value)
+      ? (my_exploitable_resource_value - enemy_exploitable_resource_value)
       : 0.0;
-  const std::vector<std::pair<std::string, double>> raw_terms = {
-      {"military.own_unit_material", material_weight * (my_material - enemy_material)},
+  std::vector<std::pair<std::string, double>> raw_terms = {
+      {"military.own_unit_material", experimental_eval
+          ? experimentalValueHeadOwnUnitMaterialCoeff *
+              (my_material - enemy_material)
+          : material_weight * (my_material - enemy_material)},
       {"military.unit_power",
-       power_weight * (experimental_eval ? kExperimentalUnitPowerScale : 1.0) *
-           (my_power - enemy_power)},
-      {"territory.city_count", 18.103448275862 * static_cast<double>(my_cities - enemy_cities)},
-      {"economy.city_quality", city_quality_weight * (my_city_quality - enemy_city_quality)},
-      {"economy.income", income_weight * (my_income - enemy_income)},
-      {"economy.production", experimental_population_term + experimental_unit_capacity_term},
-      {"economy.resource_potential", experimental_resource_term + visible_resource_term},
-      {"economy.stars", my_stars - 0.413793103448 * best_enemy_stars},
-      {"score_terminal.score", current_score_weight * my_score + score_diff_weight * (my_score - best_enemy_score)},
-      {"technology.researched_tech", 2.155172413793 * my_tech},
-      {"territory.villages", 2.672413793103 * static_cast<double>(visible_villages) + 2.413793103448 * village_control},
-      {"territory.exploration", exploration},
-      {"threat.city_pressure", 0.948275862069 * enemy_city_pressure},
-      {"threat.vulnerable_units", -2.672413793103 * vulnerable_penalty},
-      {"threat.capital_threat", -2.931034482759 * capital_threat},
-      {"threat.city_threat", -1.465517241379 * city_threat},
-      {"military.wounded_penalty", -wounded_units_weight * static_cast<double>(wounded_units)},
+       experimental_eval
+           ? experimentalValueHeadUnitPowerCoeff *
+               (my_power - enemy_power)
+           : power_weight * (my_power - enemy_power)},
+      {"territory.city_count", experimental_eval
+          ? experimentalValueHeadCityCountCoeff *
+              static_cast<double>(my_cities - enemy_cities)
+          : 18.103448275862 * static_cast<double>(my_cities - enemy_cities)},
+      {"economy.city_quality", experimental_eval
+          ? experimentalValueHeadCityQualityCoeff *
+              (my_city_quality - enemy_city_quality)
+          : city_quality_weight * (my_city_quality - enemy_city_quality)},
+      {"economy.income", experimental_eval
+          ? experimentalValueHeadIncomeCoeff *
+              (my_income - enemy_income)
+          : income_weight * (my_income - enemy_income)},
+      {"economy.unit_capacity", experimental_eval
+          ? experimentalValueHeadUnitCapacityCoeff *
+              (experimental_population_term + experimental_unit_capacity_term)
+          : experimental_population_term + experimental_unit_capacity_term},
+      {"economy.visible_resources", experimental_eval
+          ? experimentalValueHeadVisibleResourcesCoeff * static_cast<double>(visible_resources)
+          : visible_resource_term},
+      {"economy.resource_potential", experimental_eval
+          ? experimentalValueHeadResourcePotentialCoeff *
+              experimental_resource_term
+          : 0.0},
+      {"economy.stars", experimental_eval
+          ? experimentalValueHeadStarsCoeff *
+              (my_stars - 0.413793103448 * best_enemy_stars)
+          : my_stars - 0.413793103448 * best_enemy_stars},
+      {"score_terminal.current_score", experimental_eval
+          ? experimentalValueHeadCurrentScoreCoeff * my_score
+          : current_score_weight * my_score},
+      {"score_terminal.score_diff", experimental_eval
+          ? experimentalValueHeadScoreDiffCoeff * (my_score - best_enemy_score)
+          : score_diff_weight * (my_score - best_enemy_score)},
+      {"technology.researched_tech", experimental_eval
+          ? experimentalValueHeadResearchedTechCoeff * my_tech
+          : 2.155172413793 * my_tech},
+      {"territory.villages", experimental_eval
+          ? experimentalValueHeadVillagesCoeff *
+              (2.672413793103 * static_cast<double>(visible_villages) + 2.413793103448 * village_control)
+          : 2.672413793103 * static_cast<double>(visible_villages) + 2.413793103448 * village_control},
+      {"territory.exploration", experimental_eval
+          ? experimentalValueHeadExplorationCoeff * exploration_input
+          : 8.620689655172 * exploration_input},
+      {"threat.city_pressure", experimental_eval
+          ? experimentalValueHeadCityPressureCoeff * enemy_city_pressure
+          : 0.948275862069 * enemy_city_pressure},
+      {"threat.vulnerable_units", experimental_eval
+          ? experimentalValueHeadVulnerableUnitsCoeff * vulnerable_penalty
+          : -2.672413793103 * vulnerable_penalty},
+      {"threat.capital_threat", experimental_eval
+          ? experimentalValueHeadCapitalThreatCoeff * capital_threat
+          : -2.931034482759 * capital_threat},
+      {"threat.city_threat", experimental_eval
+          ? experimentalValueHeadCityThreatCoeff * city_threat
+          : -1.465517241379 * city_threat},
+      {"military.wounded_penalty", experimental_eval
+          ? experimentalValueHeadWoundedPenaltyCoeff *
+              static_cast<double>(wounded_units)
+          : -wounded_units_weight * static_cast<double>(wounded_units)},
   };
   double raw = 0.0;
   for (const auto& term : raw_terms) {
