@@ -17,6 +17,8 @@ from typing import Any
 import torch
 
 PY_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = PY_ROOT.parent
+DEFAULT_SELFPLAY_MCTS_NN_CONFIG = PY_ROOT / "profiling" / "configs" / "selfplay_mcts_nn.json"
 if str(PY_ROOT) not in sys.path:
     sys.path.insert(0, str(PY_ROOT))
 
@@ -174,7 +176,7 @@ def _new_replay_step_count(replay_dir: Path, prefix: str, before: set[Path]) -> 
 def _bot_command(args: argparse.Namespace, cfg: HybridAgentConfig, workdir: Path) -> list[str]:
     command = [
         sys.executable,
-        str(PY_ROOT / "bots" / "hybrid_nn_bot.py"),
+        str(PROJECT_ROOT / "bots" / "hybrid_nn_bot.py"),
         "--checkpoint",
         str(args.checkpoint),
         "--replay-dir",
@@ -581,7 +583,7 @@ def main() -> int:
     parser.add_argument("--min-hotspot-ms", type=float, default=1.0, help="Hide timing/function rows below this cumulative millisecond threshold.")
     parser.add_argument("--min-hotspot-pct", type=float, default=1.0, help="Hide timing/function rows below this percent-of-run threshold.")
     parser.add_argument("--jsonl", type=Path, default=None)
-    args = load_config_defaults(parser)
+    args = load_config_defaults(parser, default_config=DEFAULT_SELFPLAY_MCTS_NN_CONFIG)
     if args.wall_clock_per_action_seconds is None:
         args.wall_clock_per_action_seconds = (
             args.wall_clock_per_turn_seconds

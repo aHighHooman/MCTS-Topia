@@ -42,8 +42,6 @@ Common Python entrypoints:
 $env:PYTHONPATH = "$PWD\py"
 python -m profiling.mcts_search --config py/profiling/configs/mcts_search.json
 python -m profiling.selfplay_mcts_nn --config py/profiling/configs/selfplay_mcts_nn.json
-python -m training.generate_static_bootstrap_replay --games 10 --augment-symmetries
-python -m training.pretrain_static
 python -m training.train
 python -m training.checkpoint_tournament
 ```
@@ -52,7 +50,7 @@ python -m training.checkpoint_tournament
 
 - Native extension sources are in `py/search/native/`; `load_native_mcts_extension()` auto-builds with PyTorch C++ extension tooling.
 - Shared native C++ files live in `py/search/native/src/`: `native_rules.cpp`, `native_static_eval.cpp`, `native_mcts.cpp`.
-- The standalone full static-eval protocol bot lives in `py/search/native/bot/native_static_mcts_bot.cpp`; build it with `scripts/build_native_static_bot.ps1`.
+- The standalone full static-eval protocol bot lives in `bots/native_static_mcts_bot.cpp`; build it with `scripts/build_native_static_bot.ps1`.
 - Parity/debug entrypoint: `python -m search.native.parity_runner --fixture debug-logs\some-fixture\game.json --depth 1`.
 - Java parity oracle: `py/search/native/java/core/game/NativeParityOracle.java`.
 

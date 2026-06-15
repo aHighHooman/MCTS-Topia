@@ -30,7 +30,7 @@ def compatible_state_dict(model: HybridPolicyValueNet, state_dict: dict[str, Any
 
 from search.config import HybridAgentConfig
 from search.device import require_cuda_device
-from search.native import NativeSearchUnavailable, ReusableNativeMCTSSession, ReusableNativeStaticMCTSSession, run_native_mcts, run_native_static_mcts
+from search.native import NativeSearchUnavailable, ReusableNativeMCTSSession, run_native_mcts
 from search.native.cpp_extension import load_native_mcts_extension
 from search.native.mcts import SearchResult
 from training.replay import (
@@ -130,10 +130,8 @@ class HybridRLBot:
         device: torch.device | None = None,
         native_available: bool | None = None,
         warmup: bool = True,
-        static_only_bootstrap: bool = False,
     ) -> None:
         self.config = config
-        self.static_only_bootstrap = bool(static_only_bootstrap)
         self.replay = ReplayStore(replay_dir, config.replay.capacity_steps, config.replay.shard_prefix, load_existing=False)
         self.belief_tracker = BeliefTracker()
         self.records: list[StepRecord] = []
@@ -141,17 +139,7 @@ class HybridRLBot:
         self.turn_step_index = 0
         self.last_active_player: int | None = None
         self.turn_budget_started_at: float | None = None
-        self._static_mcts_session = ReusableNativeStaticMCTSSession()
         self._nn_mcts_session = ReusableNativeMCTSSession()
-
-        # Static bootstrap mode intentionally skips every NN cost: no CUDA requirement,
-        # no checkpoint load, no model construction, no warmup, no root/leaf forward passes.
-        if self.static_only_bootstrap:
-            self.device = device or torch.device("cpu")
-            self.config.training.device = str(self.device)
-            self.model: HybridPolicyValueNet | None = None
-            self._native_available = native_available if native_available is not None else self._initialize_native_search()
-            return
 
         self.device = device or require_cuda_device()
         self.config.training.device = str(self.device)
@@ -220,7 +208,6 @@ class HybridRLBot:
         self.turn_step_index = 0
         self.last_active_player = None
         self.turn_budget_started_at = None
-        self._static_mcts_session.reset("episode_reset")
         self._nn_mcts_session.reset("episode_reset")
 
     def _action_budget_seconds(self) -> float | None:
@@ -271,41 +258,13 @@ class HybridRLBot:
                 "policy_ms=0.0 "
                 "search_ms=0.0 "
                 f"total_ms={(search_finished_at - choose_started_at) * 1000.0:.1f} "
-                f"actions={len(actions)} device={self.device} static_only={str(self.static_only_bootstrap).lower()} "
+                f"actions={len(actions)} device={self.device} "
                 f"action_budget_sec={self._action_budget_seconds() if self._action_budget_seconds() is not None else -1.0:.3f}"
             )
             return self._finish_action_choice(message, result)
 
         if not self._native_available:
             raise NativeSearchUnavailable("Native MCTS extension is unavailable.")
-
-        if self.static_only_bootstrap:
-            if bool(getattr(self.config.search, "reuse_tree", False)):
-                result = self._static_mcts_session.search(
-                    message,
-                    self.config.search,
-                    self.config.model,
-                    wall_time_seconds=self._action_budget_seconds(),
-                )
-            else:
-                result = run_native_static_mcts(
-                    message,
-                    self.config.search,
-                    self.config.model,
-                    wall_time_seconds=self._action_budget_seconds(),
-                )
-            search_finished_at = time.perf_counter()
-            _profile_log(
-                "choose_action "
-                "encode_ms=0.0 "
-                "policy_ms=0.0 "
-                f"search_ms={(search_finished_at - choose_started_at) * 1000.0:.1f} "
-                f"total_ms={(search_finished_at - choose_started_at) * 1000.0:.1f} "
-                f"actions={len(message.get('actions', []))} device={self.device} static_only=true "
-                f"action_budget_sec={self._action_budget_seconds() if self._action_budget_seconds() is not None else -1.0:.3f} "
-                f"{_reuse_profile_fields(self._static_mcts_session if bool(getattr(self.config.search, 'reuse_tree', False)) else None)}"
-            )
-            return self._finish_action_choice(message, result)
 
         if self.model is None:
             raise NativeSearchUnavailable("Hybrid NN mode requires a model, but model is None.")
@@ -354,7 +313,7 @@ class HybridRLBot:
             f"policy_ms={(inference_finished_at - encode_finished_at) * 1000.0:.1f} "
             f"search_ms={(search_finished_at - inference_finished_at) * 1000.0:.1f} "
             f"total_ms={(search_finished_at - choose_started_at) * 1000.0:.1f} "
-            f"actions={len(message.get('actions', []))} device={self.device} static_only=false "
+            f"actions={len(message.get('actions', []))} device={self.device} "
             f"action_budget_sec={action_budget if action_budget is not None else -1.0:.3f} "
             f"{_reuse_profile_fields(self._nn_mcts_session if bool(getattr(self.config.search, 'reuse_tree', False)) else None)}"
         )
@@ -396,8 +355,6 @@ class HybridRLBot:
             "turn_index": self.turn_index,
             "turn_step_index": self.turn_step_index,
         }
-        if self.static_only_bootstrap:
-            record_kwargs["static_value_target"] = float(result.value)
         if "encoded_observation" in getattr(StepRecord, "__dataclass_fields__", {}):
             record_kwargs["encoded_observation"] = None
         self.records.append(StepRecord(**record_kwargs))

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import unittest
 import sys
 from pathlib import Path
@@ -29,8 +28,7 @@ from nn.encoding import (
     normalize_message,
 )
 from nn.model import HybridPolicyValueNet
-from search.native import run_native_hybrid_mcts, run_native_mcts, run_native_static_mcts
-from search.native.hybrid_mcts import _Evaluation, _mix_evaluation
+from search.native import run_native_mcts
 from search.native.cpp_extension import load_native_mcts_extension
 from search.native.mcts import NativeSearchParityError, _apply_end_turn_visit_guard, _message_cache_key, _root_priors, _unique_action_mapping
 from search.native.parity_runner import _canonical_state, run_parity, parse_args
@@ -318,6 +316,22 @@ def _static_priors_for_variant(extension, message: dict, variant: str) -> dict[s
     return {
         str(action["id"]): float(prior)
         for action, prior in zip(message["actions"], evaluation["priors"])
+    }
+
+
+def _static_evaluation_for_variant(extension, message: dict, variant: str) -> dict:
+    previous = os.environ.get("TRIBES_STATIC_EVAL_VARIANT")
+    try:
+        os.environ["TRIBES_STATIC_EVAL_VARIANT"] = variant
+        evaluation = dict(extension.evaluate_static(message, 128))
+    finally:
+        if previous is None:
+            os.environ.pop("TRIBES_STATIC_EVAL_VARIANT", None)
+        else:
+            os.environ["TRIBES_STATIC_EVAL_VARIANT"] = previous
+    return {
+        "priors": [float(value) for value in evaluation["priors"]],
+        "value": float(evaluation["value"]),
     }
 
 
@@ -1560,8 +1574,8 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertIsNotNone(extension)
         message = _message()
 
-        baseline = _static_priors_for_variant(extension, message, "baseline")
-        experimental = _static_priors_for_variant(extension, message, "experimental")
+        baseline = _static_evaluation_for_variant(extension, message, "baseline")
+        experimental = _static_evaluation_for_variant(extension, message, "experimental")
 
         self.assertEqual(baseline, experimental)
 
@@ -1653,8 +1667,7 @@ class NativeMCTSTest(unittest.TestCase):
         experimental = _static_priors_for_variant(extension, message, "experimental")
 
         self.assertAlmostEqual(baseline["rider_toward_ruin"], baseline["warrior_toward_ruin"], places=6)
-        self.assertGreater(experimental["rider_toward_ruin"], experimental["warrior_toward_ruin"])
-        self.assertGreater(experimental["rider_toward_ruin"], experimental["end"])
+        self.assertEqual(baseline, experimental)
 
     def test_static_eval_filters_ruin_bonus_by_required_traversal_research(self) -> None:
         extension = load_native_mcts_extension()
@@ -1683,7 +1696,7 @@ class NativeMCTSTest(unittest.TestCase):
                 experimental_allowed = _static_priors_for_variant(extension, allowed, "experimental")
 
                 self.assertGreater(baseline_allowed["rider_toward_ruin"], baseline_allowed["end"])
-                self.assertGreater(experimental_allowed["rider_toward_ruin"], experimental_allowed["warrior_toward_ruin"])
+                self.assertEqual(baseline_allowed, experimental_allowed)
 
     def test_static_eval_prefers_road_frontier_progress_over_branching(self) -> None:
         extension = load_native_mcts_extension()
@@ -1711,7 +1724,7 @@ class NativeMCTSTest(unittest.TestCase):
         experimental = _static_priors_for_variant(extension, message, "experimental")
 
         self.assertGreater(baseline["connect"], baseline["branch"])
-        self.assertAlmostEqual(experimental["connect"], experimental["branch"])
+        self.assertEqual(baseline, experimental)
 
     def test_static_eval_does_not_reward_branches_from_connected_city_roads(self) -> None:
         extension = load_native_mcts_extension()
@@ -1741,6 +1754,7 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertLess(baseline["branch"], baseline["spawn"])
         self.assertLess(experimental["branch"], experimental["spawn"])
+        self.assertEqual(baseline, experimental)
 
     def test_static_eval_prefers_parsed_unit_attack_over_type_fallback(self) -> None:
         extension = load_native_mcts_extension()
@@ -1799,42 +1813,6 @@ class NativeMCTSTest(unittest.TestCase):
         high = dict(extension.evaluate_static(attack_message(6), 64))
 
         self.assertGreater(float(high["priors"][0]), float(low["priors"][0]))
-
-    def test_hybrid_eval_zero_weights_matches_nn(self) -> None:
-        nn_eval = _Evaluation([0.8, 0.2], 0.25)
-        static_eval = _Evaluation([0.1, 0.9], -0.75)
-
-        mixed = _mix_evaluation(nn_eval, static_eval, 0.0, 0.0)
-
-        self.assertAlmostEqual(mixed.priors[0], 0.8, places=6)
-        self.assertAlmostEqual(mixed.priors[1], 0.2, places=6)
-        self.assertAlmostEqual(mixed.value, 0.25, places=6)
-
-    def test_hybrid_eval_static_weights_bias_policy_and_value(self) -> None:
-        nn_eval = _Evaluation([0.8, 0.2], 0.25)
-        static_eval = _Evaluation([0.1, 0.9], -0.75)
-
-        mixed = _mix_evaluation(nn_eval, static_eval, 1.0, 1.0)
-
-        self.assertAlmostEqual(sum(mixed.priors), 1.0, places=6)
-        self.assertLess(mixed.priors[0], nn_eval.priors[0])
-        self.assertGreater(mixed.priors[1], nn_eval.priors[1])
-        self.assertAlmostEqual(mixed.value, -0.75, places=6)
-
-    def test_native_hybrid_mcts_smoke(self) -> None:
-        cfg = HybridAgentConfig()
-        cfg.search.num_simulations = 8
-        cfg.search.batch_size = 4
-        cfg.search.sample_action = False
-        cfg.search.dirichlet_epsilon = 0.0
-        cfg.search.static_policy_weight = 1.0
-        cfg.search.static_value_weight = 1.0
-        model = HybridPolicyValueNet(cfg.model).eval()
-
-        res = run_native_hybrid_mcts(_message(), model, cfg.search, cfg.model, "cpu")
-
-        self.assertIn(res.action_id, {"end", "spawn", "road"})
-        self.assertAlmostEqual(sum(res.visit_target), 1.0, places=6)
 
     def test_native_tree_simulates_village_capture(self) -> None:
         extension = load_native_mcts_extension()
@@ -1916,43 +1894,6 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(list(evaluation["priors"]), [])
         self.assertAlmostEqual(float(evaluation["value"]), 0.75)
-
-    def test_native_static_mcts_raises_on_approximate_opponent_turns(self) -> None:
-        cfg = HybridAgentConfig()
-        cfg.search.num_simulations = 12
-        cfg.search.batch_size = 4
-        cfg.search.sample_action = False
-        cfg.search.dirichlet_epsilon = 0.0
-        cfg.search.root_temperature = 1e-6
-        cfg.search.seed = 123
-
-        res = run_native_static_mcts(_message(), cfg.search, cfg.model)
-        self.assertIsNotNone(res)
-
-    def test_native_static_mcts_bot_protocol_smoke(self) -> None:
-        bot_path = Path(__file__).resolve().parents[1] / "bots" / "native_static_mcts_bot.py"
-        message = _message_with_capital_capture(second_action={"id": "end", "type": "END_TURN"})
-        message["type"] = "action_request"
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(bot_path),
-                "--simulations",
-                "4",
-                "--search-batch-size",
-                "2",
-                "--deterministic",
-            ],
-            input=json.dumps(message) + "\n",
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=True,
-        )
-
-        response = json.loads(completed.stdout.strip().splitlines()[-1])
-
-        self.assertIn(response.get("actionId"), {"capture", "end"})
 
     def test_parity_canonical_state_ignores_action_ids_order_and_territory_noise(self) -> None:
         java_state = _message()

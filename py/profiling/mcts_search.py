@@ -116,7 +116,6 @@ from nn.bot_agent import HybridRLBot
 from nn.model import HybridPolicyValueNet
 from search.config import HybridAgentConfig
 from search.native import mcts as native_mcts
-from search.native import static_mcts as native_static_mcts
 from search.native.cpp_extension import load_native_mcts_extension
 from training.config import rl_path
 
@@ -674,26 +673,6 @@ def _install_timed_evaluator(collector: TimingCollector, branching: BranchingCol
         return evaluations
 
     native_mcts._evaluate_messages = timed_evaluate_messages
-    return original
-
-
-def _install_timed_static_evaluator(collector: TimingCollector, branching: BranchingCollector) -> Callable[..., list[native_mcts._Evaluation]]:
-    original = native_static_mcts._evaluate_static_messages
-
-    def timed_evaluate_static_messages(
-        messages: list[dict[str, Any]],
-        max_actions: int,
-    ) -> list[native_mcts._Evaluation]:
-        if not messages:
-            return []
-        branching.add_eval_messages(messages)
-        started_at = time.perf_counter()
-        result = original(messages, max_actions)
-        elapsed = time.perf_counter() - started_at
-        collector.add("static_eval.total", elapsed, items=len(messages))
-        return result
-
-    native_static_mcts._evaluate_static_messages = timed_evaluate_static_messages
     return original
 
 
@@ -1486,8 +1465,8 @@ def _load_mcts_search_config(path: Path = DEFAULT_MCTS_SEARCH_CONFIG) -> argpars
     input_mode = "payload" if values.get("payload") is not None else "selfplay"
     values["input_mode"] = input_mode
     values["synthetic"] = False
-    if str(values.get("evaluator")) not in {"nn", "static", "static_exe", "bot"}:
-        raise ValueError("mcts_search config evaluator must be one of: nn, static, static_exe, bot")
+    if str(values.get("evaluator")) not in {"nn", "static_exe", "bot"}:
+        raise ValueError("mcts_search config evaluator must be one of: nn, static_exe, bot")
     if str(values.get("static_eval_variant")) not in {"baseline", "experimental"}:
         raise ValueError("mcts_search config static_eval_variant must be one of: baseline, experimental")
     if str(values.get("native_static_search_mode")) not in {"primitive", "turn-cmab"}:
@@ -2126,7 +2105,7 @@ def _run_one_profile_case(
             repeats=repeats,
         )
 
-    if evaluator_mode in {"bot", "static"}:
+    if evaluator_mode == "bot":
         if bot is None:
             raise RuntimeError("Bot evaluator mode requires a HybridRLBot instance.")
         return _run_bot_profile_case(
@@ -2247,18 +2226,6 @@ def main() -> int:
                 warmup=False,
             )
             checkpoint_status = f"bot:{checkpoint_status}"
-    elif args.evaluator == "static":
-        bot_replay_tmp = tempfile.TemporaryDirectory(prefix="tribes_mcts_profile_static_replay_")
-        bot = HybridRLBot(
-            cfg,
-            Path(args.checkpoint) if args.checkpoint is not None else Path(),
-            Path(bot_replay_tmp.name),
-            device=torch.device("cpu"),
-            native_available=True,
-            warmup=False,
-            static_only_bootstrap=True,
-        )
-        checkpoint_status = "static_eval"
     elif args.evaluator == "static_exe":
         native_static_exe = _ensure_native_static_exe(args)
         checkpoint_status = f"static_exe:{native_static_exe}"
@@ -2272,7 +2239,6 @@ def main() -> int:
     collector = TimingCollector()
     branching = BranchingCollector()
     original_evaluator = _install_timed_evaluator(collector, branching) if args.evaluator in {"nn", "bot"} else None
-    original_static_evaluator = _install_timed_static_evaluator(collector, branching) if args.evaluator == "static" else None
     profile_device = bot.device if bot is not None else device
     original_tree_cls = _install_timed_tree(extension, collector, profile_device) if extension is not None else None
     profile = cProfile.Profile()
@@ -2300,7 +2266,7 @@ def main() -> int:
                         repeats=1,
                     )
                     continue
-                if args.evaluator in {"bot", "static"}:
+                if args.evaluator == "bot":
                     if bot is None:
                         raise RuntimeError("Bot evaluator mode requires a HybridRLBot instance.")
                     bot.reset_episode()
@@ -2319,12 +2285,9 @@ def main() -> int:
         branching = BranchingCollector()
         if original_evaluator is not None:
             native_mcts._evaluate_messages = original_evaluator
-        if original_static_evaluator is not None:
-            native_static_mcts._evaluate_static_messages = original_static_evaluator
         if extension is not None and original_tree_cls is not None:
             extension.NativeMCTS = original_tree_cls
         original_evaluator = _install_timed_evaluator(collector, branching) if args.evaluator in {"nn", "bot"} else None
-        original_static_evaluator = _install_timed_static_evaluator(collector, branching) if args.evaluator == "static" else None
         if extension is not None:
             _install_timed_tree(extension, collector, profile_device)
         if args.nn_module_profile and model is not None:
@@ -2403,8 +2366,6 @@ def main() -> int:
             hardware_sampler.__exit__(None, None, None)
         if original_evaluator is not None:
             native_mcts._evaluate_messages = original_evaluator
-        if original_static_evaluator is not None:
-            native_static_mcts._evaluate_static_messages = original_static_evaluator
         if extension is not None and original_tree_cls is not None:
             extension.NativeMCTS = original_tree_cls
         if bot_replay_tmp is not None:

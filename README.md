@@ -14,9 +14,10 @@ Set `$env:TRIBES_GAME_ROOT` if the Java game checkout lives somewhere else.
 ## What Is Here
 
 - Python external bots under `py/bots/`
+- Supported bot entrypoints under `bots/`
 - Neural-network model, observation/action encoding, belief state, and augmentation under `py/nn/`
-- Search configuration and native/static/hybrid MCTS under `py/search/`
-- RL self-play, replay handling, static bootstrap generation, and training under `py/training/`
+- Search configuration and native NN/static-exe MCTS under `py/search/`
+- RL self-play, replay handling, and training under `py/training/`
 - MCTS and MCTS+NN profilers under `py/profiling/`
 - Native C++ transition/search code under `py/search/native/`
 - Focused Python tests under `py/tests/`
@@ -102,16 +103,14 @@ These tests cover Python bots, self-play config, observation/belief helpers, MCT
 
 ## Native MCTS
 
-Native Python wrappers live in `py/search/native/`. Shared C++ sources live in `py/search/native/src/`, and the standalone protocol executable entrypoint lives in `py/search/native/bot/`. The extension is built through PyTorch C++ extension tooling when `load_native_mcts_extension()` is first used; build caches are intentionally ignored under `py/search/native/.build*/`.
+Native Python wrappers live in `py/search/native/`. Shared C++ sources live in `py/search/native/src/`, and the standalone protocol executable source lives in `bots/`. The extension is built through PyTorch C++ extension tooling when `load_native_mcts_extension()` is first used; build caches are intentionally ignored under `py/search/native/.build*/`.
 
 Useful native files:
 
 - `py/search/native/src/native_rules.cpp`: native transition/rules implementation
 - `py/search/native/src/native_static_eval.cpp`: native static evaluator and action priors
 - `py/search/native/src/native_mcts.cpp`: native MCTS binding/search code
-- `py/search/native/bot/native_static_mcts_bot.cpp`: standalone full static-eval MCTS protocol bot executable
-- `py/search/native/static_mcts.py`: Python static MCTS wrapper
-- `py/search/native/hybrid_mcts.py`: hybrid NN-guided search wrapper
+- `bots/native_static_mcts_bot.cpp`: standalone full static-eval MCTS protocol bot executable source
 - `py/search/native/parity_runner.py`: Java-vs-native parity checker
 - `py/search/native/java/core/game/NativeParityOracle.java`: Java oracle used by parity checks
 
@@ -162,8 +161,6 @@ Main entrypoints:
 
 ```powershell
 $env:PYTHONPATH = "$PWD\py"
-python -m training.generate_static_bootstrap_replay --games 10 --augment-symmetries
-python -m training.pretrain_static
 python -m training.train
 python -m training.checkpoint_tournament
 ```
@@ -185,12 +182,12 @@ The Java game talks to Python bots with a JSON stdin/stdout protocol. See:
 docs/external-bot-protocol.md
 ```
 
-Bot scripts currently include:
+Supported bot entrypoints:
 
-- `py/bots/random_bot.py`
-- `py/bots/simple_bot.py`
-- `py/bots/native_static_mcts_bot.py`
-- `py/bots/hybrid_nn_bot.py`
+- `bots/hybrid_nn_bot.py`
+- `bots/native_static_mcts_bot.cpp` built to `out/native/native_static_mcts_bot.exe`
+
+The Python implementation for the NN bot still lives under `py/bots/` and `py/nn/`. `py/bots/simple_bot.py` is retained as an adjudication/test utility, not a primary bot.
 
 External bot action ids are request-scoped. Do not store an action id and reuse it on a later request.
 

@@ -165,7 +165,7 @@ def test_analyze_position_native_static_exe_maps_profile_stats(monkeypatch, tmp_
         )
 
     monkeypatch.setattr(pa.subprocess, "run", fake_run)
-    monkeypatch.setattr(pa, "_evaluate_static_messages", lambda messages, max_actions: [SimpleNamespace(priors=[0.2, 0.8], value=0.5)])
+    monkeypatch.setattr(pa, "_root_static_eval", lambda payload, actions, max_actions: ([0.2, 0.8], 0.5))
 
     row = pa.analyze_position(
         payload,

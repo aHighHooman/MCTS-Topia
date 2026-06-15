@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -22,8 +21,6 @@ def main() -> None:
     parser.add_argument("--simulations", type=int, default=None)
     parser.add_argument("--top-k-actions", type=int, default=None)
     parser.add_argument("--search-batch-size", type=int, default=None)
-    parser.add_argument("--static-policy-weight", type=float, default=None)
-    parser.add_argument("--static-value-weight", type=float, default=None)
     parser.add_argument("--max-game-actions", type=int, default=None)
     parser.add_argument("--max-actions", type=int, default=None)
     parser.add_argument("--wall-clock-per-action-seconds", type=float, default=None)
@@ -31,12 +28,6 @@ def main() -> None:
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--reuse-tree", action="store_true", help="Experimentally reuse/promote the selected native MCTS subtree between same-turn action requests.")
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--static-eval-variant", choices=("baseline", "experimental"), default=None)
-    parser.add_argument(
-        "--static-only-bootstrap",
-        action="store_true",
-        help="Use native static-eval MCTS while keeping HybridRLBot replay recording; skips NN init/warmup/forward passes.",
-    )
     args = parser.parse_args()
 
     cfg = HybridAgentConfig()
@@ -46,10 +37,6 @@ def main() -> None:
         cfg.search.top_k_actions = args.top_k_actions
     if args.search_batch_size is not None:
         cfg.search.batch_size = args.search_batch_size
-    if args.static_policy_weight is not None:
-        cfg.search.static_policy_weight = max(0.0, min(1.0, float(args.static_policy_weight)))
-    if args.static_value_weight is not None:
-        cfg.search.static_value_weight = max(0.0, min(1.0, float(args.static_value_weight)))
     if args.max_game_actions is not None:
         cfg.selfplay.max_actions_per_game = args.max_game_actions
     if args.max_actions is not None:
@@ -61,8 +48,6 @@ def main() -> None:
         cfg.search.seed = int(args.seed)
     if args.reuse_tree:
         cfg.search.reuse_tree = True
-    if args.static_eval_variant is not None:
-        os.environ["TRIBES_STATIC_EVAL_VARIANT"] = args.static_eval_variant
     wall_clock_per_action = args.wall_clock_per_action_seconds
     if wall_clock_per_action is None:
         wall_clock_per_action = args.wall_clock_per_turn_seconds
@@ -77,8 +62,6 @@ def main() -> None:
         cfg,
         args.checkpoint,
         args.replay_dir,
-        warmup=not args.static_only_bootstrap,
-        static_only_bootstrap=args.static_only_bootstrap,
     )
     while True:
         try:

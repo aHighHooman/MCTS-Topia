@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+import subprocess
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -16,10 +16,13 @@ PROJECT_ROOT = PY_ROOT.parent
 if str(PY_ROOT) not in sys.path:
     sys.path.insert(0, str(PY_ROOT))
 
+from profiling.config import load_config_defaults
 from search.config import HybridAgentConfig
 from training.config import rl_path
 from training.replay import ReplayStore
 from training.selfplay import run_selfplay
+
+DEFAULT_CONFIG = PY_ROOT / "profiling" / "configs" / "generate_mcts_profile_positions.json"
 
 
 CAPTURE_BOT_SOURCE = r'''from __future__ import annotations
@@ -187,6 +190,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-jsonl", type=Path, required=True)
     parser.add_argument("--py-root", type=Path, required=True)
+    parser.add_argument("--native-static-exe", type=Path, required=True)
     parser.add_argument("--player-slot", type=int, required=True)
     parser.add_argument("--simulations", type=int, default=64)
     parser.add_argument("--wall-clock-per-action-seconds", type=float, default=None)
@@ -202,12 +206,29 @@ def main() -> int:
     if py_root not in sys.path:
         sys.path.insert(0, py_root)
 
-    os.environ["TRIBES_STATIC_EVAL_VARIANT"] = args.static_eval_variant
-    from bots.native_static_mcts_bot import _configure, choose_action
     from nn.belief import BeliefTracker
     from nn.encoding import normalize_message
 
-    cfg = _configure(args)
+    command = [
+        str(args.native_static_exe),
+        "--simulations",
+        str(int(args.simulations)),
+        "--top-k-actions",
+        str(int(args.top_k_actions)),
+        "--max-actions",
+        str(int(args.max_actions)),
+        "--search-batch-size",
+        str(int(args.search_batch_size)),
+        "--static-eval-variant",
+        str(args.static_eval_variant),
+        "--seed",
+        str(int(args.seed)),
+    ]
+    if args.wall_clock_per_action_seconds is not None:
+        command.extend(["--wall-clock-per-action-seconds", str(max(0.0, float(args.wall_clock_per_action_seconds)))])
+    if args.deterministic:
+        command.append("--deterministic")
+
     tracker = BeliefTracker()
     args.output_jsonl.parent.mkdir(parents=True, exist_ok=True)
     action_index = 0
@@ -225,7 +246,20 @@ def main() -> int:
                 payload = _payload_from_message(message, tracker, normalize_message)
                 _write_jsonl(output, {"action_index": action_index, "player_slot": args.player_slot, "payload": payload})
                 action_index += 1
-                print(json.dumps(choose_action(_search_payload(payload), cfg, args.wall_clock_per_action_seconds)), flush=True)
+                request = dict(_search_payload(payload))
+                request["type"] = "action_request"
+                completed = subprocess.run(
+                    command,
+                    input=json.dumps(request, separators=(",", ":")) + "\n",
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if completed.returncode != 0:
+                    print(json.dumps({"error": completed.stderr[-1000:] or completed.stdout[-1000:]}), flush=True)
+                    return completed.returncode
+                lines = [item for item in completed.stdout.splitlines() if item.strip()]
+                print(lines[-1] if lines else json.dumps({"error": "native static executable produced no output"}), flush=True)
                 continue
             if msg_type == "game_over":
                 _write_jsonl(output, {"type": "game_over", "player_slot": args.player_slot})
@@ -502,6 +536,8 @@ def _capture_game(args: argparse.Namespace, *, game_index: int, seed: int) -> li
             str(raw_dir / f"player{player_slot}.jsonl"),
             "--py-root",
             str(PY_ROOT),
+            "--native-static-exe",
+            str(args.native_static_exe),
             "--player-slot",
             str(player_slot),
             "--simulations",
@@ -618,6 +654,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bot-max-actions", type=int, default=512)
     parser.add_argument("--bot-batch-size", type=int, default=64)
     parser.add_argument("--static-eval-variant", choices=("baseline", "experimental"), default="baseline")
+    parser.add_argument("--native-static-exe", type=Path, default=PROJECT_ROOT / "out" / "native" / "native_static_mcts_bot.exe")
     parser.add_argument("--bot-deterministic", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "debug-logs" / "mcts-profile-payloads")
     parser.add_argument("--raw-dir", type=Path, default=PROJECT_ROOT / "debug-logs" / "mcts-profile-position-corpus")
@@ -625,7 +662,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--java-executable", default=None)
     parser.add_argument("--java-classpath", default=None)
     parser.add_argument("--java-main-class", default=None)
-    return parser.parse_args()
+    return load_config_defaults(parser, default_config=DEFAULT_CONFIG)
 
 
 def main() -> int:

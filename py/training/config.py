@@ -96,11 +96,6 @@ class TrainingConfig:
     augment_symmetries: bool = True
     augmentation_seed: Optional[int] = None
     device: str = "cuda"
-    static_guidance_bootstrap_iterations: int = 8
-    static_guidance_early_iterations: int = 8
-    static_guidance_middle_iterations: int = 10
-    static_guidance_late_iterations: int = 10
-    static_guidance_final_iterations: int = 12
 
     @property
     def checkpoint_path(self) -> Path:
@@ -119,71 +114,6 @@ class TrainingConfig:
 
 
 @dataclass
-class StaticPretrainConfig:
-    replay_dir: Path = rl_path("replay_static_bootstrap")
-    shard_prefix: str = "replay"
-    checkpoint_dir: Path = rl_path("checkpoints")
-    checkpoint_name: str = "static_pretrained.pt"
-    metrics_csv: Path = rl_path("static_pretrain_metrics.csv")
-    plot_path: Path = rl_path("static_pretrain_loss.png")
-    policy_plot_path: Path = rl_path("static_pretrain_policy_loss.png")
-    value_plot_path: Path = rl_path("static_pretrain_value_loss.png")
-    tensorboard_log_dir: Path | None = rl_path("tensorboard", "static_pretrain")
-    tensorboard_auto_start: bool = True
-    tensorboard_clear_on_start: bool = True
-    tensorboard_restart_on_start: bool = True
-    tensorboard_port: int = 6006
-    max_records_in_memory: int = 20_000
-    train_fraction: float = 0.9
-    seed: int = 7
-    batch_size: int = 256
-    learning_rate: float = 3e-4
-    weight_decay: float = 1e-4
-    gradient_clip: float = 10.0
-    max_epochs: int = 50
-    patience: int = 6
-    min_delta: float = 1e-4
-    plot_update_interval_batches: int = 1
-    console_log_interval_batches: int = 10
-    value_loss_weight: float = 0.5
-    policy_loss_weight: float = 1.0
-    value_target_source: str = "outcome"
-    device: str = "cuda"
-
-    @property
-    def checkpoint_path(self) -> Path:
-        return self.checkpoint_dir / self.checkpoint_name
-
-    @checkpoint_path.setter
-    def checkpoint_path(self, value: Path | str) -> None:
-        path = Path(value)
-        self.checkpoint_dir = path.parent
-        self.checkpoint_name = path.name
-
-    def best_checkpoint_path(self) -> Path:
-        stem = Path(self.checkpoint_name).stem
-        suffix = Path(self.checkpoint_name).suffix or ".pt"
-        return self.checkpoint_dir / f"{stem}_best{suffix}"
-
-
-@dataclass
-class StaticBootstrapConfig:
-    # Bootstrap-only knobs; shared replay/search/self-play settings stay in their existing configs.
-    games: int = 1
-    checkpoint_path: Path = rl_path("checkpoints", "static_bootstrap_dummy.pt")
-    static_bot_script: Path = PROJECT_ROOT / "py" / "bots" / "hybrid_nn_bot.py"
-    tribes: tuple[str, ...] = ("Xin Xi", "Imperius")
-    start_seed: int = 10_000_000
-    deterministic: bool = False
-    static_eval_variant: str | None = None
-    delete_raw: bool = False
-    archive_raw: bool = False
-    augmented_iteration: int = 0
-    max_records_per_augmented_shard: int = 10_000
-    metrics_csv: Path | None = None
-
-
-@dataclass
 class HybridAgentConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
@@ -192,5 +122,3 @@ class HybridAgentConfig:
     reward: RewardConfig = field(default_factory=RewardConfig)
     replay: ReplayConfig = field(default_factory=ReplayConfig)
     diagnostics: DiagnosticsConfig = field(default_factory=DiagnosticsConfig)
-    static_pretrain: StaticPretrainConfig = field(default_factory=StaticPretrainConfig)
-    static_bootstrap: StaticBootstrapConfig = field(default_factory=StaticBootstrapConfig)

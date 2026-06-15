@@ -38,18 +38,6 @@ class SelfPlayConfigTest(unittest.TestCase):
         index = command.index("--wall-clock-per-action-seconds")
         self.assertEqual(command[index + 1], "7.5")
 
-    def test_training_bot_command_passes_static_guidance_weights(self) -> None:
-        cfg = HybridAgentConfig()
-        cfg.search.static_policy_weight = 0.4
-        cfg.search.static_value_weight = 0.2
-
-        command = _bot_command(Path("bot.py"), Path("latest.pt"), Path("replay"), cfg)
-
-        self.assertIn("--static-policy-weight", command)
-        self.assertEqual(command[command.index("--static-policy-weight") + 1], "0.4")
-        self.assertIn("--static-value-weight", command)
-        self.assertEqual(command[command.index("--static-value-weight") + 1], "0.2")
-
     def test_persistent_server_config_leaves_wall_clock_action_budget_unset_by_default(self) -> None:
         args = type(
             "Args",
@@ -58,8 +46,6 @@ class SelfPlayConfigTest(unittest.TestCase):
                 "simulations": 64,
                 "top_k_actions": 32,
                 "search_batch_size": 16,
-                "static_policy_weight": 0.25,
-                "static_value_weight": 0.5,
                 "max_game_actions": 512,
                 "wall_clock_per_action_seconds": None,
                 "profile_selfplay": False,
@@ -69,8 +55,6 @@ class SelfPlayConfigTest(unittest.TestCase):
         cfg = _configure(args)
 
         self.assertIsNone(cfg.selfplay.wall_clock_per_action_seconds)
-        self.assertEqual(cfg.search.static_policy_weight, 0.25)
-        self.assertEqual(cfg.search.static_value_weight, 0.5)
 
     def test_persistent_server_config_reads_explicit_wall_clock_action_budget(self) -> None:
         args = type(

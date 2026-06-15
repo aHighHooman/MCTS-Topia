@@ -251,12 +251,6 @@ def _summarize_records(records: List[StepRecord]) -> Dict[str, object]:
         "losses": outcome_counts["losses"],
         "draws": outcome_counts["draws"],
         "policy_entropy": _policy_entropy_bits(records),
-        "static_policy_weight": (
-            sum(float(record.static_policy_weight) for record in records) / max(1, len(records))
-        ),
-        "static_value_weight": (
-            sum(float(record.static_value_weight) for record in records) / max(1, len(records))
-        ),
     }
 
 
@@ -588,30 +582,6 @@ def _format_profile(summary: Dict[str, float]) -> str:
     )
 
 
-def _static_guidance_weights(cfg: HybridAgentConfig, iteration: int) -> tuple[float, float]:
-    phases = [
-        (max(0, int(cfg.training.static_guidance_bootstrap_iterations)), 1.0, 1.0, 1.0, 1.0),
-        (max(0, int(cfg.training.static_guidance_early_iterations)), 1.0, 1.0, 0.75, 0.5),
-        (max(0, int(cfg.training.static_guidance_middle_iterations)), 0.75, 0.5, 0.4, 0.2),
-        (max(0, int(cfg.training.static_guidance_late_iterations)), 0.4, 0.2, 0.1, 0.0),
-        (max(0, int(cfg.training.static_guidance_final_iterations)), 0.1, 0.0, 0.0, 0.0),
-    ]
-    offset = max(0, int(iteration) - 1)
-    for length, p_start, v_start, p_end, v_end in phases:
-        if length <= 0:
-            continue
-        if offset < length:
-            if length == 1:
-                return float(p_end), float(v_end)
-            t = float(offset) / float(length - 1)
-            return (
-                float(p_start + (p_end - p_start) * t),
-                float(v_start + (v_end - v_start) * t),
-            )
-        offset -= length
-    return 0.0, 0.0
-
-
 def _policy_entropy_bits(records: list[StepRecord]) -> float:
     total = 0.0
     count = 0
@@ -661,8 +631,6 @@ def _selfplay_game_row(
         "actions_sec": actions_sec,
         "configured_sims_sec": configured_sims_sec,
         "simulations": simulations,
-        "static_policy_weight": float(summary.get("static_policy_weight", 0.0) or 0.0),
-        "static_value_weight": float(summary.get("static_value_weight", 0.0) or 0.0),
         "profile_actions": profile_actions,
         "decisive": int(summary.get("decisive", 0) or 0) if exact_summary else "",
         "draws": int(summary.get("draws", 0) or 0) if exact_summary else "",
@@ -812,10 +780,6 @@ def _bot_command(
         str(cfg.search.top_k_actions),
         "--search-batch-size",
         str(cfg.search.batch_size),
-        "--static-policy-weight",
-        str(float(getattr(cfg.search, "static_policy_weight", 0.0) or 0.0)),
-        "--static-value-weight",
-        str(float(getattr(cfg.search, "static_value_weight", 0.0) or 0.0)),
         "--max-game-actions",
         str(max(1, int(cfg.selfplay.max_actions_per_game))),
     ]
@@ -912,10 +876,6 @@ def _start_persistent_bot_server(
         str(cfg.search.top_k_actions),
         "--search-batch-size",
         str(cfg.search.batch_size),
-        "--static-policy-weight",
-        str(float(getattr(cfg.search, "static_policy_weight", 0.0) or 0.0)),
-        "--static-value-weight",
-        str(float(getattr(cfg.search, "static_value_weight", 0.0) or 0.0)),
         "--max-game-actions",
         str(max(1, int(cfg.selfplay.max_actions_per_game))),
     ]
@@ -1032,7 +992,7 @@ def train(cfg: HybridAgentConfig, *, device: torch.device | None = None) -> None
         f"offline_augment_symmetries={cfg.training.augment_symmetries}",
         flush=True,
     )
-    bot_script = workdir / "py" / "bots" / "hybrid_nn_bot.py"
+    bot_script = workdir / "bots" / "hybrid_nn_bot.py"
     bot_server_script = workdir / "py" / "training" / "persistent_bot_server.py"
     bot_bridge_script = workdir / "py" / "training" / "persistent_bot_bridge.py"
     total_iterations = cfg.training.num_iterations
@@ -1043,17 +1003,11 @@ def train(cfg: HybridAgentConfig, *, device: torch.device | None = None) -> None
         iteration_started_at = time.monotonic()
         selfplay_elapsed_total = 0.0
         iteration = start_iteration + local_iteration + 1
-        if hasattr(cfg.training, "_static_guidance_override"):
-            cfg.search.static_policy_weight, cfg.search.static_value_weight = getattr(cfg.training, "_static_guidance_override")
-        else:
-            cfg.search.static_policy_weight, cfg.search.static_value_weight = _static_guidance_weights(cfg, iteration)
         print(
             f"\n[iter {local_iteration + 1}/{total_iterations} | global {iteration}] "
             f"self-play games={games} mode={cfg.selfplay.game_mode} max_turns={cfg.selfplay.max_turns_capitals} "
             f"max_actions={cfg.selfplay.max_actions_per_game} "
             f"wall_clock_per_action={_format_wall_clock_per_action(cfg)} "
-            f"static_policy_weight={cfg.search.static_policy_weight:.3f} "
-            f"static_value_weight={cfg.search.static_value_weight:.3f} "
             f"action_timeout={cfg.selfplay.external_action_timeout_ms}ms "
             f"persistent_bot={cfg.selfplay.persistent_bot}",
             flush=True,
@@ -1248,8 +1202,6 @@ def train(cfg: HybridAgentConfig, *, device: torch.device | None = None) -> None
             "action_decisions": iteration_profile_actions,
             "action_decisions_sec": action_decisions_sec,
             "configured_sims_sec": configured_sims_sec,
-            "static_policy_weight": float(cfg.search.static_policy_weight),
-            "static_value_weight": float(cfg.search.static_value_weight),
             "policy_entropy": _policy_entropy_bits(training_records),
             "selfplay_sec": selfplay_elapsed_total,
             "train_sec": training_elapsed,

@@ -12,8 +12,6 @@ from profiling.analysis import ANALYSIS_VERSION
 from profiling.analysis.actions import action_field, action_fingerprint, action_id, action_type, top_mass_keys
 from profiling.analysis.distributions import rank_map
 from profiling.analysis.schema import ActionAnalysis, PositionAnalysis
-from search.config import ModelConfig, SearchConfig
-from search.native.static_mcts import _evaluate_static_messages, run_native_static_mcts
 from search.native.cpp_extension import load_native_mcts_extension
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -135,6 +133,27 @@ def _static_breakdown(payload: dict[str, Any], max_actions: int) -> dict[str, An
     return dict(fn(payload, int(max_actions))).get("value_breakdown")
 
 
+def _root_static_eval(payload: dict[str, Any], actions: list[dict[str, Any]], max_actions: int) -> tuple[list[float], float]:
+    extension = load_native_mcts_extension()
+    fn = getattr(extension, "evaluate_static_batch", None) if extension is not None else None
+    if fn is None:
+        raise RuntimeError("Native static evaluator extension is unavailable.")
+    messages = [{"player_id": int(payload["player_id"]), "observation": payload["observation"], "actions": actions}]
+    raw_evaluations = list(fn(messages, int(max_actions)))
+    if len(raw_evaluations) != 1:
+        raise RuntimeError(f"Static evaluator returned {len(raw_evaluations)} root evaluations.")
+    raw = dict(raw_evaluations[0])
+    priors = [float(value) for value in list(raw.get("priors", []))[: len(actions)]]
+    if len(priors) != len(actions):
+        raise RuntimeError(f"Static evaluator returned {len(priors)} priors for {len(actions)} actions.")
+    total = sum(max(0.0, prior) for prior in priors)
+    if total > 0.0:
+        priors = [max(0.0, prior) / total for prior in priors]
+    elif priors:
+        priors = [1.0 / len(priors)] * len(priors)
+    return priors, float(raw.get("value", 0.0))
+
+
 def analyze_position(
     payload: dict[str, Any],
     *,
@@ -154,53 +173,33 @@ def analyze_position(
 ) -> PositionAnalysis:
     previous_variant = os.environ.get("TRIBES_STATIC_EVAL_VARIANT")
     os.environ["TRIBES_STATIC_EVAL_VARIANT"] = str(target.get("variant", "baseline"))
-    model_cfg = ModelConfig(max_actions=int(max_actions))
-    search_cfg = SearchConfig()
-    search_cfg.num_simulations = int(simulations)
-    search_cfg.batch_size = int(batch_size)
-    search_cfg.c_puct = float(c_puct)
-    search_cfg.top_k_actions = int(top_k_actions)
-    search_cfg.sample_action = False
-    search_cfg.root_temperature = 1.0
-    search_cfg.dirichlet_epsilon = 0.0
-    setattr(search_cfg, "seed", int(seed))
     try:
         actions = list(payload.get("actions", [])) if max_actions < 0 else list(payload.get("actions", []))[:max_actions]
-        root_eval = _evaluate_static_messages(
-            [{"player_id": int(payload["player_id"]), "observation": payload["observation"], "actions": actions}],
-            int(max_actions),
-        )[0]
-        priors = root_eval.priors
+        priors, root_value = _root_static_eval(payload, actions, int(max_actions))
         started_at = time.perf_counter()
-        if str(target.get("mcts_impl", "native_static_exe")) == "native_static_exe":
-            response = _run_native_static_exe(
-                payload,
-                target=target,
-                simulations=simulations,
-                batch_size=batch_size,
-                top_k_actions=top_k_actions,
-                max_actions=max_actions,
-                seed=seed,
-                native_static_exe=native_static_exe,
-                build_native_static_exe=build_native_static_exe,
-                native_static_search_mode=native_static_search_mode,
-            )
-            profile = response.get("_profile") if isinstance(response.get("_profile"), dict) else {}
-            root_stats = list(profile.get("root_action_stats", [])) if isinstance(profile, dict) else []
-            stats_by_id = {str(row.get("action_id")): row for row in root_stats if isinstance(row, dict)}
-            visit_distribution = {
-                str(row.get("action_id")): float(row.get("visit_share", 0.0) or 0.0)
-                for row in root_stats
-                if isinstance(row, dict) and row.get("action_id") is not None
-            }
-            selected_action_id = str(response.get("actionId") or "")
-            root_value = float(root_eval.value)
-        else:
-            result = run_native_static_mcts(payload, search_cfg, model_cfg)
-            stats_by_id = {str(row.get("action_id")): row for row in (result.root_stats or [])}
-            visit_distribution = {str(action_id): float(share) for action_id, share in result.visit_distribution.items()}
-            selected_action_id = str(result.action_id)
-            root_value = float(result.value)
+        if str(target.get("mcts_impl", "native_static_exe")) != "native_static_exe":
+            raise ValueError("Static position analysis only supports mcts_impl=native_static_exe.")
+        response = _run_native_static_exe(
+            payload,
+            target=target,
+            simulations=simulations,
+            batch_size=batch_size,
+            top_k_actions=top_k_actions,
+            max_actions=max_actions,
+            seed=seed,
+            native_static_exe=native_static_exe,
+            build_native_static_exe=build_native_static_exe,
+            native_static_search_mode=native_static_search_mode,
+        )
+        profile = response.get("_profile") if isinstance(response.get("_profile"), dict) else {}
+        root_stats = list(profile.get("root_action_stats", [])) if isinstance(profile, dict) else []
+        stats_by_id = {str(row.get("action_id")): row for row in root_stats if isinstance(row, dict)}
+        visit_distribution = {
+            str(row.get("action_id")): float(row.get("visit_share", 0.0) or 0.0)
+            for row in root_stats
+            if isinstance(row, dict) and row.get("action_id") is not None
+        }
+        selected_action_id = str(response.get("actionId") or "")
         search_sec = time.perf_counter() - started_at
         visit_scores = [float(visit_distribution.get(action_id(action), 0.0)) for action in actions]
         prior_scores = [float(priors[index]) if index < len(priors) else 0.0 for index in range(len(actions))]

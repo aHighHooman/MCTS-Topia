@@ -65,7 +65,7 @@ def _bot_command(
 ) -> list[str]:
     command = [
         "python",
-        str(workdir / "py" / "bots" / "hybrid_nn_bot.py"),
+        str(workdir / "bots" / "hybrid_nn_bot.py"),
         "--checkpoint",
         str(checkpoint),
         "--replay-dir",

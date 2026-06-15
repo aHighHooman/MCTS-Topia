@@ -56,8 +56,6 @@ class SearchConfig:
     top_k_actions: int = 64
     sample_action: bool = True
     min_non_end_turn_visits: int = 1
-    static_policy_weight: float = 0.0
-    static_value_weight: float = 0.0
     use_progressive_widening: bool = True
     reuse_tree: bool = False
 
@@ -67,8 +65,6 @@ _MOVED_TO_TRAINING_CONFIG = {
     "ReplayConfig",
     "RewardConfig",
     "SelfPlayConfig",
-    "StaticBootstrapConfig",
-    "StaticPretrainConfig",
     "TrainingConfig",
 }
 
