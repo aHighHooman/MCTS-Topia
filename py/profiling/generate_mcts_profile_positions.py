@@ -564,9 +564,6 @@ def _capture_game(args: argparse.Namespace, *, game_index: int, seed: int) -> li
         bot_commands,
         args.tribes,
         args.workdir,
-        checkpoint_path=rl_path("checkpoints", "latest.pt"),
-        replay_store=ReplayStore(raw_dir / "_replay", capacity_steps=0, shard_prefix="capture", load_existing=False),
-        device=torch.device("cpu"),
         progress_label=f"profile-position-corpus-{game_index}-seed{seed}",
     )
 

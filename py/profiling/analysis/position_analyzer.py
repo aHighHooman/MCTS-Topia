@@ -133,6 +133,15 @@ def _static_breakdown(payload: dict[str, Any], max_actions: int) -> dict[str, An
     return dict(fn(payload, int(max_actions))).get("value_breakdown")
 
 
+def _action_breakdown(payload: dict[str, Any], action_id: str, max_actions: int) -> dict[str, Any] | None:
+    extension = load_native_mcts_extension()
+    fn = getattr(extension, "evaluate_action_breakdown", None) if extension is not None else None
+    if fn is None:
+        return None
+    res = fn(payload, action_id, int(max_actions))
+    return dict(res).get("value_breakdown") if res else None
+
+
 def _root_static_eval(payload: dict[str, Any], actions: list[dict[str, Any]], max_actions: int) -> tuple[list[float], float]:
     extension = load_native_mcts_extension()
     fn = getattr(extension, "evaluate_static_batch", None) if extension is not None else None
@@ -211,6 +220,10 @@ def analyze_position(
         for index, action in enumerate(actions):
             aid = action_id(action)
             stat = stats_by_id.get(aid, {})
+            v_rank = visit_ranks.get(index, 0)
+            act_breakdown = None
+            if v_rank in {1, 2, 3} and include_breakdown:
+                act_breakdown = _action_breakdown(payload, aid, max_actions)
             action_rows.append(
                 ActionAnalysis(
                     action_id=aid,
@@ -221,7 +234,7 @@ def analyze_position(
                     prior_rank=prior_ranks.get(index, 0),
                     visits=int(stat["visits"]) if "visits" in stat else None,
                     visit_share=float(stat.get("visit_share", visit_scores[index])),
-                    visit_rank=visit_ranks.get(index, 0),
+                    visit_rank=v_rank,
                     q_mean=float(stat["q_mean"]) if "q_mean" in stat else None,
                     value_sum=float(stat["value_sum"]) if "value_sum" in stat else None,
                     in_top95=aid in top95 or aid == selected_action_id,
@@ -230,6 +243,7 @@ def analyze_position(
                     x=action_field(action, "x"),
                     y=action_field(action, "y"),
                     target=action_field(action, "target_unit_id", "targetUnitId", "target_id", "targetId", "tu"),
+                    value_breakdown=act_breakdown,
                 )
             )
         return PositionAnalysis(

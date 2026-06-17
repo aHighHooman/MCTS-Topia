@@ -949,8 +949,6 @@ def _capture_selfplay_start_payload(args: argparse.Namespace, seed: int | None =
     _write_capture_bot(capture_script)
     command = [sys.executable, str(capture_script), "--output", str(out_path), "--py-root", str(PY_ROOT)]
     tribes = list(args.selfplay_tribes)
-    replay_dir = out_path.parent / "_capture_replay"
-    replay_store = ReplayStore(replay_dir, capacity_steps=0, shard_prefix="capture", load_existing=False)
 
     try:
         run_selfplay(
@@ -958,9 +956,6 @@ def _capture_selfplay_start_payload(args: argparse.Namespace, seed: int | None =
             [command, list(command)],
             tribes,
             workdir,
-            checkpoint_path=rl_path("checkpoints", "latest.pt"),
-            replay_store=replay_store,
-            device=torch.device("cpu"),
             progress_label=f"profile-capture-{safe_mode}-seed{run_seed}",
         )
     except Exception as exc:

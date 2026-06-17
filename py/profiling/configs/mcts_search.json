@@ -21,7 +21,7 @@
   "java_classpath": null,
   "java_main_class": null,
   "checkpoint": "py/profiling/mcts_search_profiling_random_init_model.pt",
-  "static_eval_variant": "experimental",
+  "static_eval_variant": "baseline",
   "native_static_search_mode": "primitive",
   "native_static_exe": "out/native/native_static_mcts_bot.exe",
   "build_native_static_exe": true,

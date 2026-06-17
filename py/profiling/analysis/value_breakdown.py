@@ -64,7 +64,26 @@ def run(args: argparse.Namespace) -> Path:
         row = asdict(position)
         positions.append(row)
         for term in (row.get("value_breakdown") or {}).get("terms", []):
-            term_rows.append({"payload_hash": digest, "label": path.stem, **term})
+            term_rows.append({
+                "payload_hash": digest,
+                "label": path.stem,
+                "action_rank": 0,
+                "action_id": "root",
+                "action_fingerprint": "root",
+                **term,
+            })
+        for action in row.get("actions", []):
+            rank = action.get("visit_rank")
+            if rank in {1, 2, 3} and action.get("value_breakdown") is not None:
+                for term in action["value_breakdown"].get("terms", []):
+                    term_rows.append({
+                        "payload_hash": digest,
+                        "label": path.stem,
+                        "action_rank": rank,
+                        "action_id": action["action_id"],
+                        "action_fingerprint": action["action_fingerprint"],
+                        **term,
+                    })
     if not positions:
         raise RuntimeError(
             f"no valid payload positions loaded from {payload_dir}; "
@@ -75,7 +94,18 @@ def run(args: argparse.Namespace) -> Path:
         encoding="utf-8",
     )
     with (output_dir / "terms.csv").open("w", newline="", encoding="utf-8") as handle:
-        fieldnames = ["payload_hash", "label", "name", "raw", "normalized", "abs_share", "linearized_value"]
+        fieldnames = [
+            "payload_hash",
+            "label",
+            "action_rank",
+            "action_id",
+            "action_fingerprint",
+            "name",
+            "raw",
+            "normalized",
+            "abs_share",
+            "linearized_value",
+        ]
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(term_rows)
@@ -86,7 +116,7 @@ def run(args: argparse.Namespace) -> Path:
         "note": "Term rows are exact pre-tanh additive raw-space contributions; linearized_value is local tanh sensitivity, not an ablation.",
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
-    write_report(output_dir / "report.html", "Static Value Breakdown", summary, term_rows[:300])
+    write_report(output_dir / "report.html", "Static Value Breakdown", summary, term_rows[:1200])
     print(f"wrote {output_dir}")
     return output_dir
 

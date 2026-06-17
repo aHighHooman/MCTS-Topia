@@ -25,6 +25,7 @@ class ActionAnalysis:
     x: Any = None
     y: Any = None
     target: Any = None
+    value_breakdown: dict[str, Any] | None = None
 
 
 @dataclass

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from profiling.analysis import value_breakdown as vb
-from profiling.analysis.schema import PositionAnalysis
+from profiling.analysis.schema import PositionAnalysis, ActionAnalysis
 
 
 def _payload(action_id: str) -> dict[str, object]:
@@ -59,6 +59,33 @@ def test_value_breakdown_resolves_payload_dir_from_repo_root_and_skips_metadata(
                     }
                 ]
             },
+            actions=[
+                ActionAnalysis(
+                    action_id="a",
+                    action_fingerprint="END_TURN|a",
+                    action_index=0,
+                    action_type="END_TURN",
+                    prior=1.0,
+                    prior_rank=1,
+                    visits=10,
+                    visit_share=1.0,
+                    visit_rank=1,
+                    q_mean=0.5,
+                    value_sum=5.0,
+                    in_top95=True,
+                    value_breakdown={
+                        "terms": [
+                            {
+                                "name": "term_action_1",
+                                "raw": 2.0,
+                                "normalized": 1.0,
+                                "abs_share": 1.0,
+                                "linearized_value": 0.5,
+                            }
+                        ]
+                    }
+                )
+            ]
         )
 
     monkeypatch.setattr(vb, "PROJECT_ROOT", repo_root)
@@ -87,7 +114,7 @@ def test_value_breakdown_resolves_payload_dir_from_repo_root_and_skips_metadata(
     assert output_dir == repo_root / "debug-logs" / "analysis" / "value-breakdown" / "test-run"
     assert calls == ["case-1"]
     assert json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))["positions"] == 1
-    assert (output_dir / "terms.csv").read_text(encoding="utf-8").count("\n") == 2
+    assert (output_dir / "terms.csv").read_text(encoding="utf-8").count("\n") == 3
 
 
 def test_value_breakdown_fails_when_payload_dir_is_empty(monkeypatch, tmp_path) -> None:

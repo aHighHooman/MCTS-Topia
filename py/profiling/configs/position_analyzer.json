@@ -1,7 +1,7 @@
 {
   "payload": null,
   "target": "baseline",
-  "simulations": 512,
+  "simulations": 20000,
   "batch_size": 64,
   "top_k_actions": 0,
   "max_actions": 512,
