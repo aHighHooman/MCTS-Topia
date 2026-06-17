@@ -22,6 +22,43 @@ from search.native.cpp_extension import load_native_mcts_extension
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PARITY_JAVA_ROOT = Path(__file__).resolve().parent / "java"
 
+ACTION_TYPES = [
+    "BUILD", "BURN_FOREST", "CLEAR_FOREST", "DESTROY", "GROW_FOREST", "LEVEL_UP",
+    "GATHER", "SPAWN", "BUILD_ROAD", "BUILD_EMBASSY", "END_TURN", "RESEARCH",
+    "PROPOSE_PEACE", "ACCEPT_PEACE", "PROPOSE_TREATY", "ACCEPT_TREATY", "CANCEL_TREATY",
+    "ATTACK", "CAPTURE", "CONVERT", "DISBAND", "EXAMINE", "HEAL_OTHERS", "INFILTRATE",
+    "MAKE_VETERAN", "MOVE", "RECOVER", "UPGRADE_RAMMER", "UPGRADE_SCOUT", "UPGRADE_BOMBER",
+]
+UNIT_TYPES = [
+    "WARRIOR", "RIDER", "DEFENDER", "SWORDMAN", "ARCHER", "CATAPULT", "KNIGHT",
+    "MIND_BENDER", "RAFT", "SCOUT", "BOMBER", "SUPERUNIT", "CLOAK", "DAGGER",
+    "RAMMER", "JUGGERNAUT", "DINGHY", "PIRATE",
+]
+BUILDING_TYPES = [
+    "PORT", "MINE", "FORGE", "FARM", "WINDMILL", "MARKET", "LUMBER_HUT", "SAWMILL",
+    "TEMPLE", "WATER_TEMPLE", "FOREST_TEMPLE", "MOUNTAIN_TEMPLE", "ALTAR_OF_PEACE",
+    "EMPERORS_TOMB", "EYE_OF_GOD", "GATE_OF_POWER", "GRAND_BAZAR", "PARK_OF_FORTUNE",
+    "TOWER_OF_WISDOM", "EMBASSY",
+]
+RESOURCE_TYPES = ["FISH", "FRUIT", "ANIMAL", "STARFISH", "LIGHTHOUSE", "ORE", "CROPS", "RUINS"]
+TERRAIN_TYPES = ["PLAIN", "SHALLOW_WATER", "DEEP_WATER", "MOUNTAIN", "VILLAGE", "CITY", "FOREST", "FOG"]
+RESULT_TYPES = ["WIN", "LOSS", "INCOMPLETE"]
+STATUS_TYPES = ["FRESH", "MOVED", "ATTACKED", "MOVED_AND_ATTACKED", "PUSHED", "FINISHED"]
+TRIBE_TYPES = [
+    "XIN_XI", "IMPERIUS", "BARDUR", "OUMAJI", "KICKOO", "HOODRICK",
+    "LUXIDOOR", "VENGIR", "ZEBASI", "AI_MO", "QUETZALI", "YADAKK",
+]
+TECH_TYPES = [
+    "CLIMBING", "FISHING", "HUNTING", "ORGANIZATION", "RIDING", "ARCHERY",
+    "FARMING", "FORESTRY", "FREE_SPIRIT", "MEDITATION", "MINING", "ROADS",
+    "RAMMING", "SAILING", "STRATEGY", "AQUATISM", "CHIVALRY", "CONSTRUCTION",
+    "DIPLOMACY", "MATHEMATICS", "NAVIGATION", "SMITHERY", "SPIRITUALISM",
+    "TRADE", "PHILOSOPHY",
+]
+LEVEL_UP_BONUSES = ["WORKSHOP", "EXPLORER", "CITY_WALL", "RESOURCES", "POP_GROWTH", "BORDER_GROWTH", "PARK", "SUPERUNIT"]
+EXAMINE_BONUSES = ["UNIT", "RESEARCH", "POP_GROWTH", "EXPLORER", "RESOURCES"]
+RELATIONSHIP_TYPES = ["WAR", "PEACE", "TREATY"]
+
 
 class ParityFailure(AssertionError):
     pass
@@ -85,9 +122,26 @@ def _run_java_oracle(
         check=True,
     )
     oracle = json.loads(completed.stdout)
+    _expand_oracle_compact_states(oracle)
     _annotate_native_actor_id_floors(oracle)
     _annotate_native_enemy_explored(oracle)
     return oracle
+
+
+def _expand_oracle_compact_states(oracle: dict[str, Any]) -> None:
+    if isinstance(oracle.get("root"), dict):
+        oracle["root"] = _expand_compact_state(oracle["root"])
+    for child in oracle.get("children", []) or []:
+        if isinstance(child, dict) and isinstance(child.get("state"), dict):
+            child["state"] = _expand_compact_state(child["state"])
+    for node in oracle.get("nodes", []) or []:
+        if not isinstance(node, dict):
+            continue
+        if isinstance(node.get("state"), dict):
+            node["state"] = _expand_compact_state(node["state"])
+        for child in node.get("children", []) or []:
+            if isinstance(child, dict) and isinstance(child.get("state"), dict):
+                child["state"] = _expand_compact_state(child["state"])
 
 
 def _state_observation(state: dict[str, Any]) -> dict[str, Any]:
@@ -98,6 +152,202 @@ def _state_observation(state: dict[str, Any]) -> dict[str, Any]:
     if isinstance(observation, dict):
         return observation
     return {}
+
+
+def _enum_name(names: list[str], value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        return value
+    return names[index] if 0 <= index < len(names) else value
+
+
+def _matrix_codes(matrix: Any, names: list[str]) -> list[list[Any]]:
+    if not isinstance(matrix, list):
+        return []
+    return [[_enum_name(names, value) for value in row] for row in matrix if isinstance(row, list)]
+
+
+def _array_value(values: list[Any], index: int, fallback: Any = None) -> Any:
+    return values[index] if 0 <= index < len(values) else fallback
+
+
+def _normalize_compact_board(board: Any) -> dict[str, Any]:
+    if not isinstance(board, list):
+        return {}
+    size = int(_array_value(board, 0, 0) or 0)
+    terrain = _matrix_codes(_array_value(board, 1, []), TERRAIN_TYPES)
+    resource = _matrix_codes(_array_value(board, 2, []), RESOURCE_TYPES)
+    building = _matrix_codes(_array_value(board, 3, []), BUILDING_TYPES)
+    city = _array_value(board, 4, []) if isinstance(_array_value(board, 4, []), list) else []
+    unit = _array_value(board, 5, []) if isinstance(_array_value(board, 5, []), list) else []
+    explored = _array_value(board, 6, []) if isinstance(_array_value(board, 6, []), list) else []
+    road = _array_value(board, 7, []) if isinstance(_array_value(board, 7, []), list) else []
+    tiles: list[list[dict[str, Any]]] = []
+    for y in range(size):
+      row: list[dict[str, Any]] = []
+      for x in range(size):
+        row.append({
+            "x": x,
+            "y": y,
+            "terrain": terrain[y][x] if y < len(terrain) and x < len(terrain[y]) else None,
+            "resource": resource[y][x] if y < len(resource) and x < len(resource[y]) else None,
+            "building": building[y][x] if y < len(building) and x < len(building[y]) else None,
+            "city_id": int(city[y][x] or 0) if y < len(city) and isinstance(city[y], list) and x < len(city[y]) else 0,
+            "unit_id": int(unit[y][x] or 0) if y < len(unit) and isinstance(unit[y], list) and x < len(unit[y]) else 0,
+            "explored": bool(explored[y][x]) if y < len(explored) and isinstance(explored[y], list) and x < len(explored[y]) else False,
+            "visible": bool(explored[y][x]) if y < len(explored) and isinstance(explored[y], list) and x < len(explored[y]) else False,
+            "road": bool(road[y][x]) if y < len(road) and isinstance(road[y], list) and x < len(road[y]) else False,
+        })
+      tiles.append(row)
+    return {
+        "size": size,
+        "terrain": terrain,
+        "resource": resource,
+        "building": building,
+        "city": city,
+        "unit": unit,
+        "explored": explored,
+        "road": road,
+        "tiles": tiles,
+    }
+
+
+def _normalize_compact_observation(observation: Any) -> Any:
+    if not isinstance(observation, list):
+        return observation
+    return {
+        "tick": _array_value(observation, 0, 0),
+        "map_type": _array_value(observation, 1),
+        "active_player_id": _array_value(observation, 2, 0),
+        "can_end_turn": bool(_array_value(observation, 3, 0)),
+        "leveling_up": bool(_array_value(observation, 4, 0)),
+        "tribes": [
+            {
+                "id": _array_value(tribe, 0, 0),
+                "type": _enum_name(TRIBE_TYPES, _array_value(tribe, 1)),
+                "tribe": _enum_name(TRIBE_TYPES, _array_value(tribe, 1)),
+                "stars": _array_value(tribe, 2, 0),
+                "score": _array_value(tribe, 3, 0),
+                "result": _enum_name(RESULT_TYPES, _array_value(tribe, 4)),
+                "capital_id": _array_value(tribe, 5, 0),
+                "researched_tech_ids": [_enum_name(TECH_TYPES, tech) for tech in (_array_value(tribe, 6, []) or [])],
+            }
+            for tribe in (_array_value(observation, 5, []) or [])
+            if isinstance(tribe, list)
+        ],
+        "cities": [
+            {
+                "id": _array_value(city, 0, 0),
+                "tribe_id": _array_value(city, 1, -1),
+                "x": _array_value(city, 2, 0),
+                "y": _array_value(city, 3, 0),
+                "level": _array_value(city, 4, 0),
+                "population": _array_value(city, 5, 0),
+                "population_need": _array_value(city, 6, 0),
+                "production": _array_value(city, 7, 0),
+                "is_capital": bool(_array_value(city, 8, 0)),
+                "has_walls": bool(_array_value(city, 9, 0)),
+                "points_worth": _array_value(city, 10, 0),
+                "buildings": [
+                    {"type": _enum_name(BUILDING_TYPES, _array_value(building, 0)), "x": _array_value(building, 1, 0), "y": _array_value(building, 2, 0)}
+                    for building in (_array_value(city, 11, []) or [])
+                    if isinstance(building, list)
+                ],
+            }
+            for city in (_array_value(observation, 6, []) or [])
+            if isinstance(city, list)
+        ],
+        "units": [
+            {
+                "id": _array_value(unit, 0, 0),
+                "tribe_id": _array_value(unit, 1, -1),
+                "city_id": _array_value(unit, 2, 0),
+                "type": _enum_name(UNIT_TYPES, _array_value(unit, 3)),
+                "x": _array_value(unit, 4, 0),
+                "y": _array_value(unit, 5, 0),
+                "current_hp": _array_value(unit, 6, 0),
+                "max_hp": _array_value(unit, 7, 0),
+                "kills": _array_value(unit, 8, 0),
+                "is_veteran": bool(_array_value(unit, 9, 0)),
+                "status": _enum_name(STATUS_TYPES, _array_value(unit, 10)),
+                "is_hidden": bool(_array_value(unit, 11, 0)),
+                "hidden_enemy_hint": bool(_array_value(unit, 12, 0)),
+                "attack": _array_value(unit, 13, 0),
+                "defence": _array_value(unit, 14, 0),
+                "movement": _array_value(unit, 15, 0),
+                "range": _array_value(unit, 16, 0),
+                "cost": _array_value(unit, 17, 0),
+            }
+            for unit in (_array_value(observation, 7, []) or [])
+            if isinstance(unit, list)
+        ],
+        "board": _normalize_compact_board(_array_value(observation, 8, [])),
+        "ranking": _array_value(observation, 9, []) or [],
+        "relationships": [
+            [_enum_name(RELATIONSHIP_TYPES, relationship) for relationship in row]
+            for row in (_array_value(observation, 10, []) or [])
+            if isinstance(row, list)
+        ],
+    }
+
+
+def _normalize_compact_action(action: Any, index: int) -> Any:
+    if not isinstance(action, list) or not action:
+        return action
+    action_type = _enum_name(ACTION_TYPES, _array_value(action, 0))
+    if action_type == "GATHER":
+        action_type = "RESOURCE_GATHERING"
+    elif action_type == "RESEARCH":
+        action_type = "RESEARCH_TECH"
+    out: dict[str, Any] = {"id": f"A{index}", "i": index, "type": action_type}
+    if action_type == "MOVE":
+        out.update({"unit_id": _array_value(action, 1, 0), "x": _array_value(action, 2, 0), "y": _array_value(action, 3, 0)})
+    elif action_type in {"ATTACK", "CONVERT"}:
+        out.update({"unit_id": _array_value(action, 1, 0), "target_unit_id": _array_value(action, 2, 0)})
+    elif action_type == "CAPTURE":
+        out.update({"unit_id": _array_value(action, 1, 0), "target_city_id": _array_value(action, 2, 0), "capture_type": _enum_name(TERRAIN_TYPES, _array_value(action, 3))})
+    elif action_type == "INFILTRATE":
+        out.update({"unit_id": _array_value(action, 1, 0), "target_city_id": _array_value(action, 2, 0)})
+    elif action_type in {"BUILD", "RESOURCE_GATHERING", "SPAWN", "LEVEL_UP"}:
+        out.update({"city_id": _array_value(action, 1, 0), "x": _array_value(action, 2, 0), "y": _array_value(action, 3, 0)})
+        if action_type == "BUILD":
+            out["building_type"] = _enum_name(BUILDING_TYPES, _array_value(action, 4))
+        elif action_type == "RESOURCE_GATHERING":
+            out["resource_type"] = _enum_name(RESOURCE_TYPES, _array_value(action, 4))
+        elif action_type == "SPAWN":
+            out["unit_type"] = _enum_name(UNIT_TYPES, _array_value(action, 4))
+        else:
+            out["bonus"] = _enum_name(LEVEL_UP_BONUSES, _array_value(action, 4))
+    elif action_type in {"BURN_FOREST", "CLEAR_FOREST", "DESTROY", "GROW_FOREST"}:
+        out.update({"city_id": _array_value(action, 1, 0), "x": _array_value(action, 2, 0), "y": _array_value(action, 3, 0)})
+    elif action_type == "BUILD_ROAD":
+        out.update({"tribe_id": _array_value(action, 1, 0), "x": _array_value(action, 2, 0), "y": _array_value(action, 3, 0)})
+    elif action_type == "RESEARCH_TECH":
+        out.update({"tribe_id": _array_value(action, 1, 0), "tech": _enum_name(TECH_TYPES, _array_value(action, 2))})
+        out["technology"] = out["tech"]
+    elif action_type in {"BUILD_EMBASSY", "PROPOSE_PEACE", "ACCEPT_PEACE", "PROPOSE_TREATY", "ACCEPT_TREATY", "CANCEL_TREATY"}:
+        out.update({"tribe_id": _array_value(action, 1, 0), "target_player_id": _array_value(action, 2, -1)})
+    elif action_type == "EXAMINE":
+        out.update({"unit_id": _array_value(action, 1, 0), "bonus": _enum_name(EXAMINE_BONUSES, _array_value(action, 2))})
+    elif action_type in {"DISBAND", "MAKE_VETERAN", "RECOVER", "HEAL_OTHERS", "UPGRADE_RAMMER", "UPGRADE_SCOUT", "UPGRADE_BOMBER"}:
+        out["unit_id"] = _array_value(action, 1, 0)
+    elif action_type == "END_TURN":
+        out["tribe_id"] = _array_value(action, 1, 0)
+    return out
+
+
+def _expand_compact_state(state: dict[str, Any]) -> dict[str, Any]:
+    out = dict(state)
+    if isinstance(out.get("observation"), list):
+        out["observation"] = _normalize_compact_observation(out["observation"])
+    if isinstance(out.get("actions"), list):
+        out["actions"] = [_normalize_compact_action(action, i) for i, action in enumerate(out.get("actions", []))]
+    return out
 
 
 def _max_actor_id_in_state(state: dict[str, Any]) -> int:
@@ -297,13 +547,21 @@ def _canonical_state(state: dict[str, Any], player_id: int) -> dict[str, Any]:
 
 
 def _canonical_observation(observation: dict[str, Any]) -> dict[str, Any]:
-    out = dict(observation)
-    out.pop("_native_actor_id_floor", None)
-    out.pop("_native_enemy_explored", None)
-    out["board"] = _canonical_board(dict(out.get("board", {})), list(out.get("cities", [])))
-    out["units"] = sorted((_canonical_unit(unit) for unit in out.get("units", [])), key=lambda unit: unit.get("id", 0))
-    out["cities"] = sorted((_canonical_city(city) for city in out.get("cities", [])), key=lambda city: city.get("id", 0))
-    out["tribes"] = sorted((_canonical_tribe(tribe) for tribe in out.get("tribes", [])), key=lambda tribe: tribe.get("id", 0))
+    keys = (
+        "tick",
+        "map_type",
+        "active_player_id",
+        "can_end_turn",
+        "leveling_up",
+        "ranking",
+        "relationships",
+    )
+    out = {key: observation.get(key) for key in keys if key in observation}
+    cities = list(observation.get("cities", []))
+    out["board"] = _canonical_board(dict(observation.get("board", {})), cities)
+    out["units"] = sorted((_canonical_unit(unit) for unit in observation.get("units", [])), key=lambda unit: unit.get("id", 0))
+    out["cities"] = sorted((_canonical_city(city) for city in cities), key=lambda city: city.get("id", 0))
+    out["tribes"] = sorted((_canonical_tribe(tribe) for tribe in observation.get("tribes", [])), key=lambda tribe: tribe.get("id", 0))
     return out
 
 
@@ -378,7 +636,6 @@ def _canonical_city(city: dict[str, Any]) -> dict[str, Any]:
         "infiltrated",
     )
     out = {key: city.get(key) for key in keys if key in city}
-    out["units"] = sorted(int(unit_id) for unit_id in city.get("units", []) or [])
     return out
 
 
@@ -394,7 +651,7 @@ def _canonical_tribe(tribe: dict[str, Any]) -> dict[str, Any]:
         "result",
     )
     out = {key: tribe.get(key) for key in keys if key in tribe}
-    out["researched_tech_ids"] = sorted(str(value) for value in tribe.get("researched_tech_ids", []) or [])
+    out["researched_tech_ids"] = sorted(str(value).upper() for value in tribe.get("researched_tech_ids", []) or [])
     out["city_ids"] = sorted(int(value) for value in tribe.get("city_ids", []) or [])
     out["extra_unit_ids"] = sorted(int(value) for value in tribe.get("extra_unit_ids", []) or [])
     return out
@@ -407,15 +664,38 @@ def _canonical_action(action: dict[str, Any]) -> dict[str, Any]:
         action_type = "RESEARCH_TECH"
     if action_type is not None:
         out["type"] = action_type
-    for key in ("type", "u", "c", "p", "x", "y", "tu", "tc", "ct", "ut", "bt", "rt", "b", "tech", "tp", "bonus"):
-        if key == "type":
-            continue
+
+    field_aliases = {
+        "unit_id": "u",
+        "city_id": "c",
+        "tribe_id": "p",
+        "target_unit_id": "tu",
+        "target_city_id": "tc",
+        "capture_type": "ct",
+        "unit_type": "ut",
+        "building_type": "bt",
+        "resource_type": "rt",
+        "target_player_id": "tp",
+    }
+    zero_is_empty = {"unit_id", "city_id", "tribe_id", "target_unit_id", "target_city_id", "target_player_id"}
+
+    for key, alias in field_aliases.items():
         value = action.get(key)
         if value is None:
+            value = action.get(alias)
+        if value is None:
             continue
-        if key in {"u", "c", "p", "tu", "tc", "tp"} and int(value or 0) == 0:
+        if key in zero_is_empty and int(value or 0) <= 0:
             continue
         out[key] = value
+
+    tech = action.get("tech", action.get("technology"))
+    if tech is not None:
+        out["tech"] = tech
+    for key in ("x", "y", "bonus"):
+        value = action.get(key)
+        if value is not None:
+            out[key] = value
     return out
 
 

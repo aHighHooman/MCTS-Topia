@@ -819,6 +819,59 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertEqual(unit["current_hp"], 5)
         self.assertEqual(unit["movement"], 2)
 
+    def test_native_spawn_ranged_unit_experimental_range(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        
+        # Test baseline variant
+        os.environ["TRIBES_STATIC_EVAL_VARIANT"] = "baseline"
+        try:
+            message = _message()
+            message["observation"]["tribes"][0]["researched_tech_ids"] = ["ARCHERY", "MATHEMATICS"]
+            message["actions"] = [
+                {"id": "spawn_archer", "type": "SPAWN", "city_id": 10, "c": 10, "unit_type": "ARCHER", "ut": "ARCHER"}
+            ]
+            
+            # Spawn ARCHER
+            tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
+            selection = dict(tree.select_leaf(1.5))
+            leaf_payload = dict(selection["leaf_payload"])
+            archer = next(unit for unit in leaf_payload["observation"]["units"] if unit["type"] == "ARCHER")
+            self.assertEqual(archer["range"], 1)
+        finally:
+            if "TRIBES_STATIC_EVAL_VARIANT" in os.environ:
+                del os.environ["TRIBES_STATIC_EVAL_VARIANT"]
+                
+        # Test experimental variant
+        os.environ["TRIBES_STATIC_EVAL_VARIANT"] = "experimental"
+        try:
+            # Spawn ARCHER
+            message = _message()
+            message["observation"]["tribes"][0]["researched_tech_ids"] = ["ARCHERY", "MATHEMATICS"]
+            message["actions"] = [
+                {"id": "spawn_archer", "type": "SPAWN", "city_id": 10, "c": 10, "unit_type": "ARCHER", "ut": "ARCHER"}
+            ]
+            tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
+            selection = dict(tree.select_leaf(1.5))
+            leaf_payload = dict(selection["leaf_payload"])
+            archer = next(unit for unit in leaf_payload["observation"]["units"] if unit["type"] == "ARCHER")
+            self.assertEqual(archer["range"], 2)
+            
+            # Spawn CATAPULT
+            message = _message()
+            message["observation"]["tribes"][0]["researched_tech_ids"] = ["ARCHERY", "MATHEMATICS"]
+            message["actions"] = [
+                {"id": "spawn_catapult", "type": "SPAWN", "city_id": 10, "c": 10, "unit_type": "CATAPULT", "ut": "CATAPULT"}
+            ]
+            tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
+            selection = dict(tree.select_leaf(1.5))
+            leaf_payload = dict(selection["leaf_payload"])
+            catapult = next(unit for unit in leaf_payload["observation"]["units"] if unit["type"] == "CATAPULT")
+            self.assertEqual(catapult["range"], 3)
+        finally:
+            if "TRIBES_STATIC_EVAL_VARIANT" in os.environ:
+                del os.environ["TRIBES_STATIC_EVAL_VARIANT"]
+
     def test_native_research_applies_philosophy_discount(self) -> None:
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)
@@ -1578,6 +1631,66 @@ class NativeMCTSTest(unittest.TestCase):
         experimental = _static_evaluation_for_variant(extension, message, "experimental")
 
         self.assertEqual(baseline, experimental)
+
+    def test_static_eval_experimental_unit_power_kill_bonus(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        
+        # Base message with a single Warrior unit
+        message = _message()
+        message["observation"]["units"] = [
+            {
+                "id": 1,
+                "tribe_id": 0,
+                "city_id": 10,
+                "type": "WARRIOR",
+                "x": 1,
+                "y": 1,
+                "current_hp": 10,
+                "max_hp": 10,
+                "kills": 0,
+                "is_veteran": False,
+                "status": "FRESH",
+                "is_hidden": False,
+            }
+        ]
+        message["observation"]["board"]["tiles"][1][1]["unit_id"] = 1
+
+        def get_unit_power_term(variant: str) -> float:
+            previous = os.environ.get("TRIBES_STATIC_EVAL_VARIANT")
+            try:
+                os.environ["TRIBES_STATIC_EVAL_VARIANT"] = variant
+                breakdown = dict(extension.evaluate_static_breakdown(message, 128))
+            finally:
+                if previous is None:
+                    os.environ.pop("TRIBES_STATIC_EVAL_VARIANT", None)
+                else:
+                    os.environ["TRIBES_STATIC_EVAL_VARIANT"] = previous
+            
+            terms = breakdown["value_breakdown"]["terms"]
+            for term in terms:
+                if term["name"] == "military.unit_power":
+                    return float(term["raw"])
+            raise ValueError("military.unit_power not found in breakdown")
+
+        # 0 kills: power should be identical in both baseline and experimental
+        message["observation"]["units"][0]["kills"] = 0
+        self.assertAlmostEqual(get_unit_power_term("baseline"), get_unit_power_term("experimental"), places=6)
+
+        # 1 kill: experimental should get a bonus of 5 in unit_power.
+        # Since it's multiplied by power_weight (1.810344827586), the raw term difference should be exactly 5 * 1.810344827586 = 9.05172413793.
+        message["observation"]["units"][0]["kills"] = 1
+        expected_diff_1 = 5.0 * 1.810344827586
+        self.assertAlmostEqual(get_unit_power_term("experimental") - get_unit_power_term("baseline"), expected_diff_1, places=5)
+
+        # 2 kills: experimental should get a bonus of 10 in unit_power.
+        message["observation"]["units"][0]["kills"] = 2
+        expected_diff_2 = 10.0 * 1.810344827586
+        self.assertAlmostEqual(get_unit_power_term("experimental") - get_unit_power_term("baseline"), expected_diff_2, places=5)
+
+        # 3 kills: experimental bonus should be capped at 10 (first 2 kills).
+        message["observation"]["units"][0]["kills"] = 3
+        self.assertAlmostEqual(get_unit_power_term("experimental") - get_unit_power_term("baseline"), expected_diff_2, places=5)
 
     def test_static_eval_experimental_keeps_baseline_priors_with_research_context(self) -> None:
         extension = load_native_mcts_extension()

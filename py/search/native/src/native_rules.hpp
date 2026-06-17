@@ -183,4 +183,11 @@ py::dict serialize_evaluation_payload(
     const std::vector<NativeAction>& actions);
 double value_to_root_perspective(double active_player_value, int root_player_id, int leaf_active_player_id);
 
+enum class StaticEvalVariant {
+  Baseline,
+  Experimental,
+};
+
+StaticEvalVariant static_eval_variant();
+
 }  // namespace tribes::native

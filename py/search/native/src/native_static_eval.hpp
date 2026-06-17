@@ -28,5 +28,6 @@ py::dict evaluate_static(const py::dict& payload, int max_actions);
 py::list evaluate_static_batch(const py::list& payloads, int max_actions);
 py::dict evaluate_static_breakdown(const py::dict& payload, int max_actions);
 py::list evaluate_static_breakdown_batch(const py::list& payloads, int max_actions);
+py::dict evaluate_action_breakdown(const py::dict& payload, const std::string& action_id, int max_actions);
 
 }  // namespace tribes::native

@@ -8,7 +8,6 @@ from typing import Any
 class ModelConfig:
     board_size: int = 16
     board_channels: int = 73
-    entity_feature_dim: int = 45
     unit_feature_dim: int = 45
     city_feature_dim: int = 29
     action_feature_dim: int = 267
@@ -38,7 +37,6 @@ class ModelConfig:
         except Exception:
             return
         self.board_channels = len(BOARD_SCHEMA)
-        self.entity_feature_dim = len(UNIT_FEATURE_SCHEMA)
         self.unit_feature_dim = len(UNIT_FEATURE_SCHEMA)
         self.city_feature_dim = len(CITY_FEATURE_SCHEMA)
         self.action_feature_dim = len(ACTION_FEATURE_SCHEMA)

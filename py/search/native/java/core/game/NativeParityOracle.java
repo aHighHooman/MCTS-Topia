@@ -42,8 +42,7 @@ public final class NativeParityOracle {
             }
 
             ArrayList<Action> actions = root.getAllAvailableActions();
-            ArrayList<String> actionIds = buildActionIds("A", actions.size());
-            ExternalForwardModelSession session = new ExternalForwardModelSession(root, playerId, actions, actionIds);
+            ExternalForwardModelSession session = new ExternalForwardModelSession(root, playerId, actions);
 
             JSONObject out = new JSONObject();
             out.put("protocol_version", PROTOCOL_VERSION);
@@ -499,7 +498,7 @@ public final class NativeParityOracle {
                 JSONObject request = new JSONObject();
                 request.put("command", "step");
                 request.put("state_id", stateId);
-                request.put("action_index", i);
+                request.put("i", i);
                 JSONObject response = session.handleCommand(request);
                 child.put("ok", "forward_model_result".equals(response.optString("type")));
                 if (child.getBoolean("ok")) {
@@ -527,6 +526,10 @@ public final class NativeParityOracle {
         if (stateId == null || stateId.isEmpty() || payload == null || !payload.has("observation")) {
             return;
         }
+        JSONObject observation = payload.optJSONObject("observation");
+        if (observation == null) {
+            return;
+        }
         try {
             Field statesField = ExternalForwardModelSession.class.getDeclaredField("states");
             statesField.setAccessible(true);
@@ -544,18 +547,10 @@ public final class NativeParityOracle {
             Field counterField = Board.class.getDeclaredField("actorIDcounter");
             counterField.setAccessible(true);
             int actorIdFloor = counterField.getInt(gameState.getBoard());
-            payload.getJSONObject("observation").put("_native_actor_id_floor", actorIdFloor);
+            observation.put("_native_actor_id_floor", actorIdFloor);
         } catch (ReflectiveOperationException ignored) {
             // Parity-only metadata; native falls back to visible ids if this cannot be read.
         }
-    }
-
-    private static ArrayList<String> buildActionIds(String prefix, int size) {
-        ArrayList<String> ids = new ArrayList<>(size);
-        for (int i = 0; i < size; i++) {
-            ids.add(prefix + i);
-        }
-        return ids;
     }
 
     private static String requiredFlag(String[] args, String name) {

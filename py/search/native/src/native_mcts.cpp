@@ -1733,5 +1733,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("evaluate_static_batch", &tribes::native::evaluate_static_batch);
   m.def("evaluate_static_breakdown", &tribes::native::evaluate_static_breakdown);
   m.def("evaluate_static_breakdown_batch", &tribes::native::evaluate_static_breakdown_batch);
+  m.def("evaluate_action_breakdown", &tribes::native::evaluate_action_breakdown);
 }
 #endif

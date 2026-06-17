@@ -208,11 +208,6 @@ double clamp(double value, double lo, double hi) {
   return std::max(lo, std::min(hi, value));
 }
 
-enum class StaticEvalVariant {
-  Baseline,
-  Experimental,
-};
-
 constexpr double kValueTanhDenominatorStars = 200;
 constexpr double kCityQualityWeightStars = 1;
 
@@ -243,6 +238,8 @@ constexpr double experimentalValueHeadCapitalThreatCoeff =            -1.0;
 constexpr double experimentalValueHeadCityThreatCoeff =               -1.0;
 constexpr double experimentalValueHeadWoundedPenaltyCoeff =           0.0;
 
+}  // namespace
+
 StaticEvalVariant static_eval_variant() {
 #ifdef TRIBES_NATIVE_MCTS_STANDALONE
   static const StaticEvalVariant cached = []() {
@@ -266,6 +263,8 @@ StaticEvalVariant static_eval_variant() {
   return StaticEvalVariant::Baseline;
 #endif
 }
+
+namespace {
 
 const NativeUnit* unit_by_id(const NativeGameState& state, int id) {
   if (id >= 0 && id < static_cast<int>(state.unit_id_index.size())) {
@@ -762,9 +761,6 @@ double visible_ruin_move_score(
     const NativeUnit& unit,
     int destination_x,
     int destination_y) {
-  if (static_eval_variant() == StaticEvalVariant::Experimental) {
-    return assigned_visible_ruin_move_score(state, player_id, unit, destination_x, destination_y);
-  }
   return nearest_eligible_visible_ruin_move_score(state, player_id, unit, destination_x, destination_y);
 }
 
@@ -1040,26 +1036,6 @@ double build_score_baseline(const NativeAction& action, const NativeGameState& s
 double spawn_score_baseline(const NativeAction& action, const NativeGameState& state, int player_id) {
   const std::string unit = action_string(action, "unit_type", "ut");
   const NativeCity* city = city_by_id(state, action.city_id);
-
-  if (static_eval_variant() == StaticEvalVariant::Experimental) {
-    const double threat = city == nullptr ? 0.0 : experimental_city_attack_threat_at(state, player_id, *city);
-    const double threat_bonus = clamp(threat, 0.0, 5.0);
-    double score = 0.0;
-    if (unit == "WARRIOR") score = 4.2 + 0.55 * threat_bonus;
-    else if (unit == "RIDER") score = 4.8 + 0.40 * threat_bonus;
-    else if (unit == "DEFENDER") score = 4.0 + 0.85 * threat_bonus + (threat > 1.0 ? 0.9 : 0.0);
-    else if (unit == "ARCHER") score = 4.0 + 0.65 * threat_bonus + (threat > 0.8 ? 0.4 : 0.0);
-    else if (unit == "SWORDMAN" || unit == "SWORDSMAN") score = 5.8 + 0.55 * threat_bonus;
-    else if (unit == "KNIGHT") score = 6.2 + 0.35 * threat_bonus;
-    else if (unit == "CATAPULT") score = threat > 1.5 ? 2.2 : 5.8;
-    else if (unit == "MIND_BENDER") score = threat > 1.5 ? 2.0 : 4.1;
-    else if (unit == "CLOAK") score = threat > 1.0 ? 2.6 : 4.3;
-    else score = 3.2 + 0.35 * threat_bonus;
-    if (city != nullptr && city->production <= 1 && threat < 1.0) {
-      score -= 0.8;
-    }
-    return clamp(score, 0.0, 9.5);
-  }
 
   const double threat = city == nullptr ? 0.0 : enemy_attack_pressure_at(state, player_id, city->x, city->y);
   double score = 0.0;
@@ -1797,9 +1773,6 @@ double action_score_baseline(
     return 2.2;
   }
   if (type == "BUILD_ROAD") {
-    if (static_eval_variant() == StaticEvalVariant::Experimental) {
-      return 0.0;
-    }
     return road_score_baseline(action, state, actions, legal_action_indexes, player_id);
   }
   if (type == "RESEARCH_TECH") return research_score_baseline(action, state, player_id);
@@ -2006,14 +1979,15 @@ double state_raw_value(
     std::vector<std::pair<std::string, double>>* terms = nullptr) {
   const int player_id = state.active_player_id;
   const NativeTribe* me = tribe_by_id(state, player_id);
-  const bool experimental_eval = static_eval_variant() == StaticEvalVariant::Experimental;
-  const double material_weight = experimental_eval ? 0.0 : 3.706896551724;
-  const double current_score_weight = experimental_eval ? 0.0 : 0.275862068966;
-  const double score_diff_weight = experimental_eval ? 0.0 : 0.172413793103;
-  const double wounded_units_weight = experimental_eval ? 0.0 : -1.293103448276;
-  const double city_production_quality_coeff = experimental_eval ? 0.0 : 1.3;
-  const double city_population_quality_coeff = experimental_eval ? 0.0 : 0.45;
-  const double city_quality_weight = experimental_eval ? 1.0 : kCityQualityWeightStars;
+  const bool is_experimental = static_eval_variant() == StaticEvalVariant::Experimental;
+  const bool experimental_eval = false;
+  const double material_weight = 3.706896551724;
+  const double current_score_weight = 0.0;
+  const double score_diff_weight = 0.172413793103;
+  const double wounded_units_weight = -1.293103448276;
+  const double city_production_quality_coeff = 5.5;
+  const double city_population_quality_coeff = 0.45;
+  const double city_quality_weight = kCityQualityWeightStars;
   double my_material = 0.0;
   double enemy_material = 0.0;
   double my_power = 0.0;
@@ -2185,10 +2159,7 @@ double state_raw_value(
            ? experimentalValueHeadUnitPowerCoeff *
                (my_power - enemy_power)
            : power_weight * (my_power - enemy_power)},
-      {"territory.city_count", experimental_eval
-          ? experimentalValueHeadCityCountCoeff *
-              static_cast<double>(my_cities - enemy_cities)
-          : 18.103448275862 * static_cast<double>(my_cities - enemy_cities)},
+      {"territory.city_count", 0.0},
       {"economy.city_quality", experimental_eval
           ? experimentalValueHeadCityQualityCoeff *
               (my_city_quality - enemy_city_quality)
@@ -2201,9 +2172,7 @@ double state_raw_value(
           ? experimentalValueHeadUnitCapacityCoeff *
               (experimental_population_term + experimental_unit_capacity_term)
           : experimental_population_term + experimental_unit_capacity_term},
-      {"economy.visible_resources", experimental_eval
-          ? experimentalValueHeadVisibleResourcesCoeff * static_cast<double>(visible_resources)
-          : visible_resource_term},
+      {"economy.visible_resources", 0.0},
       {"economy.resource_potential", experimental_eval
           ? experimentalValueHeadResourcePotentialCoeff *
               experimental_resource_term
@@ -2240,10 +2209,7 @@ double state_raw_value(
       {"threat.city_threat", experimental_eval
           ? experimentalValueHeadCityThreatCoeff * city_threat
           : -1.465517241379 * city_threat},
-      {"military.wounded_penalty", experimental_eval
-          ? experimentalValueHeadWoundedPenaltyCoeff *
-              static_cast<double>(wounded_units)
-          : -wounded_units_weight * static_cast<double>(wounded_units)},
+      {"military.wounded_penalty", 0.0},
   };
   double raw = 0.0;
   for (const auto& term : raw_terms) {
@@ -2259,21 +2225,14 @@ double state_raw_baseline(const NativeGameState& state) {
   return state_raw_value(
       state,
       1.810344827586,
-      4.310344827586,
+      0.0,
       0.0);
 }
 
 double state_raw_experimental(const NativeGameState& state) {
-  // Experimental value changes:
-  // - fold army material into unit power
-  // - scale unit power internally by 1/21
-  // - fold city income and current population progress into experimental city quality
-  // - add explicit unit-capacity value
-  // - replace generic visible-resource count with exploitable resource value based on marginal population payoff
-  // - remove score/points and wounded-unit heuristics
   return state_raw_value(
       state,
-      5.517241379310,
+      1.810344827586,
       0.0,
       0.0);
 }
@@ -2318,7 +2277,10 @@ double unit_power(const NativeGameState& state, const NativeUnit& unit) {
 
   const double projection_power = reach * attack * hp_frac * survival_attacks;
   const double defensive_anchor = defence * hp_frac;
-  const double raw_power = projection_power + defensive_anchor + (unit.veteran ? 0.8 : 0.0);
+  double raw_power = projection_power + defensive_anchor + (unit.veteran ? 0.8 : 0.0);
+  if (static_eval_variant() == StaticEvalVariant::Experimental) {
+    raw_power += 5.0 * std::min(2, unit.kills);
+  }
   return raw_power;
 }
 
@@ -2421,8 +2383,8 @@ py::dict evaluate_static_breakdown(const py::dict& payload, int max_actions) {
   }
   const StaticEvalVariant variant = static_eval_variant();
   const double raw_total = variant == StaticEvalVariant::Experimental
-      ? state_raw_value(root.state, 5.517241379310, 0.0, 0.0, &terms)
-      : state_raw_value(root.state, 1.810344827586, 4.310344827586, 0.0, &terms);
+      ? state_raw_value(root.state, 1.810344827586, 0.0, 0.0, &terms)
+      : state_raw_value(root.state, 1.810344827586, 0.0, 0.0, &terms);
   evaluation.value = std::tanh(raw_total / kValueTanhDenominatorStars);
   return breakdown_to_dict(evaluation, terms, raw_total);
 }
@@ -2456,6 +2418,38 @@ py::list evaluate_static_breakdown_batch(const py::list& payloads, int max_actio
     }
   }
   return out;
+}
+
+py::dict evaluate_action_breakdown(const py::dict& payload, const std::string& action_id, int max_actions) {
+  NativeRoot root = parse_root_payload(payload, max_actions);
+  int action_index = -1;
+  for (size_t i = 0; i < root.actions.size(); ++i) {
+    if (root.actions[i].id == action_id) {
+      action_index = static_cast<int>(i);
+      break;
+    }
+  }
+  if (action_index < 0) {
+    py::dict empty;
+    empty["priors"] = py::list();
+    empty["value"] = 0.0;
+    empty["value_breakdown"] = py::none();
+    return empty;
+  }
+  NativeGameState next_state = apply_action_strict(root.state, root.actions, action_index, max_actions);
+  StaticEvaluation evaluation;
+  std::vector<std::pair<std::string, double>> terms;
+  if (next_state.terminal && next_state.terminal_value_known) {
+    evaluation.value = next_state.terminal_value;
+    terms.push_back({"score_terminal.terminal_win_loss", next_state.terminal_value * kValueTanhDenominatorStars});
+    return breakdown_to_dict(evaluation, terms, terms.front().second);
+  }
+  const StaticEvalVariant variant = static_eval_variant();
+  const double raw_total = variant == StaticEvalVariant::Experimental
+      ? state_raw_value(next_state, 1.810344827586, 0.0, 0.0, &terms)
+      : state_raw_value(next_state, 1.810344827586, 0.0, 0.0, &terms);
+  evaluation.value = std::tanh(raw_total / kValueTanhDenominatorStars);
+  return breakdown_to_dict(evaluation, terms, raw_total);
 }
 
 }  // namespace tribes::native
