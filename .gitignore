@@ -28,4 +28,5 @@ logs/
 tmp/
 rl/
 tempEmail/
+docs-history/
 .aider*

@@ -1121,8 +1121,8 @@ def encode_observation(
         board_tensor = torch.from_numpy(channels)
 
     units = _sorted_entities(units_raw)
-    unit_feature_dim = int(getattr(model_cfg, "unit_feature_dim", getattr(model_cfg, "entity_feature_dim", len(UNIT_FEATURE_SCHEMA))))
-    city_feature_dim = int(getattr(model_cfg, "city_feature_dim", getattr(model_cfg, "entity_feature_dim", len(CITY_FEATURE_SCHEMA))))
+    unit_feature_dim = int(getattr(model_cfg, "unit_feature_dim", len(UNIT_FEATURE_SCHEMA)))
+    city_feature_dim = int(getattr(model_cfg, "city_feature_dim", len(CITY_FEATURE_SCHEMA)))
     unit_limit = min(len(units), model_cfg.max_units) if compact else model_cfg.max_units
     unit_features = np.zeros((unit_limit, unit_feature_dim), dtype=np.float32)
     unit_mask = np.zeros(unit_limit, dtype=np.bool_)

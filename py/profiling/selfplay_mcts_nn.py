@@ -597,7 +597,6 @@ def main() -> int:
     cfg = _configure(args)
     cfg.replay.replay_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    replay_store = ReplayStore(cfg.replay.replay_dir, cfg.replay.capacity_steps, cfg.replay.shard_prefix)
 
     command = _bot_command(args, cfg, workdir)
     bot_commands = [command, list(command)]
@@ -653,9 +652,6 @@ def main() -> int:
                 bot_commands,
                 list(args.tribes),
                 workdir,
-                checkpoint_path=args.checkpoint,
-                replay_store=replay_store,
-                device=device,
                 progress_label=f"profile-selfplay-game-{index}",
             )
             elapsed_sec = time.perf_counter() - started_at

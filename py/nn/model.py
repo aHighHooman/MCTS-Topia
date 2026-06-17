@@ -68,8 +68,8 @@ class HybridPolicyValueNet(nn.Module):
             ]
         )
         self.board_encoder = nn.Sequential(*board_layers)
-        self.unit_proj = nn.Linear(getattr(cfg, "unit_feature_dim", cfg.entity_feature_dim), cfg.d_model)
-        self.city_proj = nn.Linear(getattr(cfg, "city_feature_dim", cfg.entity_feature_dim), cfg.d_model)
+        self.unit_proj = nn.Linear(cfg.unit_feature_dim, cfg.d_model)
+        self.city_proj = nn.Linear(cfg.city_feature_dim, cfg.d_model)
         self.action_proj = nn.Linear(cfg.action_feature_dim, cfg.d_model)
         self.scalar_value_proj = nn.Linear(1, cfg.d_model)
         self.scalar_index_embeddings = nn.Embedding(cfg.scalar_dim, cfg.d_model)

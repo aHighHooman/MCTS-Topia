@@ -172,9 +172,8 @@ class HybridRLBot:
         cuda_name = torch.cuda.get_device_name(self.device) if self.device.type == "cuda" else str(self.device)
         try:
             cfg = self.config.model
-            # Some older configs only expose entity_feature_dim; newer ones split unit/city widths.
-            unit_width = int(getattr(cfg, "unit_feature_dim", getattr(cfg, "entity_feature_dim", 0)))
-            city_width = int(getattr(cfg, "city_feature_dim", getattr(cfg, "entity_feature_dim", unit_width)))
+            unit_width = int(getattr(cfg, "unit_feature_dim", 0))
+            city_width = int(getattr(cfg, "city_feature_dim", 0))
             encoded = EncodedObservation(
                 board=torch.zeros((1, cfg.board_channels, cfg.board_size, cfg.board_size), device=self.device),
                 unit_features=torch.zeros((1, cfg.max_units, unit_width), device=self.device),

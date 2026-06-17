@@ -952,9 +952,6 @@ def _run_selfplay_game(
         commands,
         tribes,
         workdir,
-        checkpoint_path=checkpoint_path,
-        replay_store=ReplayStore(replay_dir, game_cfg.replay.capacity_steps, game_cfg.replay.shard_prefix, load_existing=False),
-        device=device,
         progress_label=label,
     )
     return {

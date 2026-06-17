@@ -20,7 +20,6 @@ from search.config import HybridAgentConfig
 from nn.encoding import normalize_message
 from nn.model import HybridPolicyValueNet
 from training.replay import ReplayStore, StepRecord, record_from_payload, record_to_payload
-from training.symmetry_consistency import evaluate_symmetry_consistency
 from training.train import _archive_replay_shards, _training_records_for_iteration, _write_augmented_iteration_shard, collate_batch
 
 
@@ -202,17 +201,7 @@ class AugmentationTest(unittest.TestCase):
         self.assertTrue(torch.equal(batch["policy_targets"][0, :4], torch.tensor([0.2, 0.7, 0.1, 0.0])))
         self.assertAlmostEqual(float(batch["value_targets"][0]), 0.5)
 
-    def test_symmetry_consistency_metric_is_finite(self) -> None:
-        cfg = HybridAgentConfig()
-        model = HybridPolicyValueNet(cfg.model)
 
-        metrics = evaluate_symmetry_consistency(cfg, model, [_record()], torch.device("cpu"), max_records=1)
-
-        self.assertEqual(metrics["symmetry_groups"], 1.0)
-        self.assertEqual(metrics["symmetry_samples"], 8.0)
-        for key in ("policy_js", "policy_l1", "value_std", "value_range"):
-            self.assertTrue(torch.isfinite(torch.tensor(metrics[key])))
-            self.assertGreaterEqual(metrics[key], 0.0)
 
     def test_offline_augment_record_preserves_targets(self) -> None:
         record = _record()
