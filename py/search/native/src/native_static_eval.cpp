@@ -10,11 +10,71 @@
 #include <sstream>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace tribes::native {
 namespace {
+
+struct StaticEvalTerm {
+  std::string name;
+  double feature_value = 0.0;
+  double weight = 0.0;
+  double raw = 0.0;
+};
+
+std::unordered_map<std::string, double> parse_weight_overrides() {
+  std::unordered_map<std::string, double> out;
+  const char* raw = std::getenv("TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES");
+  if (raw == nullptr || std::string(raw).empty()) {
+    return out;
+  }
+  std::stringstream stream(raw);
+  std::string item;
+  while (std::getline(stream, item, ',')) {
+    const size_t pos = item.find('=');
+    if (pos == std::string::npos) {
+      continue;
+    }
+    std::string key = item.substr(0, pos);
+    std::string value = item.substr(pos + 1);
+    const size_t key_start = key.find_first_not_of(" \t\r\n");
+    const size_t value_start = value.find_first_not_of(" \t\r\n");
+    if (key_start == std::string::npos || value_start == std::string::npos) {
+      continue;
+    }
+    key.erase(0, key_start);
+    key.erase(key.find_last_not_of(" \t\r\n") + 1);
+    value.erase(0, value_start);
+    value.erase(value.find_last_not_of(" \t\r\n") + 1);
+    if (key.empty() || value.empty()) {
+      continue;
+    }
+    try {
+      out[key] = std::stod(value);
+    } catch (const std::exception&) {
+    }
+  }
+  return out;
+}
+
+double eval_weight(
+    const std::unordered_map<std::string, double>& overrides,
+    const std::string& name,
+    double default_weight) {
+  const auto found = overrides.find(name);
+  return found == overrides.end() ? default_weight : found->second;
+}
+
+StaticEvalTerm eval_term(
+    const std::unordered_map<std::string, double>& overrides,
+    const std::string& name,
+    double feature_value,
+    double default_weight) {
+  const double weight = eval_weight(overrides, name, default_weight);
+  return StaticEvalTerm{name, feature_value, weight, feature_value * weight};
+}
 
 int read_int(const py::handle& object, const char* key, int fallback = 0) {
   if (!py::isinstance<py::dict>(object)) {
@@ -1976,11 +2036,14 @@ double state_raw_value(
     double power_weight,
     double city_capital_bonus,
     double income_weight,
-    std::vector<std::pair<std::string, double>>* terms = nullptr) {
+    std::vector<StaticEvalTerm>* terms = nullptr) {
   const int player_id = state.active_player_id;
   const NativeTribe* me = tribe_by_id(state, player_id);
-  const bool is_experimental = static_eval_variant() == StaticEvalVariant::Experimental;
+  // Experimental currently changes lower-level feature calculations while the
+  // default value-head weights stay baseline-compatible. Analysis overrides can
+  // still alter weights through TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES.
   const bool experimental_eval = false;
+  const std::unordered_map<std::string, double> weight_overrides = parse_weight_overrides();
   const double material_weight = 3.706896551724;
   const double current_score_weight = 0.0;
   const double score_diff_weight = 0.172413793103;
@@ -2149,71 +2212,108 @@ double state_raw_value(
   const double experimental_resource_term = experimental_eval
       ? (my_exploitable_resource_value - enemy_exploitable_resource_value)
       : 0.0;
-  std::vector<std::pair<std::string, double>> raw_terms = {
-      {"military.own_unit_material", experimental_eval
-          ? experimentalValueHeadOwnUnitMaterialCoeff *
-              (my_material - enemy_material)
-          : material_weight * (my_material - enemy_material)},
-      {"military.unit_power",
-       experimental_eval
-           ? experimentalValueHeadUnitPowerCoeff *
-               (my_power - enemy_power)
-           : power_weight * (my_power - enemy_power)},
-      {"territory.city_count", 0.0},
-      {"economy.city_quality", experimental_eval
-          ? experimentalValueHeadCityQualityCoeff *
-              (my_city_quality - enemy_city_quality)
-          : city_quality_weight * (my_city_quality - enemy_city_quality)},
-      {"economy.income", experimental_eval
-          ? experimentalValueHeadIncomeCoeff *
-              (my_income - enemy_income)
-          : income_weight * (my_income - enemy_income)},
-      {"economy.unit_capacity", experimental_eval
-          ? experimentalValueHeadUnitCapacityCoeff *
-              (experimental_population_term + experimental_unit_capacity_term)
-          : experimental_population_term + experimental_unit_capacity_term},
-      {"economy.visible_resources", 0.0},
-      {"economy.resource_potential", experimental_eval
-          ? experimentalValueHeadResourcePotentialCoeff *
-              experimental_resource_term
-          : 0.0},
-      {"economy.stars", experimental_eval
-          ? experimentalValueHeadStarsCoeff *
-              (my_stars - 0.413793103448 * best_enemy_stars)
-          : my_stars - 0.413793103448 * best_enemy_stars},
-      {"score_terminal.current_score", experimental_eval
-          ? experimentalValueHeadCurrentScoreCoeff * my_score
-          : current_score_weight * my_score},
-      {"score_terminal.score_diff", experimental_eval
-          ? experimentalValueHeadScoreDiffCoeff * (my_score - best_enemy_score)
-          : score_diff_weight * (my_score - best_enemy_score)},
-      {"technology.researched_tech", experimental_eval
-          ? experimentalValueHeadResearchedTechCoeff * my_tech
-          : 2.155172413793 * my_tech},
-      {"territory.villages", experimental_eval
-          ? experimentalValueHeadVillagesCoeff *
-              (2.672413793103 * static_cast<double>(visible_villages) + 2.413793103448 * village_control)
-          : 2.672413793103 * static_cast<double>(visible_villages) + 2.413793103448 * village_control},
-      {"territory.exploration", experimental_eval
-          ? experimentalValueHeadExplorationCoeff * exploration_input
-          : 8.620689655172 * exploration_input},
-      {"threat.city_pressure", experimental_eval
-          ? experimentalValueHeadCityPressureCoeff * enemy_city_pressure
-          : 0.948275862069 * enemy_city_pressure},
-      {"threat.vulnerable_units", experimental_eval
-          ? experimentalValueHeadVulnerableUnitsCoeff * vulnerable_penalty
-          : -2.672413793103 * vulnerable_penalty},
-      {"threat.capital_threat", experimental_eval
-          ? experimentalValueHeadCapitalThreatCoeff * capital_threat
-          : -2.931034482759 * capital_threat},
-      {"threat.city_threat", experimental_eval
-          ? experimentalValueHeadCityThreatCoeff * city_threat
-          : -1.465517241379 * city_threat},
-      {"military.wounded_penalty", 0.0},
+  const double villages_feature =
+      2.672413793103 * static_cast<double>(visible_villages) + 2.413793103448 * village_control;
+  std::vector<StaticEvalTerm> raw_terms = {
+      eval_term(
+          weight_overrides,
+          "military.own_unit_material",
+          my_material - enemy_material,
+          experimental_eval ? experimentalValueHeadOwnUnitMaterialCoeff : material_weight),
+      eval_term(
+          weight_overrides,
+          "military.unit_power",
+          my_power - enemy_power,
+          experimental_eval ? experimentalValueHeadUnitPowerCoeff : power_weight),
+      eval_term(
+          weight_overrides,
+          "territory.city_count",
+          static_cast<double>(my_cities - enemy_cities),
+          experimental_eval ? experimentalValueHeadCityCountCoeff : 0.0),
+      eval_term(
+          weight_overrides,
+          "economy.city_quality",
+          my_city_quality - enemy_city_quality,
+          experimental_eval ? experimentalValueHeadCityQualityCoeff : city_quality_weight),
+      eval_term(
+          weight_overrides,
+          "economy.income",
+          my_income - enemy_income,
+          experimental_eval ? experimentalValueHeadIncomeCoeff : income_weight),
+      eval_term(
+          weight_overrides,
+          "economy.unit_capacity",
+          experimental_population_term + experimental_unit_capacity_term,
+          experimental_eval ? experimentalValueHeadUnitCapacityCoeff : 1.0),
+      eval_term(
+          weight_overrides,
+          "economy.visible_resources",
+          static_cast<double>(visible_resources),
+          experimental_eval ? experimentalValueHeadVisibleResourcesCoeff : 0.0),
+      eval_term(
+          weight_overrides,
+          "economy.resource_potential",
+          experimental_resource_term,
+          experimental_eval ? experimentalValueHeadResourcePotentialCoeff : 0.0),
+      eval_term(
+          weight_overrides,
+          "economy.stars",
+          my_stars - 0.413793103448 * best_enemy_stars,
+          experimental_eval ? experimentalValueHeadStarsCoeff : 1.0),
+      eval_term(
+          weight_overrides,
+          "score_terminal.current_score",
+          my_score,
+          experimental_eval ? experimentalValueHeadCurrentScoreCoeff : current_score_weight),
+      eval_term(
+          weight_overrides,
+          "score_terminal.score_diff",
+          my_score - best_enemy_score,
+          experimental_eval ? experimentalValueHeadScoreDiffCoeff : score_diff_weight),
+      eval_term(
+          weight_overrides,
+          "technology.researched_tech",
+          my_tech,
+          experimental_eval ? experimentalValueHeadResearchedTechCoeff : 2.155172413793),
+      eval_term(
+          weight_overrides,
+          "territory.villages",
+          villages_feature,
+          experimental_eval ? experimentalValueHeadVillagesCoeff : 1.0),
+      eval_term(
+          weight_overrides,
+          "territory.exploration",
+          exploration_input,
+          experimental_eval ? experimentalValueHeadExplorationCoeff : 8.620689655172),
+      eval_term(
+          weight_overrides,
+          "threat.city_pressure",
+          enemy_city_pressure,
+          experimental_eval ? experimentalValueHeadCityPressureCoeff : 0.948275862069),
+      eval_term(
+          weight_overrides,
+          "threat.vulnerable_units",
+          vulnerable_penalty,
+          experimental_eval ? experimentalValueHeadVulnerableUnitsCoeff : -2.672413793103),
+      eval_term(
+          weight_overrides,
+          "threat.capital_threat",
+          capital_threat,
+          experimental_eval ? experimentalValueHeadCapitalThreatCoeff : -2.931034482759),
+      eval_term(
+          weight_overrides,
+          "threat.city_threat",
+          city_threat,
+          experimental_eval ? experimentalValueHeadCityThreatCoeff : -1.465517241379),
+      eval_term(
+          weight_overrides,
+          "military.wounded_penalty",
+          static_cast<double>(wounded_units),
+          experimental_eval ? experimentalValueHeadWoundedPenaltyCoeff : wounded_units_weight),
   };
   double raw = 0.0;
   for (const auto& term : raw_terms) {
-    raw += term.second;
+    raw += term.raw;
   }
   if (terms != nullptr) {
     *terms = raw_terms;
@@ -2326,7 +2426,7 @@ py::dict evaluation_to_dict(const StaticEvaluation& evaluation) {
 
 py::dict breakdown_to_dict(
     const StaticEvaluation& evaluation,
-    const std::vector<std::pair<std::string, double>>& raw_terms,
+    const std::vector<StaticEvalTerm>& raw_terms,
     double raw_total) {
   py::dict out = evaluation_to_dict(evaluation);
   const double scale = kValueTanhDenominatorStars;
@@ -2335,7 +2435,7 @@ py::dict breakdown_to_dict(
   const double squash_sensitivity = (1.0 - final_value * final_value) / scale;
   double abs_total = 0.0;
   for (const auto& term : raw_terms) {
-    abs_total += std::abs(term.second);
+    abs_total += std::abs(term.raw);
   }
   py::dict breakdown;
   breakdown["raw_total"] = raw_total;
@@ -2346,11 +2446,13 @@ py::dict breakdown_to_dict(
   py::list terms;
   for (const auto& term : raw_terms) {
     py::dict row;
-    row["name"] = py::str(term.first);
-    row["raw"] = term.second;
-    row["normalized"] = term.second / scale;
-    row["abs_share"] = abs_total > 0.0 ? std::abs(term.second) / abs_total : 0.0;
-    row["linearized_value"] = squash_sensitivity * term.second;
+    row["name"] = py::str(term.name);
+    row["feature_value"] = term.feature_value;
+    row["weight"] = term.weight;
+    row["raw"] = term.raw;
+    row["normalized"] = term.raw / scale;
+    row["abs_share"] = abs_total > 0.0 ? std::abs(term.raw) / abs_total : 0.0;
+    row["linearized_value"] = squash_sensitivity * term.raw;
     terms.append(row);
   }
   breakdown["terms"] = terms;
@@ -2375,11 +2477,15 @@ py::dict evaluate_static_breakdown(const py::dict& payload, int max_actions) {
   NativeRoot root = parse_root_payload(payload, max_actions);
   StaticEvaluation evaluation;
   evaluation.priors = priors_for_state(root.state, root.actions);
-  std::vector<std::pair<std::string, double>> terms;
+  std::vector<StaticEvalTerm> terms;
   if (root.state.terminal && root.state.terminal_value_known) {
     evaluation.value = root.state.terminal_value;
-    terms.push_back({"score_terminal.terminal_win_loss", root.state.terminal_value * kValueTanhDenominatorStars});
-    return breakdown_to_dict(evaluation, terms, terms.front().second);
+    terms.push_back(StaticEvalTerm{
+        "score_terminal.terminal_win_loss",
+        root.state.terminal_value,
+        kValueTanhDenominatorStars,
+        root.state.terminal_value * kValueTanhDenominatorStars});
+    return breakdown_to_dict(evaluation, terms, terms.front().raw);
   }
   const StaticEvalVariant variant = static_eval_variant();
   const double raw_total = variant == StaticEvalVariant::Experimental
@@ -2438,11 +2544,15 @@ py::dict evaluate_action_breakdown(const py::dict& payload, const std::string& a
   }
   NativeGameState next_state = apply_action_strict(root.state, root.actions, action_index, max_actions);
   StaticEvaluation evaluation;
-  std::vector<std::pair<std::string, double>> terms;
+  std::vector<StaticEvalTerm> terms;
   if (next_state.terminal && next_state.terminal_value_known) {
     evaluation.value = next_state.terminal_value;
-    terms.push_back({"score_terminal.terminal_win_loss", next_state.terminal_value * kValueTanhDenominatorStars});
-    return breakdown_to_dict(evaluation, terms, terms.front().second);
+    terms.push_back(StaticEvalTerm{
+        "score_terminal.terminal_win_loss",
+        next_state.terminal_value,
+        kValueTanhDenominatorStars,
+        next_state.terminal_value * kValueTanhDenominatorStars});
+    return breakdown_to_dict(evaluation, terms, terms.front().raw);
   }
   const StaticEvalVariant variant = static_eval_variant();
   const double raw_total = variant == StaticEvalVariant::Experimental

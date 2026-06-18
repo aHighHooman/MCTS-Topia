@@ -1,0 +1,12 @@
+{
+  "positions_jsonl": null,
+  "baseline_name": "baseline",
+  "experimental_name": "experimental",
+  "min_js_visit_bits": 0.08,
+  "min_baseline_top_visit_share": 0.35,
+  "min_top_gap": 0.05,
+  "max_experimental_baseline_visit_share": 0.10,
+  "min_experimental_baseline_rank": 4,
+  "run_id": "",
+  "output_dir": "debug-logs/analysis/branchpoints"
+}

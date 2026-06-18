@@ -50,6 +50,12 @@ class PositionAnalysis:
     search_sec: float
     actions: list[ActionAnalysis] = field(default_factory=list)
     value_breakdown: dict[str, Any] | None = None
+    static_eval_source: str = ""
+    static_eval_error: str = ""
+    profile_validated: bool = False
+    native_exe_path: str = ""
+    native_extension_path: str = ""
+    warnings: list[str] = field(default_factory=list)
 
 
 def to_jsonable(value: Any) -> Any:
@@ -62,4 +68,3 @@ def append_jsonl(path: Path, row: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(to_jsonable(row), sort_keys=True, default=str) + "\n")
-

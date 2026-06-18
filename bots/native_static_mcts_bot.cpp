@@ -1142,6 +1142,7 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
     else if (arg == "--top-k-actions") cfg.top_k_actions = std::stoi(next());
     else if (arg == "--max-actions") cfg.max_actions = std::stoi(next());
     else if (arg == "--search-batch-size") cfg.batch_size = std::stoi(next());
+    else if (arg == "--c-puct") cfg.c_puct = std::stod(next());
     else if (arg == "--static-eval-variant") cfg.static_eval_variant = next();
     else if (arg == "--deterministic") {
       cfg.sample_action = false;
@@ -1186,7 +1187,7 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
       std::cout
           << "native_static_mcts_bot.exe [--search-mode primitive|turn-cmab] [--simulations N]\n"
           << "  [--wall-clock-per-action-seconds SEC]\n"
-          << "  [--top-k-actions N] [--max-actions N] [--search-batch-size N]\n"
+          << "  [--top-k-actions N] [--max-actions N] [--search-batch-size N] [--c-puct X]\n"
           << "  [--static-eval-variant baseline|experimental] [--deterministic] [--reuse-tree]\n"
           << "  [--profile-json] [--profile-timing] [--seed N]\n"
           << "  [--turn-cmab-simulations N] [--turn-cmab-max-turn-depth N]\n"

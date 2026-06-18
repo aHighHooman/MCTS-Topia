@@ -101,6 +101,8 @@ def run(args: argparse.Namespace) -> Path:
             "action_id",
             "action_fingerprint",
             "name",
+            "feature_value",
+            "weight",
             "raw",
             "normalized",
             "abs_share",

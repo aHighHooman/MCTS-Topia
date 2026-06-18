@@ -1,0 +1,14 @@
+{
+  "snapshot": null,
+  "base_config": null,
+  "actor_player": null,
+  "experimental_player": 1,
+  "forced_action": null,
+  "force_request_id": null,
+  "baseline_command_json": null,
+  "experimental_command_json": null,
+  "java_exe": null,
+  "timeout_sec": 600,
+  "run_id": "",
+  "output_dir": "debug-logs/analysis/counterfactuals"
+}

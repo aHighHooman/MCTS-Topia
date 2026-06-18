@@ -1,0 +1,9 @@
+{
+  "terms_csv": null,
+  "constraints_jsonl": null,
+  "steps": 2000,
+  "learning_rate": 0.0005,
+  "l2": 0.05,
+  "run_id": "",
+  "output_dir": "debug-logs/analysis/tuning-proposals"
+}

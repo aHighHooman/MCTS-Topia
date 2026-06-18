@@ -76,6 +76,7 @@ def _run_native_static_exe(
     top_k_actions: int,
     max_actions: int,
     seed: int,
+    c_puct: float,
     native_static_exe: Path | str | None,
     build_native_static_exe: bool,
     native_static_search_mode: str,
@@ -93,6 +94,8 @@ def _run_native_static_exe(
         str(int(max_actions)),
         "--search-batch-size",
         str(int(batch_size)),
+        "--c-puct",
+        str(float(c_puct)),
         "--static-eval-variant",
         str(target.get("variant", "baseline")),
         "--seed",
@@ -163,6 +166,34 @@ def _root_static_eval(payload: dict[str, Any], actions: list[dict[str, Any]], ma
     return priors, float(raw.get("value", 0.0))
 
 
+def _native_extension_path() -> str:
+    try:
+        extension = load_native_mcts_extension()
+    except Exception:
+        return ""
+    return str(getattr(extension, "__file__", "") or "")
+
+
+def _try_root_static_eval(
+    payload: dict[str, Any],
+    actions: list[dict[str, Any]],
+    max_actions: int,
+) -> tuple[list[float], float, str, str, str]:
+    try:
+        priors, root_value = _root_static_eval(payload, actions, max_actions)
+        return priors, root_value, "native_extension", "", ""
+    except Exception as exc:
+        return [0.0 for _ in actions], 0.0, "unavailable", str(exc), ""
+
+
+def _response_action_id(row: dict[str, Any]) -> str:
+    return str(row.get("action_id") or row.get("actionId") or row.get("id") or "")
+
+
+def _selected_action_id(response: dict[str, Any]) -> str:
+    return str(response.get("actionId") or response.get("action_id") or response.get("selected_action_id") or "")
+
+
 def analyze_position(
     payload: dict[str, Any],
     *,
@@ -184,10 +215,18 @@ def analyze_position(
     os.environ["TRIBES_STATIC_EVAL_VARIANT"] = str(target.get("variant", "baseline"))
     try:
         actions = list(payload.get("actions", [])) if max_actions < 0 else list(payload.get("actions", []))[:max_actions]
-        priors, root_value = _root_static_eval(payload, actions, int(max_actions))
+        warnings: list[str] = []
+        priors, root_value, static_eval_source, static_eval_error, native_extension_path = _try_root_static_eval(
+            payload,
+            actions,
+            int(max_actions),
+        )
+        if static_eval_error:
+            warnings.append(f"root static eval unavailable: {static_eval_error}")
         started_at = time.perf_counter()
         if str(target.get("mcts_impl", "native_static_exe")) != "native_static_exe":
             raise ValueError("Static position analysis only supports mcts_impl=native_static_exe.")
+        exe_path = _ensure_native_static_exe(native_static_exe, build_native_static_exe)
         response = _run_native_static_exe(
             payload,
             target=target,
@@ -196,19 +235,25 @@ def analyze_position(
             top_k_actions=top_k_actions,
             max_actions=max_actions,
             seed=seed,
-            native_static_exe=native_static_exe,
-            build_native_static_exe=build_native_static_exe,
+            c_puct=c_puct,
+            native_static_exe=exe_path,
+            build_native_static_exe=False,
             native_static_search_mode=native_static_search_mode,
         )
         profile = response.get("_profile") if isinstance(response.get("_profile"), dict) else {}
         root_stats = list(profile.get("root_action_stats", [])) if isinstance(profile, dict) else []
-        stats_by_id = {str(row.get("action_id")): row for row in root_stats if isinstance(row, dict)}
+        if int(simulations) > 0 and not root_stats:
+            raise RuntimeError(
+                "Native static executable response did not include _profile.root_action_stats. "
+                "Make sure --profile-json is supported by the executable being analyzed."
+            )
+        stats_by_id = {_response_action_id(row): row for row in root_stats if isinstance(row, dict) and _response_action_id(row)}
         visit_distribution = {
-            str(row.get("action_id")): float(row.get("visit_share", 0.0) or 0.0)
+            _response_action_id(row): float(row.get("visit_share", 0.0) or 0.0)
             for row in root_stats
-            if isinstance(row, dict) and row.get("action_id") is not None
+            if isinstance(row, dict) and _response_action_id(row)
         }
-        selected_action_id = str(response.get("actionId") or "")
+        selected_action_id = _selected_action_id(response)
         search_sec = time.perf_counter() - started_at
         visit_scores = [float(visit_distribution.get(action_id(action), 0.0)) for action in actions]
         prior_scores = [float(priors[index]) if index < len(priors) else 0.0 for index in range(len(actions))]
@@ -266,7 +311,13 @@ def analyze_position(
             action_count_analyzed=len(actions),
             search_sec=search_sec,
             actions=action_rows,
-            value_breakdown=_static_breakdown(payload, int(max_actions)) if include_breakdown else None,
+            value_breakdown=_static_breakdown(payload, int(max_actions)) if include_breakdown and static_eval_source != "unavailable" else None,
+            static_eval_source=static_eval_source,
+            static_eval_error=static_eval_error,
+            profile_validated=bool(root_stats) or int(simulations) <= 0,
+            native_exe_path=str(exe_path),
+            native_extension_path=native_extension_path,
+            warnings=warnings,
         )
     finally:
         if previous_variant is None:
