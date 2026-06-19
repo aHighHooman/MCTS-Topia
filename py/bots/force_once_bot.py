@@ -10,6 +10,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from profiling.analysis.actions import action_fingerprint, action_id
+from search.native.parity_runner import _normalize_compact_action
 
 
 def _matches(action: dict[str, Any], selector: str) -> bool:
@@ -71,9 +72,10 @@ def main() -> int:
                 if request_matches:
                     actions = list(message.get("actions", []))
                     for index, action in enumerate(actions):
-                        if isinstance(action, dict) and _matches(action, args.force_action):
+                        normalized_action = _normalize_compact_action(action, index)
+                        if isinstance(normalized_action, dict) and _matches(normalized_action, args.force_action):
                             forced = True
-                            print(json.dumps({"i": index, "actionId": action_id(action)}, separators=(",", ":")), flush=True)
+                            print(json.dumps({"i": index, "actionId": action_id(normalized_action)}, separators=(",", ":")), flush=True)
                             break
                     if forced:
                         continue

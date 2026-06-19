@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -141,3 +142,112 @@ def test_value_breakdown_fails_when_payload_dir_is_empty(monkeypatch, tmp_path) 
                 native_static_search_mode="primitive",
             )
         )
+
+
+def test_value_breakdown_prefers_newest_payloads_when_limited(monkeypatch, tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    payload_dir = repo_root / "debug-logs" / "mcts-profile-payloads"
+    payload_dir.mkdir(parents=True)
+    old_payload = payload_dir / "a-old.json"
+    new_payload = payload_dir / "z-new.json"
+    old_payload.write_text(json.dumps(_payload("old")), encoding="utf-8")
+    new_payload.write_text(json.dumps(_payload("new")), encoding="utf-8")
+    os.utime(old_payload, (1000, 1000))
+    os.utime(new_payload, (2000, 2000))
+
+    calls: list[str] = []
+
+    def analyze(payload, *, payload_hash, label, target, simulations, batch_size, top_k_actions, max_actions, seed, c_puct, include_breakdown, **kwargs):
+        calls.append(label)
+        return PositionAnalysis(
+            analysis_version=1,
+            payload_hash=payload_hash,
+            label=label,
+            target_name=str(target["name"]),
+            evaluator="static",
+            mcts_impl="native_static_exe",
+            static_eval_variant=str(target["variant"]),
+            seed=int(seed),
+            simulations=int(simulations),
+            c_puct=float(c_puct),
+            top_k_actions=int(top_k_actions),
+            max_actions=int(max_actions),
+            root_value=0.0,
+            selected_action_id="new",
+            selected_action_fingerprint="END_TURN|new",
+            action_count_raw=1,
+            action_count_analyzed=1,
+            search_sec=0.001,
+            actions=[],
+            value_breakdown={"terms": []},
+        )
+
+    monkeypatch.setattr(vb, "PROJECT_ROOT", repo_root)
+    monkeypatch.setattr(vb, "analyze_position", analyze)
+
+    output_dir = vb.run(
+        SimpleNamespace(
+            run_id="test-run",
+            output_dir=tmp_path / "out",
+            payload_dir="debug-logs/mcts-profile-payloads",
+            target="baseline",
+            positions=1,
+            simulations=10000,
+            batch_size=64,
+            top_k_actions=0,
+            max_actions=512,
+            seed=0,
+            c_puct=1.5,
+            native_static_exe=repo_root / "out" / "native" / "native_static_mcts_bot.exe",
+            build_native_static_exe=True,
+            native_static_search_mode="primitive",
+        )
+    )
+
+    assert calls == ["z-new"]
+    summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["payload_order"] == "mtime-desc"
+    assert summary["processed_payloads"][0]["label"] == "z-new"
+
+
+def test_value_breakdown_clears_stale_outputs_and_marks_failure(monkeypatch, tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    payload_dir = repo_root / "debug-logs" / "mcts-profile-payloads"
+    payload_dir.mkdir(parents=True)
+    (payload_dir / "case-1.json").write_text(json.dumps(_payload("a")), encoding="utf-8")
+    output_dir = tmp_path / "out" / "test-run"
+    output_dir.mkdir(parents=True)
+    for name in ("positions.jsonl", "terms.csv", "summary.json", "report.html"):
+        (output_dir / name).write_text("stale", encoding="utf-8")
+
+    def analyze(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(vb, "PROJECT_ROOT", repo_root)
+    monkeypatch.setattr(vb, "analyze_position", analyze)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        vb.run(
+            SimpleNamespace(
+                run_id="test-run",
+                output_dir=tmp_path / "out",
+                payload_dir="debug-logs/mcts-profile-payloads",
+                target="baseline",
+                positions=1,
+                simulations=10000,
+                batch_size=64,
+                top_k_actions=0,
+                max_actions=512,
+                seed=0,
+                c_puct=1.5,
+                native_static_exe=repo_root / "out" / "native" / "native_static_mcts_bot.exe",
+                build_native_static_exe=True,
+                native_static_search_mode="primitive",
+            )
+        )
+
+    for name in ("positions.jsonl", "terms.csv", "summary.json", "report.html"):
+        assert not (output_dir / name).exists()
+    status = json.loads((output_dir / "run_status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "failed"
+    assert status["error"] == "boom"

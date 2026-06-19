@@ -57,6 +57,29 @@ def _fingerprint_for(position: dict[str, Any], action_id: str) -> str:
     return ""
 
 
+def _counterfactual_rescue_ok(row: dict[str, Any]) -> bool:
+    baseline_result = str(row.get("baseline_action_result", row.get("baseline_forced_result", ""))).upper()
+    experimental_result = str(row.get("experimental_action_result", row.get("experimental_forced_result", ""))).upper()
+    if baseline_result or experimental_result:
+        return baseline_result == "WIN" and experimental_result != "WIN"
+    if "baseline_action_margin" in row and "experimental_action_margin" in row:
+        return _float(row.get("baseline_action_margin")) > 0.0 and _float(row.get("experimental_action_margin")) < 0.0
+    return False
+
+
+def _superior_seat_agrees(row: dict[str, Any]) -> bool:
+    baseline_seat = row.get("baseline_superior_seat")
+    experimental_seat = row.get("experimental_superior_seat")
+    return baseline_seat not in (None, "") and str(baseline_seat) == str(experimental_seat)
+
+
+def _float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def build_candidates(
     positions: list[dict[str, Any]],
     *,
@@ -67,6 +90,8 @@ def build_candidates(
     min_top_gap: float,
     max_experimental_baseline_visit_share: float,
     min_experimental_baseline_rank: int,
+    require_counterfactual_rescue: bool = False,
+    require_superior_seat_agreement: bool = False,
 ) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, dict[str, Any]]] = {}
     for position in positions:
@@ -103,8 +128,7 @@ def build_candidates(
         )
         if not keep:
             continue
-        out.append(
-            {
+        candidate = {
                 "payload_hash": digest,
                 "label": baseline.get("label", ""),
                 "baseline_target": baseline_name,
@@ -124,7 +148,11 @@ def build_candidates(
                 "snapshot_path": "",
                 "classification": "candidate",
             }
-        )
+        if require_counterfactual_rescue and not _counterfactual_rescue_ok(candidate):
+            continue
+        if require_superior_seat_agreement and not _superior_seat_agrees(candidate):
+            continue
+        out.append(candidate)
     return sorted(out, key=lambda row: float(row["js_visit_bits"]), reverse=True)
 
 
@@ -143,6 +171,8 @@ def run(args: argparse.Namespace) -> Path:
         min_top_gap=args.min_top_gap,
         max_experimental_baseline_visit_share=args.max_experimental_baseline_visit_share,
         min_experimental_baseline_rank=args.min_experimental_baseline_rank,
+        require_counterfactual_rescue=args.require_counterfactual_rescue,
+        require_superior_seat_agreement=args.require_superior_seat_agreement,
     )
     (output_dir / "branchpoints.jsonl").write_text(
         "".join(json.dumps(row, sort_keys=True, default=str) + "\n" for row in rows),
@@ -163,6 +193,8 @@ def run(args: argparse.Namespace) -> Path:
             "min_top_gap": args.min_top_gap,
             "max_experimental_baseline_visit_share": args.max_experimental_baseline_visit_share,
             "min_experimental_baseline_rank": args.min_experimental_baseline_rank,
+            "require_counterfactual_rescue": args.require_counterfactual_rescue,
+            "require_superior_seat_agreement": args.require_superior_seat_agreement,
         },
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True, default=str), encoding="utf-8")
@@ -181,6 +213,8 @@ def main() -> int:
     parser.add_argument("--min-top-gap", type=float, default=0.05)
     parser.add_argument("--max-experimental-baseline-visit-share", type=float, default=0.10)
     parser.add_argument("--min-experimental-baseline-rank", type=int, default=4)
+    parser.add_argument("--require-counterfactual-rescue", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--require-superior-seat-agreement", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--run-id", default="")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     args = load_config_defaults(parser, default_config=DEFAULT_CONFIG)

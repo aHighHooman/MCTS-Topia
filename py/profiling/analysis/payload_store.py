@@ -6,10 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from nn.encoding import normalize_message
+from search.native.parity_runner import _expand_compact_state
 
 
 def canonical_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    normalized = normalize_message(payload)
+    normalized = normalize_message(_expand_compact_state(payload))
     return {
         "player_id": int(normalized.get("player_id", 0)),
         "observation": normalized.get("observation", {}),
@@ -39,7 +40,6 @@ def load_payload(path: Path) -> dict[str, Any] | None:
         raw = json.load(handle)
     if isinstance(raw, list):
         raw = raw[0] if raw else None
-    if not isinstance(raw, dict) or not isinstance(raw.get("actions"), list) or not isinstance(raw.get("observation"), dict):
+    if not isinstance(raw, dict) or not isinstance(raw.get("actions"), list) or not isinstance(raw.get("observation"), (dict, list)):
         return None
     return canonical_payload(raw)
-

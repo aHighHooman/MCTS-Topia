@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import time
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -35,18 +36,73 @@ def parse_target(spec: str) -> dict[str, str]:
     return target
 
 
+def _target_weight_overrides(target: dict[str, str]) -> str:
+    raw = str(target.get("weight_overrides") or target.get("static_eval_weight_overrides") or target.get("overrides") or "")
+    return raw.replace(";", ",")
+
+
+@contextmanager
+def static_eval_target_env(target: dict[str, str]):
+    previous_variant = os.environ.get("TRIBES_STATIC_EVAL_VARIANT")
+    previous_overrides = os.environ.get("TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES")
+    os.environ["TRIBES_STATIC_EVAL_VARIANT"] = str(target.get("variant", "baseline"))
+    overrides = _target_weight_overrides(target)
+    if overrides:
+        os.environ["TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES"] = overrides
+    else:
+        os.environ.pop("TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES", None)
+    try:
+        yield
+    finally:
+        if previous_variant is None:
+            os.environ.pop("TRIBES_STATIC_EVAL_VARIANT", None)
+        else:
+            os.environ["TRIBES_STATIC_EVAL_VARIANT"] = previous_variant
+        if previous_overrides is None:
+            os.environ.pop("TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES", None)
+        else:
+            os.environ["TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES"] = previous_overrides
+
+
 def _repo_path(path: Path | str | None, default: Path) -> Path:
     out = Path(path) if path is not None else default
     return out if out.is_absolute() else PROJECT_ROOT / out
 
 
+def _native_static_build_inputs(build_script: Path) -> list[Path]:
+    native_src = PROJECT_ROOT / "py" / "search" / "native" / "src"
+    paths = [
+        PROJECT_ROOT / "bots" / "native_static_mcts_bot.cpp",
+        build_script,
+    ]
+    paths.extend(sorted(native_src.glob("*.cpp")))
+    paths.extend(sorted(native_src.glob("*.hpp")))
+    return [path for path in paths if path.exists()]
+
+
+def _is_native_static_exe_fresh(exe: Path, inputs: list[Path]) -> bool:
+    if not exe.exists():
+        return False
+    try:
+        exe_mtime = exe.stat().st_mtime
+    except OSError:
+        return False
+    return all(exe_mtime >= path.stat().st_mtime for path in inputs)
+
+
 def _ensure_native_static_exe(native_static_exe: Path | str | None, build_native_static_exe: bool) -> Path:
     exe = _repo_path(native_static_exe, DEFAULT_NATIVE_STATIC_EXE)
-    if exe.exists():
+    build_script = PROJECT_ROOT / "scripts" / "build_native_static_bot.ps1"
+    build_inputs = _native_static_build_inputs(build_script)
+    if _is_native_static_exe_fresh(exe, build_inputs):
         return exe
     if not build_native_static_exe:
+        if exe.exists():
+            raise RuntimeError(
+                f"Native static executable is older than one or more build inputs: {exe}. "
+                "Rebuild it or enable build_native_static_exe."
+            )
         raise FileNotFoundError(f"Native static executable not found: {exe}")
-    build_script = PROJECT_ROOT / "scripts" / "build_native_static_bot.ps1"
     if not build_script.exists():
         raise FileNotFoundError(f"Native static executable build script not found: {build_script}")
     completed = subprocess.run(
@@ -103,6 +159,9 @@ def _run_native_static_exe(
         "--profile-json",
         "--deterministic",
     ]
+    overrides = _target_weight_overrides(target)
+    if overrides:
+        command.extend(["--static-eval-weight-overrides", overrides])
     request = dict(payload)
     request["type"] = "action_request"
     completed = subprocess.run(
@@ -211,9 +270,7 @@ def analyze_position(
     build_native_static_exe: bool = True,
     native_static_search_mode: str = "primitive",
 ) -> PositionAnalysis:
-    previous_variant = os.environ.get("TRIBES_STATIC_EVAL_VARIANT")
-    os.environ["TRIBES_STATIC_EVAL_VARIANT"] = str(target.get("variant", "baseline"))
-    try:
+    with static_eval_target_env(target):
         actions = list(payload.get("actions", [])) if max_actions < 0 else list(payload.get("actions", []))[:max_actions]
         warnings: list[str] = []
         priors, root_value, static_eval_source, static_eval_error, native_extension_path = _try_root_static_eval(
@@ -319,11 +376,6 @@ def analyze_position(
             native_extension_path=native_extension_path,
             warnings=warnings,
         )
-    finally:
-        if previous_variant is None:
-            os.environ.pop("TRIBES_STATIC_EVAL_VARIANT", None)
-        else:
-            os.environ["TRIBES_STATIC_EVAL_VARIANT"] = previous_variant
 
 
 def position_to_dict(position: PositionAnalysis) -> dict[str, Any]:

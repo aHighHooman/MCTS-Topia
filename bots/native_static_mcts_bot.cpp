@@ -40,6 +40,7 @@ struct CliConfig {
   bool profile_timing = false;
   uint64_t seed = 13;
   std::string static_eval_variant = "baseline";
+  std::string static_eval_weight_overrides;
   std::string search_mode = "primitive";
   tribes::native::TurnCmabConfig turn_cmab;
   bool turn_cmab_simulations_set = false;
@@ -1144,6 +1145,7 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
     else if (arg == "--search-batch-size") cfg.batch_size = std::stoi(next());
     else if (arg == "--c-puct") cfg.c_puct = std::stod(next());
     else if (arg == "--static-eval-variant") cfg.static_eval_variant = next();
+    else if (arg == "--static-eval-weight-overrides") cfg.static_eval_weight_overrides = next();
     else if (arg == "--deterministic") {
       cfg.sample_action = false;
       cfg.root_temperature = 1e-6;
@@ -1188,7 +1190,8 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
           << "native_static_mcts_bot.exe [--search-mode primitive|turn-cmab] [--simulations N]\n"
           << "  [--wall-clock-per-action-seconds SEC]\n"
           << "  [--top-k-actions N] [--max-actions N] [--search-batch-size N] [--c-puct X]\n"
-          << "  [--static-eval-variant baseline|experimental] [--deterministic] [--reuse-tree]\n"
+          << "  [--static-eval-variant baseline|experimental] [--static-eval-weight-overrides SPEC]\n"
+          << "  [--deterministic] [--reuse-tree]\n"
           << "  [--profile-json] [--profile-timing] [--seed N]\n"
           << "  [--turn-cmab-simulations N] [--turn-cmab-max-turn-depth N]\n"
           << "  [--turn-cmab-max-primitives-per-turn N] [--turn-cmab-max-edges-per-node N]\n"
@@ -1207,6 +1210,15 @@ void set_static_eval_variant_env(const std::string& variant) {
 #endif
 }
 
+void set_static_eval_weight_overrides_env(const std::string& overrides) {
+  if (overrides.empty()) return;
+#ifdef _WIN32
+  _putenv_s("TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES", overrides.c_str());
+#else
+  setenv("TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES", overrides.c_str(), 1);
+#endif
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1214,6 +1226,7 @@ int main(int argc, char** argv) {
   try {
     parse_args(argc, argv, cfg);
     set_static_eval_variant_env(cfg.static_eval_variant);
+    set_static_eval_weight_overrides_env(cfg.static_eval_weight_overrides);
     std::mt19937_64 rng(cfg.seed);
     std::string line;
     while (std::getline(std::cin, line)) {

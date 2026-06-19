@@ -88,14 +88,14 @@ def run(args: argparse.Namespace) -> Path:
     config["Analysis Action Snapshots"] = True
     config_path = output_dir / "counterfactual_play.json"
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True), encoding="utf-8")
-    cp = f"out;{game_json_jar()}"
+    cp = os.pathsep.join([str(PROJECT_ROOT / "out"), str(game_json_jar())])
     java = str(Path(args.java_exe)) if args.java_exe else str(Path(os.environ.get("JAVA_HOME", "")) / "bin" / "java.exe")
     if args.java_exe is None and not Path(java).exists():
         java = "java"
     command = [java, "-cp", cp, "HeadlessPlay", str(config_path)]
     completed = subprocess.run(
         command,
-        cwd=game_root(),
+        cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
         timeout=int(args.timeout_sec),

@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -13,7 +12,7 @@ from profiling.config import load_config_defaults
 from profiling.analysis.actions import action_fingerprint, action_id, action_type
 from profiling.analysis.distributions import rank_map
 from profiling.analysis.payload_store import load_payload, store_payload
-from profiling.analysis.position_analyzer import _action_breakdown, analyze_position, parse_target
+from profiling.analysis.position_analyzer import _action_breakdown, analyze_position, parse_target, static_eval_target_env
 from profiling.analysis.report_html import write_report
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -105,9 +104,7 @@ def analyze_payload(
     position_row = asdict(position)
     action_stats = _action_lookup(position_row)
     raw_actions = list(payload.get("actions", [])) if max_actions < 0 else list(payload.get("actions", []))[:max_actions]
-    previous_variant = os.environ.get("TRIBES_STATIC_EVAL_VARIANT")
-    os.environ["TRIBES_STATIC_EVAL_VARIANT"] = str(target.get("variant", "baseline"))
-    try:
+    with static_eval_target_env(target):
         action_rows: list[dict[str, Any]] = []
         term_rows: list[dict[str, Any]] = []
         for index, action in enumerate(raw_actions):
@@ -180,11 +177,6 @@ def analyze_payload(
             "terms": term_rows,
             "pairwise": pairwise_rows,
         }
-    finally:
-        if previous_variant is None:
-            os.environ.pop("TRIBES_STATIC_EVAL_VARIANT", None)
-        else:
-            os.environ["TRIBES_STATIC_EVAL_VARIANT"] = previous_variant
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
@@ -248,7 +240,10 @@ def run(args: argparse.Namespace) -> Path:
         "prior_rank", "visit_share", "visit_rank", "q_mean", "child_value",
         "child_raw", "child_value_rank", "child_raw_rank",
     ]
-    term_fields = action_fields + ["name", "feature_value", "weight", "raw", "normalized", "abs_share", "linearized_value"]
+    term_fields = action_fields + [
+        "name", "parent", "feature_value", "weight", "raw", "normalized",
+        "abs_share", "linearized_value", "tunable", "contributes",
+    ]
     pair_fields = [
         "payload_hash", "label", "target_name", "reason", "desired_action_id",
         "desired_action_fingerprint", "rival_action_id", "rival_action_fingerprint",
