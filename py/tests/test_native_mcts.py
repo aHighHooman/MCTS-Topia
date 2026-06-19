@@ -335,6 +335,27 @@ def _static_evaluation_for_variant(extension, message: dict, variant: str) -> di
     }
 
 
+def _static_breakdown_for_variant(extension, message: dict, variant: str, overrides: str | None = None) -> dict:
+    previous_variant = os.environ.get("TRIBES_STATIC_EVAL_VARIANT")
+    previous_overrides = os.environ.get("TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES")
+    try:
+        os.environ["TRIBES_STATIC_EVAL_VARIANT"] = variant
+        if overrides:
+            os.environ["TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES"] = overrides
+        else:
+            os.environ.pop("TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES", None)
+        return dict(extension.evaluate_static_breakdown(message, 128))["value_breakdown"]
+    finally:
+        if previous_variant is None:
+            os.environ.pop("TRIBES_STATIC_EVAL_VARIANT", None)
+        else:
+            os.environ["TRIBES_STATIC_EVAL_VARIANT"] = previous_variant
+        if previous_overrides is None:
+            os.environ.pop("TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES", None)
+        else:
+            os.environ["TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES"] = previous_overrides
+
+
 def _message_with_village_and_ruin_choices() -> dict:
     message = _message()
     observation = message["observation"]
@@ -1673,24 +1694,129 @@ class NativeMCTSTest(unittest.TestCase):
                     return float(term["raw"])
             raise ValueError("military.unit_power not found in breakdown")
 
-        # 0 kills: power should be identical in both baseline and experimental
-        message["observation"]["units"][0]["kills"] = 0
-        self.assertAlmostEqual(get_unit_power_term("baseline"), get_unit_power_term("experimental"), places=6)
+        baseline_power_weight = 1.810344827586
+        unit_power_scale = 0.6
+        experimental_power_weight = baseline_power_weight
+        # Warrior baseline: reach * attack * survival + defence = 2 * 2 * 10 + 2 = 42.
+        # Warrior experimental: reach * (attack + defence) * survival = 2 * (2 + 2) * 10 = 80.
+        baseline_power = 42.0
+        experimental_power = 80.0 * unit_power_scale
+        expected_formula_diff = experimental_power * experimental_power_weight - baseline_power * baseline_power_weight
 
-        # 1 kill: experimental should get a bonus of 5 in unit_power.
-        # Since it's multiplied by power_weight (1.810344827586), the raw term difference should be exactly 5 * 1.810344827586 = 9.05172413793.
+        # 0 kills: experimental folds defence into projection power instead of adding defensive_anchor.
+        message["observation"]["units"][0]["kills"] = 0
+        self.assertAlmostEqual(get_unit_power_term("experimental") - get_unit_power_term("baseline"), expected_formula_diff, places=5)
+
+        # 1 kill: experimental should get a bonus of 5 in unit_power, scaled by the experimental unit-power weight.
         message["observation"]["units"][0]["kills"] = 1
-        expected_diff_1 = 5.0 * 1.810344827586
+        expected_diff_1 = expected_formula_diff + 5.0 * unit_power_scale * experimental_power_weight
         self.assertAlmostEqual(get_unit_power_term("experimental") - get_unit_power_term("baseline"), expected_diff_1, places=5)
 
         # 2 kills: experimental should get a bonus of 10 in unit_power.
         message["observation"]["units"][0]["kills"] = 2
-        expected_diff_2 = 10.0 * 1.810344827586
+        expected_diff_2 = expected_formula_diff + 10.0 * unit_power_scale * experimental_power_weight
         self.assertAlmostEqual(get_unit_power_term("experimental") - get_unit_power_term("baseline"), expected_diff_2, places=5)
 
         # 3 kills: experimental bonus should be capped at 10 (first 2 kills).
         message["observation"]["units"][0]["kills"] = 3
         self.assertAlmostEqual(get_unit_power_term("experimental") - get_unit_power_term("baseline"), expected_diff_2, places=5)
+
+        # Veteran bonus is 20 in experimental instead of the baseline 0.8.
+        message["observation"]["units"][0]["kills"] = 0
+        message["observation"]["units"][0]["is_veteran"] = True
+        expected_veteran_diff = (
+            (experimental_power + 20.0 * unit_power_scale) * experimental_power_weight
+            - (baseline_power + 0.8) * baseline_power_weight
+        )
+        self.assertAlmostEqual(get_unit_power_term("experimental") - get_unit_power_term("baseline"), expected_veteran_diff, places=5)
+
+    def test_static_eval_value_head_profiles_expose_zero_weight_formula_terms(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+
+        message = _message()
+        message["observation"]["units"] = [
+            {
+                "id": 1,
+                "tribe_id": 0,
+                "city_id": 10,
+                "type": "WARRIOR",
+                "x": 1,
+                "y": 1,
+                "current_hp": 10,
+                "max_hp": 10,
+                "kills": 2,
+                "is_veteran": False,
+                "status": "FRESH",
+                "is_hidden": False,
+            }
+        ]
+        message["observation"]["board"]["tiles"][1][1]["unit_id"] = 1
+
+        baseline_terms = {
+            str(term["name"]): term
+            for term in _static_breakdown_for_variant(extension, message, "baseline")["terms"]
+        }
+        experimental_terms = {
+            str(term["name"]): term
+            for term in _static_breakdown_for_variant(extension, message, "experimental")["terms"]
+        }
+
+        baseline_projection = baseline_terms["military.unit_power.baseline_formula.own.projection"]
+        inactive_experimental_projection = baseline_terms["military.unit_power.experimental_formula.own.projection"]
+        self.assertGreater(float(baseline_projection["feature_value"]), 0.0)
+        self.assertAlmostEqual(float(baseline_projection["weight"]), 1.810344827586, places=12)
+        self.assertGreater(float(baseline_projection["raw"]), 0.0)
+        self.assertGreater(float(inactive_experimental_projection["feature_value"]), 0.0)
+        self.assertEqual(float(inactive_experimental_projection["weight"]), 0.0)
+        self.assertEqual(float(inactive_experimental_projection["raw"]), 0.0)
+
+        inactive_baseline_projection = experimental_terms["military.unit_power.baseline_formula.own.projection"]
+        experimental_projection = experimental_terms["military.unit_power.experimental_formula.own.projection"]
+        self.assertEqual(float(inactive_baseline_projection["weight"]), 0.0)
+        self.assertEqual(float(inactive_baseline_projection["raw"]), 0.0)
+        self.assertAlmostEqual(float(experimental_projection["weight"]), 1.810344827586, places=12)
+        self.assertGreater(float(experimental_projection["raw"]), 0.0)
+
+    def test_static_eval_weight_override_can_activate_zero_weight_term(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+
+        message = _message()
+        message["observation"]["units"] = [
+            {
+                "id": 1,
+                "tribe_id": 0,
+                "city_id": 10,
+                "type": "WARRIOR",
+                "x": 1,
+                "y": 1,
+                "current_hp": 10,
+                "max_hp": 10,
+                "kills": 2,
+                "is_veteran": False,
+                "status": "FRESH",
+                "is_hidden": False,
+            }
+        ]
+        message["observation"]["board"]["tiles"][1][1]["unit_id"] = 1
+
+        base = _static_breakdown_for_variant(extension, message, "baseline")
+        override = _static_breakdown_for_variant(
+            extension,
+            message,
+            "baseline",
+            "military.unit_power.experimental_formula.own.kills=7.0",
+        )
+        base_terms = {str(term["name"]): term for term in base["terms"]}
+        override_terms = {str(term["name"]): term for term in override["terms"]}
+        activated = override_terms["military.unit_power.experimental_formula.own.kills"]
+
+        self.assertEqual(float(base_terms["military.unit_power.experimental_formula.own.kills"]["weight"]), 0.0)
+        self.assertAlmostEqual(float(activated["feature_value"]), 6.0, places=6)
+        self.assertAlmostEqual(float(activated["weight"]), 7.0, places=6)
+        self.assertAlmostEqual(float(activated["raw"]), 42.0, places=6)
+        self.assertAlmostEqual(float(override["raw_total"]) - float(base["raw_total"]), 42.0, places=6)
 
     def test_static_eval_experimental_keeps_baseline_priors_with_research_context(self) -> None:
         extension = load_native_mcts_extension()

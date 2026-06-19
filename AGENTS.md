@@ -29,6 +29,8 @@ $env:PYTHONPATH = "$PWD\py"
 python -m pytest py/tests
 ```
 
+- The full `python -m pytest py/tests` suite can take around 5 minutes; wait for it to finish instead of assuming it is hung.
+
 Common Java entrypoints:
 
 ```powershell
