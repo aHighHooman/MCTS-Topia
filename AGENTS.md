@@ -77,3 +77,4 @@ python -m training.checkpoint_tournament
 - Do not preserve backward compatibility when updating bots, tree searches, training code, or tests unless explicitly requested.
 - Requested functionality should become the default behavior; only add explicit flags or toggles when asked.
 - When changing native transitions or static evaluation, compare against Java behavior and prefer adding focused parity coverage in `py/tests/test_native_mcts.py` or the parity runner.
+- Tests are not required for every change. In particular, do not update or add tests solely because an experimental/static-eval tuning number changed; tests should cover functionality, invariants, parity, crashes, and likely regressions, not lock every exploratory coefficient.
