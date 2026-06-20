@@ -12,5 +12,6 @@
   "build_native_static_exe": true,
   "native_static_search_mode": "primitive",
   "run_id": "",
-  "output_dir": "debug-logs/analysis/value-breakdown"
+  "output_dir": "debug-logs/analysis/value-breakdown",
+  "compare_dir": ""
 }
