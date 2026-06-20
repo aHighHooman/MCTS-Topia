@@ -1696,7 +1696,7 @@ class NativeMCTSTest(unittest.TestCase):
 
         baseline_power_weight = 1.810344827586
         unit_power_scale = 0.6
-        experimental_power_weight = baseline_power_weight
+        experimental_power_weight = 0.905172413793
         # Warrior baseline: reach * attack * survival + defence = 2 * 2 * 10 + 2 = 42.
         # Warrior experimental: reach * (attack + defence) * survival = 2 * (2 + 2) * 10 = 80.
         baseline_power = 42.0
@@ -1707,14 +1707,14 @@ class NativeMCTSTest(unittest.TestCase):
         message["observation"]["units"][0]["kills"] = 0
         self.assertAlmostEqual(get_unit_power_term("experimental") - get_unit_power_term("baseline"), expected_formula_diff, places=5)
 
-        # 1 kill: experimental should get a bonus of 5 in unit_power, scaled by the experimental unit-power weight.
+        # 1 kill: experimental should get a bonus of 5 in unit_power.
         message["observation"]["units"][0]["kills"] = 1
-        expected_diff_1 = expected_formula_diff + 5.0 * unit_power_scale * experimental_power_weight
+        expected_diff_1 = expected_formula_diff + 5.0 * experimental_power_weight
         self.assertAlmostEqual(get_unit_power_term("experimental") - get_unit_power_term("baseline"), expected_diff_1, places=5)
 
         # 2 kills: experimental should get a bonus of 10 in unit_power.
         message["observation"]["units"][0]["kills"] = 2
-        expected_diff_2 = expected_formula_diff + 10.0 * unit_power_scale * experimental_power_weight
+        expected_diff_2 = expected_formula_diff + 10.0 * experimental_power_weight
         self.assertAlmostEqual(get_unit_power_term("experimental") - get_unit_power_term("baseline"), expected_diff_2, places=5)
 
         # 3 kills: experimental bonus should be capped at 10 (first 2 kills).
@@ -1725,7 +1725,7 @@ class NativeMCTSTest(unittest.TestCase):
         message["observation"]["units"][0]["kills"] = 0
         message["observation"]["units"][0]["is_veteran"] = True
         expected_veteran_diff = (
-            (experimental_power + 20.0 * unit_power_scale) * experimental_power_weight
+            (experimental_power + 20.0) * experimental_power_weight
             - (baseline_power + 0.8) * baseline_power_weight
         )
         self.assertAlmostEqual(get_unit_power_term("experimental") - get_unit_power_term("baseline"), expected_veteran_diff, places=5)
@@ -1775,7 +1775,7 @@ class NativeMCTSTest(unittest.TestCase):
         experimental_projection = experimental_terms["military.unit_power.experimental_formula.own.projection"]
         self.assertEqual(float(inactive_baseline_projection["weight"]), 0.0)
         self.assertEqual(float(inactive_baseline_projection["raw"]), 0.0)
-        self.assertAlmostEqual(float(experimental_projection["weight"]), 1.810344827586, places=12)
+        self.assertAlmostEqual(float(experimental_projection["weight"]), 0.905172413793, places=12)
         self.assertGreater(float(experimental_projection["raw"]), 0.0)
 
     def test_static_eval_weight_override_can_activate_zero_weight_term(self) -> None:
@@ -1813,10 +1813,10 @@ class NativeMCTSTest(unittest.TestCase):
         activated = override_terms["military.unit_power.experimental_formula.own.kills"]
 
         self.assertEqual(float(base_terms["military.unit_power.experimental_formula.own.kills"]["weight"]), 0.0)
-        self.assertAlmostEqual(float(activated["feature_value"]), 6.0, places=6)
+        self.assertAlmostEqual(float(activated["feature_value"]), 10.0, places=6)
         self.assertAlmostEqual(float(activated["weight"]), 7.0, places=6)
-        self.assertAlmostEqual(float(activated["raw"]), 42.0, places=6)
-        self.assertAlmostEqual(float(override["raw_total"]) - float(base["raw_total"]), 42.0, places=6)
+        self.assertAlmostEqual(float(activated["raw"]), 70.0, places=6)
+        self.assertAlmostEqual(float(override["raw_total"]) - float(base["raw_total"]), 70.0, places=6)
 
     def test_static_eval_experimental_keeps_baseline_priors_with_research_context(self) -> None:
         extension = load_native_mcts_extension()

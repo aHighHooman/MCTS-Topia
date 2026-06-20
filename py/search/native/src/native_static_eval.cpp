@@ -364,6 +364,11 @@ double value_head_profile_weight(
   };
   const auto found_common = common_weights.find(name);
   if (found_common != common_weights.end()) {
+    if ((name == "military.own_unit_material.own" ||
+         name == "military.own_unit_material.enemy") &&
+        profile.variant == StaticEvalVariant::Experimental) {
+      return 0.0;
+    }
     if (name == "threat.vulnerable_units.baseline_formula" &&
         profile.variant == StaticEvalVariant::Experimental) {
       return 0.0;
@@ -2491,8 +2496,17 @@ double state_raw_baseline(const NativeGameState& state) {
 double state_raw_experimental(const NativeGameState& state) {
   return state_raw_value(
       state,
-      1.810344827586,
+      0.905172413793,
       0.0);
+}
+
+double state_raw_for_active_variant(
+    const NativeGameState& state,
+    std::vector<StaticEvalTerm>* terms = nullptr) {
+  const double power_weight = static_eval_variant() == StaticEvalVariant::Experimental
+      ? 0.905172413793
+      : 1.810344827586;
+  return state_raw_value(state, power_weight, 0.0, terms);
 }
 
 double expected_incoming_damage_next_turn(
@@ -2547,8 +2561,6 @@ UnitPowerParts unit_power_parts_for_formula(
   if (experimental) {
     parts.kills = 5.0 * std::min(2, unit.kills);
     parts.projection *= 0.6;
-    parts.veteran *= 0.6;
-    parts.kills *= 0.6;
   }
   parts.total = parts.projection + parts.defense + parts.veteran + parts.kills;
   return parts;
@@ -2676,8 +2688,7 @@ py::dict evaluate_static_breakdown(const py::dict& payload, int max_actions) {
         true});
     return breakdown_to_dict(evaluation, terms, terms.front().raw);
   }
-  const double power_weight = 1.810344827586;
-  const double raw_total = state_raw_value(root.state, power_weight, 0.0, &terms);
+  const double raw_total = state_raw_for_active_variant(root.state, &terms);
   evaluation.value = std::tanh(raw_total / kValueTanhDenominatorStars);
   return breakdown_to_dict(evaluation, terms, raw_total);
 }
@@ -2744,8 +2755,7 @@ py::dict evaluate_action_breakdown(const py::dict& payload, const std::string& a
         true});
     return breakdown_to_dict(evaluation, terms, terms.front().raw);
   }
-  const double power_weight = 1.810344827586;
-  const double raw_total = state_raw_value(next_state, power_weight, 0.0, &terms);
+  const double raw_total = state_raw_for_active_variant(next_state, &terms);
   evaluation.value = std::tanh(raw_total / kValueTanhDenominatorStars);
   return breakdown_to_dict(evaluation, terms, raw_total);
 }
