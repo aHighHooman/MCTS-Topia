@@ -32,7 +32,7 @@ def _args(repo_root, *, output_dir=None, compare_dir=""):
         max_actions=512,
         seed=0,
         c_puct=1.5,
-        native_static_exe=repo_root / "out" / "native" / "native_static_mcts_bot.exe",
+        native_static_exe=repo_root / "out" / "native" / "static_mcts_bot.exe",
         build_native_static_exe=True,
         native_static_search_mode="primitive",
         compare_dir=compare_dir,

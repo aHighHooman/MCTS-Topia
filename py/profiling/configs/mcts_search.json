@@ -23,7 +23,7 @@
   "checkpoint": "py/profiling/mcts_search_profiling_random_init_model.pt",
   "static_eval_variant": "baseline",
   "native_static_search_mode": "primitive",
-  "native_static_exe": "out/native/native_static_mcts_bot.exe",
+  "native_static_exe": "out/native/static_mcts_bot.exe",
   "build_native_static_exe": true,
   "turn_cmab_simulations": null,
   "turn_cmab_max_turn_depth": 2,

@@ -1,7 +1,7 @@
 #pragma once
 
 #ifdef TRIBES_NATIVE_MCTS_STANDALONE
-#include "native_json_py.hpp"
+#include "json_py.hpp"
 #else
 #include <pybind11/pybind11.h>
 #endif
@@ -186,6 +186,7 @@ double value_to_root_perspective(double active_player_value, int root_player_id,
 enum class StaticEvalVariant {
   Baseline,
   Experimental,
+  Experimental2,
 };
 
 StaticEvalVariant static_eval_variant();

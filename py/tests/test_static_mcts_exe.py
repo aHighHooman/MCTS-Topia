@@ -6,16 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from test_native_mcts import _message_with_capital_capture
+from test_mcts import _message_with_capital_capture
 
 
 ROOT = Path(__file__).resolve().parents[2]
-EXE = ROOT / "out" / "native" / "native_static_mcts_bot.exe"
+EXE = ROOT / "out" / "native" / "static_mcts_bot.exe"
 
 
 def _require_exe() -> Path:
     if not EXE.exists():
-        pytest.skip("native static MCTS executable is not built; run scripts/build_native_static_bot.ps1")
+        pytest.skip("native static MCTS executable is not built; run scripts/build_static_bot.ps1")
     return EXE
 
 
@@ -324,7 +324,7 @@ def _dense_payload(message: dict) -> dict:
     }
 
 
-def test_native_static_mcts_exe_protocol_smoke_without_forward_model() -> None:
+def test_static_mcts_exe_protocol_smoke_without_forward_model() -> None:
     message = _message_with_capital_capture(second_action={"id": "end", "type": "END_TURN"})
     message["type"] = "action_request"
     completed = subprocess.run(
@@ -342,7 +342,7 @@ def test_native_static_mcts_exe_protocol_smoke_without_forward_model() -> None:
     assert response["rankedActionIds"][:2] == ["capture", "end"]
 
 
-def test_native_static_mcts_exe_uses_native_tree_without_forward_model_protocol() -> None:
+def test_static_mcts_exe_uses_native_tree_without_forward_model_protocol() -> None:
     message = _message_with_capital_capture(second_action={"id": "end", "type": "END_TURN"})
     message["type"] = "action_request"
     completed = subprocess.run(
@@ -361,7 +361,7 @@ def test_native_static_mcts_exe_uses_native_tree_without_forward_model_protocol(
     assert response["rankedActionIds"][0] == "capture"
 
 
-def test_native_static_mcts_exe_profile_json_includes_root_action_stats() -> None:
+def test_static_mcts_exe_profile_json_includes_root_action_stats() -> None:
     message = _message_with_capital_capture(second_action={"id": "end", "type": "END_TURN"})
     message["type"] = "action_request"
     completed = subprocess.run(
@@ -381,7 +381,7 @@ def test_native_static_mcts_exe_profile_json_includes_root_action_stats() -> Non
 
 
 
-def test_native_static_mcts_exe_accepts_java_compact_protocol() -> None:
+def test_static_mcts_exe_accepts_java_compact_protocol() -> None:
     message = _message_with_capital_capture(second_action={"id": "end", "type": "END_TURN"})
     compact = _compact_payload(message)
     completed = subprocess.run(
@@ -399,7 +399,7 @@ def test_native_static_mcts_exe_accepts_java_compact_protocol() -> None:
     assert response["rankedActionIds"][:2] == ["capture", "end"]
 
 
-def test_native_static_mcts_exe_accepts_dense_java_protocol() -> None:
+def test_static_mcts_exe_accepts_dense_java_protocol() -> None:
     message = _message_with_capital_capture(second_action={"id": "end", "type": "END_TURN"})
     dense = _dense_payload(message)
     completed = subprocess.run(
@@ -418,7 +418,7 @@ def test_native_static_mcts_exe_accepts_dense_java_protocol() -> None:
     assert response["rankedActionIndexes"][:2] == [0, 1]
 
 
-def test_native_static_mcts_exe_turn_cmab_returns_legal_root_action() -> None:
+def test_static_mcts_exe_turn_cmab_returns_legal_root_action() -> None:
     message = _message_with_capital_capture(second_action={"id": "end", "type": "END_TURN"})
     message["type"] = "action_request"
     completed = subprocess.run(

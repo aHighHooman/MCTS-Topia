@@ -28,7 +28,7 @@ def _payload() -> dict[str, object]:
 
 
 def test_analyze_position_fails_when_profile_stats_missing(monkeypatch, tmp_path) -> None:
-    exe = tmp_path / "native_static_mcts_bot.exe"
+    exe = tmp_path / "static_mcts_bot.exe"
     exe.write_text("", encoding="utf-8")
 
     monkeypatch.setattr(pa, "_root_static_eval", lambda payload, actions, max_actions: ([0.5, 0.5], 0.0))
@@ -55,7 +55,7 @@ def test_analyze_position_fails_when_profile_stats_missing(monkeypatch, tmp_path
 
 
 def test_analyze_position_continues_when_static_extension_unavailable(monkeypatch, tmp_path) -> None:
-    exe = tmp_path / "native_static_mcts_bot.exe"
+    exe = tmp_path / "static_mcts_bot.exe"
     exe.write_text("", encoding="utf-8")
 
     def fail_root(*args, **kwargs):
@@ -112,10 +112,10 @@ def test_native_static_exe_staleness_is_rejected_when_build_disabled(monkeypatch
     bot_dir.mkdir()
     scripts_dir.mkdir()
     out_dir.mkdir(parents=True)
-    exe = out_dir / "native_static_mcts_bot.exe"
-    source = src_dir / "native_static_eval.cpp"
-    bot = bot_dir / "native_static_mcts_bot.cpp"
-    build_script = scripts_dir / "build_native_static_bot.ps1"
+    exe = out_dir / "static_mcts_bot.exe"
+    source = src_dir / "static_eval.cpp"
+    bot = bot_dir / "static_mcts_bot.cpp"
+    build_script = scripts_dir / "build_static_bot.ps1"
     exe.write_text("exe", encoding="utf-8")
     source.write_text("source", encoding="utf-8")
     bot.write_text("bot", encoding="utf-8")
@@ -145,7 +145,7 @@ def test_static_eval_target_env_applies_and_restores_weight_overrides(monkeypatc
 
 
 def test_native_static_exe_receives_weight_overrides(monkeypatch, tmp_path) -> None:
-    exe = tmp_path / "native_static_mcts_bot.exe"
+    exe = tmp_path / "static_mcts_bot.exe"
     exe.write_text("", encoding="utf-8")
     captured: dict[str, object] = {}
 

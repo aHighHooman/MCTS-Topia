@@ -9,7 +9,7 @@
   "top_k_actions": 0,
   "max_actions": 512,
   "seed": 0,
-  "native_static_exe": "out/native/native_static_mcts_bot.exe",
+  "native_static_exe": "out/native/static_mcts_bot.exe",
   "build_native_static_exe": true,
   "native_static_search_mode": "primitive",
   "output_dir": null

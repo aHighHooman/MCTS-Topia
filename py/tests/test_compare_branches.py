@@ -109,7 +109,7 @@ def test_compare_branches_fails_when_payload_dir_is_empty(monkeypatch, tmp_path)
                 max_actions=512,
                 seed=0,
                 c_puct=1.5,
-                native_static_exe=repo_root / "out" / "native" / "native_static_mcts_bot.exe",
+                native_static_exe=repo_root / "out" / "native" / "static_mcts_bot.exe",
                 build_native_static_exe=True,
                 native_static_search_mode="primitive",
             )
@@ -140,7 +140,7 @@ def test_analyze_position_native_static_exe_maps_profile_stats(monkeypatch, tmp_
         "observation": {"board": {"size": 2}, "tick": 0},
         "actions": [{"id": "a", "type": "END_TURN"}, {"id": "b", "type": "MOVE", "x": 1, "y": 0}],
     }
-    exe = tmp_path / "native_static_mcts_bot.exe"
+    exe = tmp_path / "static_mcts_bot.exe"
     exe.write_text("", encoding="utf-8")
     calls = []
 

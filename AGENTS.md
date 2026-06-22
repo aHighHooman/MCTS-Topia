@@ -51,8 +51,8 @@ python -m training.checkpoint_tournament
 ## Native MCTS Notes
 
 - Native extension sources are in `py/search/native/`; `load_native_mcts_extension()` auto-builds with PyTorch C++ extension tooling.
-- Shared native C++ files live in `py/search/native/src/`: `native_rules.cpp`, `native_static_eval.cpp`, `native_mcts.cpp`.
-- The standalone full static-eval protocol bot lives in `bots/native_static_mcts_bot.cpp`; build it with `scripts/build_native_static_bot.ps1`.
+- Shared native C++ files live in `py/search/native/src/`: `rules.cpp`, `static_eval.cpp`, `mcts.cpp`.
+- The standalone full static-eval protocol bot lives in `bots/static_mcts_bot.cpp`; build it with `scripts/build_static_bot.ps1`.
 - Parity/debug entrypoint: `python -m search.native.parity_runner --fixture debug-logs\some-fixture\game.json --depth 1`.
 - Java parity oracle: `py/search/native/java/core/game/NativeParityOracle.java`.
 
@@ -76,5 +76,5 @@ python -m training.checkpoint_tournament
 - Observation and forward-model states are player-specific hidden-information copies, not omniscient game state.
 - Do not preserve backward compatibility when updating bots, tree searches, training code, or tests unless explicitly requested.
 - Requested functionality should become the default behavior; only add explicit flags or toggles when asked.
-- When changing native transitions or static evaluation, compare against Java behavior and prefer adding focused parity coverage in `py/tests/test_native_mcts.py` or the parity runner.
+- When changing native transitions or static evaluation, compare against Java behavior and prefer adding focused parity coverage in `py/tests/test_mcts.py` or the parity runner.
 - Tests are not required for every change. In particular, do not update or add tests solely because an experimental/static-eval tuning number changed; tests should cover functionality, invariants, parity, crashes, and likely regressions, not lock every exploratory coefficient.

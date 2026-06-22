@@ -8,9 +8,9 @@ if str(PY) not in sys.path:
 from torch.utils.cpp_extension import load
 from pathlib import Path
 
-source = Path(__file__).with_name("src") / "native_mcts.cpp"
-rules = source.with_name("native_rules.cpp")
-static_eval = source.with_name("native_static_eval.cpp")
+source = Path(__file__).with_name("src") / "mcts.cpp"
+rules = source.with_name("rules.cpp")
+static_eval = source.with_name("static_eval.cpp")
 try:
     load(
         name="tribes_rl_native_mcts",

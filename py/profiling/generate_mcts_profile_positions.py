@@ -651,7 +651,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bot-max-actions", type=int, default=512)
     parser.add_argument("--bot-batch-size", type=int, default=64)
     parser.add_argument("--static-eval-variant", choices=("baseline", "experimental"), default="baseline")
-    parser.add_argument("--native-static-exe", type=Path, default=PROJECT_ROOT / "out" / "native" / "native_static_mcts_bot.exe")
+    parser.add_argument("--native-static-exe", type=Path, default=PROJECT_ROOT / "out" / "native" / "static_mcts_bot.exe")
     parser.add_argument("--bot-deterministic", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "debug-logs" / "mcts-profile-payloads")
     parser.add_argument("--raw-dir", type=Path, default=PROJECT_ROOT / "debug-logs" / "mcts-profile-position-corpus")

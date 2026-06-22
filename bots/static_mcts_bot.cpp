@@ -16,8 +16,8 @@
 #ifndef TRIBES_NATIVE_MCTS_STANDALONE
 #define TRIBES_NATIVE_MCTS_STANDALONE
 #endif
-#include "../py/search/native/src/native_mcts.cpp"
-#include "../py/search/native/src/native_turn_cmab.cpp"
+#include "../py/search/native/src/mcts.cpp"
+#include "../py/search/native/src/turn_cmab.cpp"
 
 using json = nlohmann::json;
 
@@ -1187,10 +1187,10 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
       }
     } else if (arg == "--help" || arg == "-h") {
       std::cout
-          << "native_static_mcts_bot.exe [--search-mode primitive|turn-cmab] [--simulations N]\n"
+          << "static_mcts_bot.exe [--search-mode primitive|turn-cmab] [--simulations N]\n"
           << "  [--wall-clock-per-action-seconds SEC]\n"
           << "  [--top-k-actions N] [--max-actions N] [--search-batch-size N] [--c-puct X]\n"
-          << "  [--static-eval-variant baseline|experimental] [--static-eval-weight-overrides SPEC]\n"
+          << "  [--static-eval-variant baseline|experimental|experimental-2] [--static-eval-weight-overrides SPEC]\n"
           << "  [--deterministic] [--reuse-tree]\n"
           << "  [--profile-json] [--profile-timing] [--seed N]\n"
           << "  [--turn-cmab-simulations N] [--turn-cmab-max-turn-depth N]\n"
@@ -1246,7 +1246,7 @@ int main(int argc, char** argv) {
       }
     }
   } catch (const std::exception& exc) {
-    std::cerr << "[native_static_mcts_bot] error: " << exc.what() << std::endl;
+    std::cerr << "[static_mcts_bot] error: " << exc.what() << std::endl;
     return 1;
   }
   return 0;

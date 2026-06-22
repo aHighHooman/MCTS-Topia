@@ -1,13 +1,13 @@
 #ifdef TRIBES_NATIVE_MCTS_STANDALONE
-#include "native_json_py.hpp"
+#include "json_py.hpp"
 #else
 #include <torch/extension.h>
 
 #include <pybind11/stl.h>
 #endif
 
-#include "native_rules.hpp"
-#include "native_static_eval.hpp"
+#include "rules.hpp"
+#include "static_eval.hpp"
 
 #include <algorithm>
 #include <chrono>

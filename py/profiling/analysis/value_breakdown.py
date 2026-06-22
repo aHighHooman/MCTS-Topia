@@ -569,7 +569,7 @@ def run(args: argparse.Namespace) -> Path:
                 seed=args.seed,
                 c_puct=args.c_puct,
                 include_breakdown=True,
-                native_static_exe=getattr(args, "native_static_exe", PROJECT_ROOT / "out" / "native" / "native_static_mcts_bot.exe"),
+                native_static_exe=getattr(args, "native_static_exe", PROJECT_ROOT / "out" / "native" / "static_mcts_bot.exe"),
                 build_native_static_exe=bool(getattr(args, "build_native_static_exe", True)),
                 native_static_search_mode=str(getattr(args, "native_static_search_mode", "primitive")),
             )
@@ -707,7 +707,7 @@ def main() -> int:
     parser.add_argument("--max-actions", type=int, default=512)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--c-puct", type=float, default=1.5)
-    parser.add_argument("--native-static-exe", type=Path, default=PROJECT_ROOT / "out" / "native" / "native_static_mcts_bot.exe")
+    parser.add_argument("--native-static-exe", type=Path, default=PROJECT_ROOT / "out" / "native" / "static_mcts_bot.exe")
     parser.add_argument("--build-native-static-exe", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--native-static-search-mode", choices=("primitive", "turn-cmab"), default="primitive")
     parser.add_argument("--run-id", default="")

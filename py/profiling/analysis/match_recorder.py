@@ -50,7 +50,7 @@ def run(args: argparse.Namespace) -> Path:
                 top_k_actions=args.top_k_actions,
                 max_actions=args.max_actions,
                 seed=args.seed + ply_index,
-                native_static_exe=getattr(args, "native_static_exe", PROJECT_ROOT / "out" / "native" / "native_static_mcts_bot.exe"),
+                native_static_exe=getattr(args, "native_static_exe", PROJECT_ROOT / "out" / "native" / "static_mcts_bot.exe"),
                 build_native_static_exe=bool(getattr(args, "build_native_static_exe", True)),
                 native_static_search_mode=str(getattr(args, "native_static_search_mode", "primitive")),
             )
@@ -88,7 +88,7 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--top-k-actions", type=int, default=0)
     parser.add_argument("--max-actions", type=int, default=512)
-    parser.add_argument("--native-static-exe", type=Path, default=PROJECT_ROOT / "out" / "native" / "native_static_mcts_bot.exe")
+    parser.add_argument("--native-static-exe", type=Path, default=PROJECT_ROOT / "out" / "native" / "static_mcts_bot.exe")
     parser.add_argument("--build-native-static-exe", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--native-static-search-mode", choices=("primitive", "turn-cmab"), default="primitive")
     parser.add_argument("--match-id", default="")

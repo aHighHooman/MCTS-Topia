@@ -1,12 +1,12 @@
 #pragma once
 
 #ifdef TRIBES_NATIVE_MCTS_STANDALONE
-#include "native_json_py.hpp"
+#include "json_py.hpp"
 #else
 #include <pybind11/pybind11.h>
 #endif
 
-#include "native_rules.hpp"
+#include "rules.hpp"
 
 #include <vector>
 

@@ -16,7 +16,7 @@ from profiling.analysis.schema import ActionAnalysis, PositionAnalysis
 from search.native.cpp_extension import load_native_mcts_extension
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_NATIVE_STATIC_EXE = PROJECT_ROOT / "out" / "native" / "native_static_mcts_bot.exe"
+DEFAULT_NATIVE_STATIC_EXE = PROJECT_ROOT / "out" / "native" / "static_mcts_bot.exe"
 
 
 def parse_target(spec: str) -> dict[str, str]:
@@ -72,7 +72,7 @@ def _repo_path(path: Path | str | None, default: Path) -> Path:
 def _native_static_build_inputs(build_script: Path) -> list[Path]:
     native_src = PROJECT_ROOT / "py" / "search" / "native" / "src"
     paths = [
-        PROJECT_ROOT / "bots" / "native_static_mcts_bot.cpp",
+        PROJECT_ROOT / "bots" / "static_mcts_bot.cpp",
         build_script,
     ]
     paths.extend(sorted(native_src.glob("*.cpp")))
@@ -92,7 +92,7 @@ def _is_native_static_exe_fresh(exe: Path, inputs: list[Path]) -> bool:
 
 def _ensure_native_static_exe(native_static_exe: Path | str | None, build_native_static_exe: bool) -> Path:
     exe = _repo_path(native_static_exe, DEFAULT_NATIVE_STATIC_EXE)
-    build_script = PROJECT_ROOT / "scripts" / "build_native_static_bot.ps1"
+    build_script = PROJECT_ROOT / "scripts" / "build_static_bot.ps1"
     build_inputs = _native_static_build_inputs(build_script)
     if _is_native_static_exe_fresh(exe, build_inputs):
         return exe

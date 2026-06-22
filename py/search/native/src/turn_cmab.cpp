@@ -1,6 +1,6 @@
-#include "native_turn_cmab.hpp"
+#include "turn_cmab.hpp"
 
-#include "native_static_eval.hpp"
+#include "static_eval.hpp"
 
 #include <algorithm>
 #include <chrono>

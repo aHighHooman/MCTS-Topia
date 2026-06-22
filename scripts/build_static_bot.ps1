@@ -8,9 +8,9 @@ $ErrorActionPreference = "Stop"
 $repo = Resolve-Path (Join-Path $PSScriptRoot "..")
 $nativeRoot = Join-Path $repo "py\search\native"
 $nativeSrc = Join-Path $nativeRoot "src"
-$source = Join-Path $repo "bots\native_static_mcts_bot.cpp"
-$rulesSource = Join-Path $nativeSrc "native_rules.cpp"
-$staticEvalSource = Join-Path $nativeSrc "native_static_eval.cpp"
+$source = Join-Path $repo "bots\static_mcts_bot.cpp"
+$rulesSource = Join-Path $nativeSrc "rules.cpp"
+$staticEvalSource = Join-Path $nativeSrc "static_eval.cpp"
 $outDirPath = Join-Path $repo $OutputDir
 New-Item -ItemType Directory -Force -Path $outDirPath | Out-Null
 
@@ -45,8 +45,8 @@ if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
     }
 }
 
-$exe = Join-Path $outDirPath "native_static_mcts_bot.exe"
-$obj = Join-Path $outDirPath "native_static_mcts_bot.obj"
+$exe = Join-Path $outDirPath "static_mcts_bot.exe"
+$obj = Join-Path $outDirPath "static_mcts_bot.obj"
 $rulesObj = Join-Path $outDirPath "native_rules.obj"
 $staticEvalObj = Join-Path $outDirPath "native_static_eval.obj"
 

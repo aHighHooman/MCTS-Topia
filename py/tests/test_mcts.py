@@ -1653,18 +1653,24 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(baseline, experimental)
 
-    def test_static_eval_breakdown_exposes_all_researched_tech_value_terms(self) -> None:
+    def test_static_eval_experimental_2_exposes_all_researched_tech_value_terms(self) -> None:
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)
         message = _message()
         message["observation"]["tribes"][0]["researched_tech_ids"] = ["CLIMBING", "ROADS", "PHILOSOPHY"]
 
-        terms = {
+        experimental_terms = {
             str(term["name"]): term
             for term in _static_breakdown_for_variant(extension, message, "experimental")["terms"]
         }
+        terms = {
+            str(term["name"]): term
+            for term in _static_breakdown_for_variant(extension, message, "experimental-2")["terms"]
+        }
         expected_names = {f"technology.researched_tech.{tech.lower()}" for tech in TECH_TYPES}
 
+        self.assertIn("technology.researched_tech", experimental_terms)
+        self.assertNotIn("technology.researched_tech.climbing", experimental_terms)
         self.assertLessEqual(expected_names, set(terms))
         self.assertEqual(float(terms["technology.researched_tech.climbing"]["feature_value"]), 1.0)
         self.assertEqual(float(terms["technology.researched_tech.roads"]["feature_value"]), 1.0)

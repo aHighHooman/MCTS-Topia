@@ -40,6 +40,14 @@ struct ValueHeadProfile {
   StaticEvalVariant variant = StaticEvalVariant::Baseline;
 };
 
+bool is_experimental_value_variant(StaticEvalVariant variant) {
+  return variant == StaticEvalVariant::Experimental || variant == StaticEvalVariant::Experimental2;
+}
+
+bool uses_per_tech_research_value(StaticEvalVariant variant) {
+  return variant == StaticEvalVariant::Experimental2;
+}
+
 std::unordered_map<std::string, double> parse_weight_overrides() {
   std::unordered_map<std::string, double> out;
   const char* raw = std::getenv("TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES");
@@ -352,6 +360,7 @@ double value_head_profile_weight(
       {"economy.stars.enemy_best", -0.413793103448},
       {"score_terminal.score_diff.own", 0.172413793103},
       {"score_terminal.score_diff.enemy_best", -0.172413793103},
+      {"technology.researched_tech", 2.155172413793},
       {"territory.villages.visible_count", 1.0},
       {"territory.villages.control", 1.0},
       {"territory.exploration", 8.620689655172},
@@ -366,21 +375,21 @@ double value_head_profile_weight(
   if (found_common != common_weights.end()) {
     if ((name == "military.own_unit_material.own" ||
          name == "military.own_unit_material.enemy") &&
-        profile.variant == StaticEvalVariant::Experimental) {
+        is_experimental_value_variant(profile.variant)) {
       return 0.0;
     }
     if (name == "threat.vulnerable_units.baseline_formula" &&
-        profile.variant == StaticEvalVariant::Experimental) {
+        is_experimental_value_variant(profile.variant)) {
       return 0.0;
     }
     if (name == "threat.vulnerable_units.experimental_formula" &&
-        profile.variant != StaticEvalVariant::Experimental) {
+        !is_experimental_value_variant(profile.variant)) {
       return 0.0;
     }
     return found_common->second;
   }
 
-  const bool experimental = profile.variant == StaticEvalVariant::Experimental;
+  const bool experimental = is_experimental_value_variant(profile.variant);
   const bool unit_power_baseline =
       name.rfind("military.unit_power.baseline_formula.", 0) == 0;
   const bool unit_power_experimental =
@@ -405,6 +414,9 @@ StaticEvalVariant static_eval_variant() {
       return StaticEvalVariant::Baseline;
     }
     const std::string variant(value);
+    if (variant == "experimental-2") {
+      return StaticEvalVariant::Experimental2;
+    }
     return variant == "experimental" ? StaticEvalVariant::Experimental : StaticEvalVariant::Baseline;
   }();
   return cached;
@@ -414,6 +426,9 @@ StaticEvalVariant static_eval_variant() {
     return StaticEvalVariant::Baseline;
   }
   const std::string variant(value);
+  if (variant == "experimental-2") {
+    return StaticEvalVariant::Experimental2;
+  }
   if (variant == "experimental") {
     return StaticEvalVariant::Experimental;
   }
@@ -2337,10 +2352,13 @@ double state_raw_value(
   double best_enemy_stars = 0.0;
   double my_score = me == nullptr ? 0.0 : static_cast<double>(me->score);
   double my_stars = me == nullptr ? 0.0 : static_cast<double>(me->stars);
+  double my_tech = 0.0;
   std::set<std::string> my_researched_techs;
   if (me != nullptr) {
     for (const std::string& tech : me->researched_tech_ids) {
-      my_researched_techs.insert(normalized_tech_id(tech));
+      const std::string normalized = normalized_tech_id(tech);
+      my_researched_techs.insert(normalized);
+      my_tech += tech_tier_score(normalized);
     }
   }
   for (const NativeTribe& tribe : state.tribes) {
@@ -2427,8 +2445,9 @@ double state_raw_value(
       profile_weight("military.own_unit_material.own"));
 
   const size_t unit_power_begin = raw_terms.size();
-  const bool baseline_formula_selected = profile.variant != StaticEvalVariant::Experimental;
-  const bool experimental_formula_selected = profile.variant == StaticEvalVariant::Experimental;
+  const bool experimental_family_selected = is_experimental_value_variant(profile.variant);
+  const bool baseline_formula_selected = !experimental_family_selected;
+  const bool experimental_formula_selected = experimental_family_selected;
   add_term("military.unit_power.baseline_formula.own.projection", my_power_baseline.projection, "military.unit_power", baseline_formula_selected);
   add_term("military.unit_power.baseline_formula.own.defense", my_power_baseline.defense, "military.unit_power", baseline_formula_selected);
   add_term("military.unit_power.baseline_formula.own.veteran", my_power_baseline.veteran, "military.unit_power", baseline_formula_selected);
@@ -2445,10 +2464,10 @@ double state_raw_value(
   add_term("military.unit_power.experimental_formula.enemy.defense", enemy_power_experimental.defense, "military.unit_power", experimental_formula_selected);
   add_term("military.unit_power.experimental_formula.enemy.veteran", enemy_power_experimental.veteran, "military.unit_power", experimental_formula_selected);
   add_term("military.unit_power.experimental_formula.enemy.kills", enemy_power_experimental.kills, "military.unit_power", experimental_formula_selected);
-  const UnitPowerParts& selected_my_power = profile.variant == StaticEvalVariant::Experimental
+  const UnitPowerParts& selected_my_power = experimental_family_selected
       ? my_power_experimental
       : my_power_baseline;
-  const UnitPowerParts& selected_enemy_power = profile.variant == StaticEvalVariant::Experimental
+  const UnitPowerParts& selected_enemy_power = experimental_family_selected
       ? enemy_power_experimental
       : enemy_power_baseline;
   add_summary("military.unit_power", selected_my_power.total - selected_enemy_power.total, power_weight, unit_power_begin);
@@ -2496,17 +2515,21 @@ double state_raw_value(
       best_enemy_score,
       profile_weight("score_terminal.score_diff.own"));
 
-  for (const std::string& tech : all_research_techs()) {
-    const double feature = my_researched_techs.count(tech) > 0 ? 1.0 : 0.0;
-    const double research_cost = baseline_research_cost_value(tech, my_cities);
-    add_term_with_default_weight(tech_term_name(tech), feature, research_cost, "technology.researched_tech");
-  }
-  for (const std::string& tech : my_researched_techs) {
-    if (std::find(all_research_techs().begin(), all_research_techs().end(), tech) != all_research_techs().end()) {
-      continue;
+  if (uses_per_tech_research_value(profile.variant)) {
+    for (const std::string& tech : all_research_techs()) {
+      const double feature = my_researched_techs.count(tech) > 0 ? 1.0 : 0.0;
+      const double research_cost = baseline_research_cost_value(tech, my_cities);
+      add_term_with_default_weight(tech_term_name(tech), feature, research_cost, "technology.researched_tech");
     }
-    const double research_cost = baseline_research_cost_value(tech, my_cities);
-    add_term_with_default_weight(tech_term_name(tech), 1.0, research_cost, "technology.researched_tech");
+    for (const std::string& tech : my_researched_techs) {
+      if (std::find(all_research_techs().begin(), all_research_techs().end(), tech) != all_research_techs().end()) {
+        continue;
+      }
+      const double research_cost = baseline_research_cost_value(tech, my_cities);
+      add_term_with_default_weight(tech_term_name(tech), 1.0, research_cost, "technology.researched_tech");
+    }
+  } else {
+    add_term("technology.researched_tech", my_tech);
   }
 
   const size_t villages_begin = raw_terms.size();
@@ -2520,13 +2543,13 @@ double state_raw_value(
   const size_t vulnerable_begin = raw_terms.size();
   add_term("threat.vulnerable_units.baseline_formula", vulnerable_penalty_baseline, "threat.vulnerable_units", baseline_formula_selected);
   add_term("threat.vulnerable_units.experimental_formula", vulnerable_penalty_experimental, "threat.vulnerable_units", experimental_formula_selected);
-  const double selected_vulnerable_penalty = profile.variant == StaticEvalVariant::Experimental
+  const double selected_vulnerable_penalty = experimental_family_selected
       ? vulnerable_penalty_experimental
       : vulnerable_penalty_baseline;
   add_summary(
       "threat.vulnerable_units",
       selected_vulnerable_penalty,
-      profile.variant == StaticEvalVariant::Experimental
+      experimental_family_selected
           ? profile_weight("threat.vulnerable_units.experimental_formula")
           : profile_weight("threat.vulnerable_units.baseline_formula"),
       vulnerable_begin);
@@ -2563,7 +2586,7 @@ double state_raw_experimental(const NativeGameState& state) {
 double state_raw_for_active_variant(
     const NativeGameState& state,
     std::vector<StaticEvalTerm>* terms = nullptr) {
-  const double power_weight = static_eval_variant() == StaticEvalVariant::Experimental
+  const double power_weight = is_experimental_value_variant(static_eval_variant())
       ? 0.905172413793
       : 1.810344827586;
   return state_raw_value(state, power_weight, 0.0, terms);
@@ -2630,7 +2653,7 @@ UnitPowerParts unit_power_parts(const NativeGameState& state, const NativeUnit& 
   return unit_power_parts_for_formula(
       state,
       unit,
-      static_eval_variant() == StaticEvalVariant::Experimental);
+      is_experimental_value_variant(static_eval_variant()));
 }
 
 double unit_power(const NativeGameState& state, const NativeUnit& unit) {
@@ -2658,7 +2681,7 @@ StaticEvaluation static_evaluation_for_state(
   const StaticEvalVariant variant = static_eval_variant();
   StaticEvaluation evaluation;
   evaluation.priors = priors_for_state(state, actions);
-  if (variant == StaticEvalVariant::Experimental) {
+  if (is_experimental_value_variant(variant)) {
     evaluation.value = state_value_experimental(state);
   } else {
     evaluation.value = state_value_baseline(state);

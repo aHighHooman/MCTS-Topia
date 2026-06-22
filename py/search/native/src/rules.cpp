@@ -1,4 +1,4 @@
-#include "native_rules.hpp"
+#include "rules.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -4405,7 +4405,8 @@ bool apply_spawn(NativeGameState& next, const NativeAction& action) {
   unit.attack = unit_attack(type);
   unit.defence = unit_defence(type);
   unit.movement = unit_movement(type);
-  unit.range = static_eval_variant() == StaticEvalVariant::Experimental
+  const StaticEvalVariant variant = static_eval_variant();
+  unit.range = (variant == StaticEvalVariant::Experimental || variant == StaticEvalVariant::Experimental2)
       ? (type == "CATAPULT" ? 3 : (type == "ARCHER" ? 2 : 1))
       : 1;
   unit.cost = unit_cost(type);

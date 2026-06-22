@@ -107,10 +107,10 @@ Native Python wrappers live in `py/search/native/`. Shared C++ sources live in `
 
 Useful native files:
 
-- `py/search/native/src/native_rules.cpp`: native transition/rules implementation
-- `py/search/native/src/native_static_eval.cpp`: native static evaluator and action priors
-- `py/search/native/src/native_mcts.cpp`: native MCTS binding/search code
-- `bots/native_static_mcts_bot.cpp`: standalone full static-eval MCTS protocol bot executable source
+- `py/search/native/src/rules.cpp`: native transition/rules implementation
+- `py/search/native/src/static_eval.cpp`: native static evaluator and action priors
+- `py/search/native/src/mcts.cpp`: native MCTS binding/search code
+- `bots/static_mcts_bot.cpp`: standalone full static-eval MCTS protocol bot executable source
 - `py/search/native/parity_runner.py`: Java-vs-native parity checker
 - `py/search/native/java/core/game/NativeParityOracle.java`: Java oracle used by parity checks
 
@@ -185,7 +185,7 @@ docs/external-bot-protocol.md
 Supported bot entrypoints:
 
 - `bots/hybrid_nn_bot.py`
-- `bots/native_static_mcts_bot.cpp` built to `out/native/native_static_mcts_bot.exe`
+- `bots/static_mcts_bot.cpp` built to `out/native/static_mcts_bot.exe`
 
 The Python implementation for the NN bot still lives under `py/bots/` and `py/nn/`. `py/bots/simple_bot.py` is retained as an adjudication/test utility, not a primary bot.
 
@@ -218,7 +218,7 @@ These directories are intentionally ignored and can be regenerated or treated as
 - Observation and forward-model states are player-specific hidden-information copies, not omniscient game state.
 - Requested bot/search/training behavior should become the default behavior unless a flag is explicitly needed.
 - Native transition changes should be compared against Java behavior with focused parity coverage.
-- Prefer adding parity fixtures or targeted `py/tests/test_native_mcts.py` coverage when fixing native rules.
+- Prefer adding parity fixtures or targeted `py/tests/test_mcts.py` coverage when fixing native rules.
 
 ## Credits
 

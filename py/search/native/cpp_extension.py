@@ -121,9 +121,9 @@ def load_native_mcts_extension() -> Optional[object]:
     if _NATIVE_MCTS_MODULE is not None:
         return _NATIVE_MCTS_MODULE
 
-    source = Path(__file__).with_name("src") / "native_mcts.cpp"
-    rules_source = source.with_name("native_rules.cpp")
-    static_eval_source = source.with_name("native_static_eval.cpp")
+    source = Path(__file__).with_name("src") / "mcts.cpp"
+    rules_source = source.with_name("rules.cpp")
+    static_eval_source = source.with_name("static_eval.cpp")
     build_dir = Path(__file__).with_name(".build")
     build_dir.mkdir(parents=True, exist_ok=True)
     stamp = build_dir / "tribes_rl_native_mcts.flags"

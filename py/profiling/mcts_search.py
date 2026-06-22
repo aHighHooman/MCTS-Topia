@@ -58,7 +58,7 @@ _MCTS_SEARCH_DEFAULTS: dict[str, Any] = {
     "checkpoint": str(DEFAULT_AUTORESEARCH_CHECKPOINT),
     "static_eval_variant": "baseline",
     "native_static_search_mode": "primitive",
-    "native_static_exe": "out/native/native_static_mcts_bot.exe",
+    "native_static_exe": "out/native/static_mcts_bot.exe",
     "build_native_static_exe": True,
     "turn_cmab_simulations": None,
     "turn_cmab_max_turn_depth": 3,
@@ -1462,8 +1462,8 @@ def _load_mcts_search_config(path: Path = DEFAULT_MCTS_SEARCH_CONFIG) -> argpars
     values["synthetic"] = False
     if str(values.get("evaluator")) not in {"nn", "static_exe", "bot"}:
         raise ValueError("mcts_search config evaluator must be one of: nn, static_exe, bot")
-    if str(values.get("static_eval_variant")) not in {"baseline", "experimental"}:
-        raise ValueError("mcts_search config static_eval_variant must be one of: baseline, experimental")
+    if str(values.get("static_eval_variant")) not in {"baseline", "experimental", "experimental-2"}:
+        raise ValueError("mcts_search config static_eval_variant must be one of: baseline, experimental, experimental-2")
     if str(values.get("native_static_search_mode")) not in {"primitive", "turn-cmab"}:
         raise ValueError("mcts_search config native_static_search_mode must be one of: primitive, turn-cmab")
     if str(values.get("turn_cmab_opponent_mode")) not in {"root-max", "root-adversarial"}:
@@ -1855,7 +1855,7 @@ def _ensure_native_static_exe(args: argparse.Namespace) -> Path:
         return exe
     if not bool(getattr(args, "build_native_static_exe", True)):
         raise FileNotFoundError(f"Native static executable not found: {exe}")
-    build_script = PROJECT_ROOT / "scripts" / "build_native_static_bot.ps1"
+    build_script = PROJECT_ROOT / "scripts" / "build_static_bot.ps1"
     if not build_script.exists():
         raise FileNotFoundError(f"Native static executable build script not found: {build_script}")
     completed = subprocess.run(
