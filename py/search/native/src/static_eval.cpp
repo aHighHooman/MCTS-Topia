@@ -801,6 +801,28 @@ double baseline_research_cost_value(const std::string& tech, int city_count) {
   return static_cast<double>(4 + tech_tier_score(tech) * std::max(1, city_count));
 }
 
+double economic_research_context_bonus(
+    const std::string& tech,
+    int visible_fruit,
+    int visible_animals,
+    int visible_fish,
+    int visible_water,
+    int visible_ore,
+    int visible_mountain,
+    int visible_forest) {
+  if (tech == "ORGANIZATION") return 0.55 * static_cast<double>(visible_fruit);
+  if (tech == "HUNTING") return 0.45 * static_cast<double>(visible_animals);
+  if (tech == "FISHING") {
+    return 0.50 * static_cast<double>(visible_fish) + (visible_water > 3 ? 0.7 : 0.0);
+  }
+  if (tech == "MINING") {
+    return 0.70 * static_cast<double>(visible_ore) + 0.15 * static_cast<double>(visible_mountain);
+  }
+  if (tech == "FORESTRY") return 0.18 * static_cast<double>(visible_forest);
+  if (tech == "FARMING") return 0.25 * static_cast<double>(visible_fruit);
+  return 0.0;
+}
+
 int needed_to_level(const NativeCity* city) {
   if (city == nullptr) {
     return 5;
@@ -2307,11 +2329,28 @@ double state_raw_value(
   double village_control = 0.0;
   int explored = 0;
   int visible_resources = 0;
+  int visible_fish = 0;
+  int visible_animals = 0;
+  int visible_fruit = 0;
+  int visible_ore = 0;
+  int visible_forest = 0;
+  int visible_water = 0;
+  int visible_mountain = 0;
   double my_exploitable_resource_value = 0.0;
   double enemy_exploitable_resource_value = 0.0;
   for (const NativeTile& tile : state.tiles) {
     explored += tile.explored ? 1 : 0;
     visible_resources += tile.visible && !tile.resource.empty() && tile_in_player_city(state, player_id, tile) ? 1 : 0;
+    if (tile.visible) {
+      visible_fish += tile.resource == "FISH" || tile.resource == "STARFISH";
+      visible_animals += tile.resource == "ANIMAL";
+      visible_fruit += tile.resource == "FRUIT";
+      visible_ore += tile.resource == "METAL" || tile.resource == "ORE";
+      visible_forest += tile.terrain == "FOREST";
+      visible_water += tile.terrain == "WATER" || tile.terrain == "OCEAN" ||
+          tile.terrain == "SHALLOW_WATER" || tile.terrain == "DEEP_WATER";
+      visible_mountain += tile.terrain == "MOUNTAIN";
+    }
     if (experimental_eval && tile.visible && tile.city_id > 0) {
       const NativeCity* resource_city = city_by_id(state, tile.city_id);
       if (resource_city != nullptr) {
@@ -2516,18 +2555,32 @@ double state_raw_value(
       profile_weight("score_terminal.score_diff.own"));
 
   if (uses_per_tech_research_value(profile.variant)) {
+    const size_t research_begin = raw_terms.size();
+    double research_feature = 0.0;
     for (const std::string& tech : all_research_techs()) {
       const double feature = my_researched_techs.count(tech) > 0 ? 1.0 : 0.0;
-      const double research_cost = baseline_research_cost_value(tech, my_cities);
-      add_term_with_default_weight(tech_term_name(tech), feature, research_cost, "technology.researched_tech");
+      const double research_value = baseline_research_cost_value(tech, my_cities) +
+          economic_research_context_bonus(
+              tech,
+              visible_fruit,
+              visible_animals,
+              visible_fish,
+              visible_water,
+              visible_ore,
+              visible_mountain,
+              visible_forest);
+      research_feature += feature * research_value;
+      add_term_with_default_weight(tech_term_name(tech), feature, research_value, "technology.researched_tech");
     }
     for (const std::string& tech : my_researched_techs) {
       if (std::find(all_research_techs().begin(), all_research_techs().end(), tech) != all_research_techs().end()) {
         continue;
       }
-      const double research_cost = baseline_research_cost_value(tech, my_cities);
-      add_term_with_default_weight(tech_term_name(tech), 1.0, research_cost, "technology.researched_tech");
+      const double research_value = baseline_research_cost_value(tech, my_cities);
+      research_feature += research_value;
+      add_term_with_default_weight(tech_term_name(tech), 1.0, research_value, "technology.researched_tech");
     }
+    add_summary("technology.researched_tech", research_feature, 1.0, research_begin);
   } else {
     add_term("technology.researched_tech", my_tech);
   }

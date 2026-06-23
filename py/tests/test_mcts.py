@@ -1657,7 +1657,26 @@ class NativeMCTSTest(unittest.TestCase):
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)
         message = _message()
-        message["observation"]["tribes"][0]["researched_tech_ids"] = ["CLIMBING", "ROADS", "PHILOSOPHY"]
+        message["observation"]["tribes"][0]["researched_tech_ids"] = [
+            "ORGANIZATION",
+            "HUNTING",
+            "FISHING",
+            "MINING",
+            "FORESTRY",
+            "FARMING",
+        ]
+        tiles = message["observation"]["board"]["tiles"]
+        tiles[0][0]["resource"] = "FRUIT"
+        tiles[0][1]["resource"] = "ANIMAL"
+        tiles[0][2]["resource"] = "FISH"
+        tiles[0][3]["terrain"] = "WATER"
+        tiles[1][0]["terrain"] = "WATER"
+        tiles[1][2]["terrain"] = "WATER"
+        tiles[1][3]["terrain"] = "WATER"
+        tiles[2][0]["resource"] = "ORE"
+        tiles[2][1]["terrain"] = "MOUNTAIN"
+        tiles[2][2]["terrain"] = "FOREST"
+        tiles[2][3]["terrain"] = "FOREST"
 
         experimental_terms = {
             str(term["name"]): term
@@ -1670,16 +1689,19 @@ class NativeMCTSTest(unittest.TestCase):
         expected_names = {f"technology.researched_tech.{tech.lower()}" for tech in TECH_TYPES}
 
         self.assertIn("technology.researched_tech", experimental_terms)
-        self.assertNotIn("technology.researched_tech.climbing", experimental_terms)
+        self.assertNotIn("technology.researched_tech.organization", experimental_terms)
         self.assertLessEqual(expected_names, set(terms))
-        self.assertEqual(float(terms["technology.researched_tech.climbing"]["feature_value"]), 1.0)
-        self.assertEqual(float(terms["technology.researched_tech.roads"]["feature_value"]), 1.0)
-        self.assertEqual(float(terms["technology.researched_tech.philosophy"]["feature_value"]), 1.0)
-        self.assertEqual(float(terms["technology.researched_tech.fishing"]["feature_value"]), 0.0)
-        self.assertAlmostEqual(float(terms["technology.researched_tech.climbing"]["raw"]), 5.0)
-        self.assertAlmostEqual(float(terms["technology.researched_tech.roads"]["raw"]), 6.0)
-        self.assertAlmostEqual(float(terms["technology.researched_tech.philosophy"]["raw"]), 7.0)
-        self.assertNotIn("technology.researched_tech", terms)
+        self.assertEqual(float(terms["technology.researched_tech.organization"]["feature_value"]), 1.0)
+        self.assertEqual(float(terms["technology.researched_tech.fishing"]["feature_value"]), 1.0)
+        self.assertEqual(float(terms["technology.researched_tech.climbing"]["feature_value"]), 0.0)
+        self.assertAlmostEqual(float(terms["technology.researched_tech.organization"]["raw"]), 5.55)
+        self.assertAlmostEqual(float(terms["technology.researched_tech.hunting"]["raw"]), 5.45)
+        self.assertAlmostEqual(float(terms["technology.researched_tech.fishing"]["raw"]), 6.2)
+        self.assertAlmostEqual(float(terms["technology.researched_tech.mining"]["raw"]), 6.85)
+        self.assertAlmostEqual(float(terms["technology.researched_tech.forestry"]["raw"]), 6.36)
+        self.assertAlmostEqual(float(terms["technology.researched_tech.farming"]["raw"]), 6.25)
+        self.assertIn("technology.researched_tech", terms)
+        self.assertFalse(bool(terms["technology.researched_tech"]["contributes"]))
 
     def test_static_eval_experimental_unit_power_kill_bonus(self) -> None:
         extension = load_native_mcts_extension()
