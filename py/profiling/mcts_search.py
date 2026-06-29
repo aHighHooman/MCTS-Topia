@@ -282,6 +282,11 @@ class BranchingCollector:
             _action_type(action) for action in capped_actions if str(action.get("id")) not in searched_ids
         )
         action_by_id = {str(action.get("id")): action for action in actions}
+        stats_by_id = {
+            str(row.get("action_id")): row
+            for row in (result.root_stats or [])
+            if isinstance(row, dict) and row.get("action_id") not in (None, "")
+        }
         selected = action_by_id.get(str(result.action_id))
         if selected is not None:
             self.selected_action_types[_action_type(selected)] += 1
@@ -317,6 +322,7 @@ class BranchingCollector:
         for index, action in enumerate(actions):
             action_id = str(action.get("id"))
             visit_share = float(result.visit_distribution.get(action_id, 0.0))
+            root_stat = stats_by_id.get(action_id, {})
             self.action_rows.append(
                 {
                     "label": label,
@@ -333,6 +339,14 @@ class BranchingCollector:
                     "kept_by_search": int(action_id in searched_ids),
                     "selected": int(action_id == str(result.action_id)),
                     "visit_share": f"{visit_share:.8f}",
+                    "prior": root_stat.get("prior", ""),
+                    "visits": root_stat.get("visits", ""),
+                    "q_mean": root_stat.get("q_mean", ""),
+                    "child_expanded": (
+                        int(root_stat.get("child_node_id", -1) not in ("", None, -1))
+                        if root_stat
+                        else ""
+                    ),
                 }
             )
 
@@ -492,15 +506,49 @@ def _result_from_bot_response(payload: dict[str, Any], response: dict[str, Any] 
         action_index = action_ids.index(selected_action_id)
     except ValueError:
         action_index = 0
-    visit_target = [0.0] * len(action_ids)
-    if visit_target and selected_action_id in action_ids:
+
+    root_stats: list[dict[str, Any]] = []
+    profile = (response or {}).get("_profile") if isinstance(response, dict) else None
+    if isinstance(profile, dict):
+        raw_root_stats = profile.get("root_action_stats")
+        if isinstance(raw_root_stats, list):
+            root_stats = [dict(row) for row in raw_root_stats if isinstance(row, dict)]
+
+    visit_distribution: dict[str, float] = {}
+    if root_stats:
+        total_visits = 0.0
+        for row in root_stats:
+            try:
+                total_visits += max(0.0, float(row.get("visits", 0.0) or 0.0))
+            except (TypeError, ValueError):
+                pass
+        for row in root_stats:
+            action_id = str(row.get("action_id") or "")
+            if not action_id:
+                continue
+            try:
+                share = max(0.0, float(row.get("visit_share", 0.0) or 0.0))
+            except (TypeError, ValueError):
+                share = 0.0
+            if share <= 0.0 and total_visits > 0.0:
+                try:
+                    share = max(0.0, float(row.get("visits", 0.0) or 0.0)) / total_visits
+                except (TypeError, ValueError):
+                    share = 0.0
+            visit_distribution[action_id] = share
+    if not visit_distribution and selected_action_id:
+        visit_distribution = {selected_action_id: 1.0}
+
+    visit_target = [float(visit_distribution.get(action_id, 0.0)) for action_id in action_ids]
+    if not any(visit_target) and selected_action_id in action_ids:
         visit_target[action_index] = 1.0
     return native_mcts.SearchResult(
         action_id=selected_action_id,
         action_index=action_index,
-        visit_distribution={selected_action_id: 1.0} if selected_action_id else {},
+        visit_distribution=visit_distribution,
         visit_target=visit_target,
         value=0.0,
+        root_stats=root_stats,
     )
 
 
@@ -1393,6 +1441,8 @@ def _hotspot_rows(
     total_ms = max(1e-9, total_sec * 1000.0)
     rows: list[dict[str, Any]] = []
     for row in timing_rows:
+        if str(row["name"]) in _NATIVE_STATIC_EXE_CONTAINER_ROWS:
+            continue
         total = float(row["total_ms"])
         pct = float(row["pct"])
         if total < min_ms or pct < min_pct:
@@ -1411,17 +1461,17 @@ def _hotspot_rows(
     for row in profile_rows:
         if str(row["function"]).startswith("py\\profiling\\mcts_search.py:") or str(row["function"]).startswith("py/profiling/mcts_search.py:"):
             continue
-        total = float(row["cum_ms"])
-        pct = total / total_ms * 100.0
-        if total < min_ms or pct < min_pct:
+        self_ms = float(row["self_ms"])
+        pct = self_ms / total_ms * 100.0
+        if self_ms < min_ms or pct < min_pct:
             continue
         rows.append(
             {
-                "source": "function",
+                "source": "function_self",
                 "name": row["function"],
                 "calls": row["calls"],
                 "items": "",
-                "time_ms": row["cum_ms"],
+                "time_ms": row["self_ms"],
                 "self_ms": row["self_ms"],
                 "pct": f"{pct:.1f}",
             }
@@ -1769,6 +1819,16 @@ def _nn_module_rows(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str,
     return sorted(nn_rows, key=lambda row: float(row["total_ms"]), reverse=True)[:limit]
 
 
+def _exclusive_phase_rows(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    phase_rows = [
+        row
+        for row in rows
+        if str(row["name"]) not in _NATIVE_STATIC_EXE_CONTAINER_ROWS
+        and float(row.get("total_ms", 0.0)) > 0.0
+    ]
+    return sorted(phase_rows, key=lambda row: float(row["total_ms"]), reverse=True)[:limit]
+
+
 def _top_root_action_rows(
     payload: dict[str, Any],
     result: native_mcts.SearchResult | None,
@@ -1779,14 +1839,23 @@ def _top_root_action_rows(
         return []
     actions = _payload_actions(payload)
     action_by_id = {str(action.get("id")): action for action in actions}
+    stats_by_id = {
+        str(row.get("action_id")): row
+        for row in (result.root_stats or [])
+        if isinstance(row, dict) and row.get("action_id") not in (None, "")
+    }
     rows = []
     for action_id, share in sorted(result.visit_distribution.items(), key=lambda item: float(item[1]), reverse=True)[:limit]:
         action = action_by_id.get(str(action_id), {})
+        root_stat = stats_by_id.get(str(action_id), {})
         rows.append(
             {
                 "action_id": action_id,
                 "type": _action_type(action),
                 "visit_share": f"{float(share) * 100.0:.1f}%",
+                "prior": _format_float(root_stat.get("prior"), digits=4),
+                "visits": root_stat.get("visits", ""),
+                "q_mean": _format_float(root_stat.get("q_mean"), digits=4),
                 "unit": action.get("unit_id", ""),
                 "city": action.get("city_id", ""),
                 "x": action.get("x", ""),
@@ -1810,6 +1879,15 @@ def _payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _format_rate(numerator: float, elapsed_sec: float) -> str:
     return f"{(float(numerator) / elapsed_sec) if elapsed_sec > 0.0 else 0.0:.2f}"
+
+
+def _format_float(value: Any, *, digits: int = 3) -> str:
+    if value in ("", None):
+        return ""
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _build_payload_cases(args: argparse.Namespace) -> list[PayloadCase]:
@@ -1947,6 +2025,25 @@ _NATIVE_STATIC_EXE_TIMING_ROWS = {
 }
 
 
+_NATIVE_STATIC_EXE_CONTAINER_ROWS = {
+    "native_static_exe.process.total",
+    "native_static_exe.search",
+    "native_static_exe.search_loop",
+    "native_static_exe.root_setup",
+    "native_static_exe.apply_action",
+}
+
+
+def _profile_timing_ms(profile: dict[str, Any], key: str) -> float:
+    raw_timing = profile.get("timing_ms")
+    if not isinstance(raw_timing, dict):
+        return 0.0
+    try:
+        return max(0.0, float(raw_timing.get(key, 0.0) or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _add_native_static_exe_timing_rows(
     collector: TimingCollector,
     profile: dict[str, Any],
@@ -1963,6 +2060,54 @@ def _add_native_static_exe_timing_rows(
             continue
         items = max(0, int(selected_paths)) if item_mode == "paths" else 1
         collector.add(row_name, elapsed_sec, items=items)
+
+    search_loop_ms = _profile_timing_ms(profile, "search_loop_ms")
+    search_accounted_ms = sum(
+        _profile_timing_ms(profile, key)
+        for key in (
+            "select_ms",
+            "apply_action_ms",
+            "static_eval_ms",
+            "node_allocation_ms",
+            "backup_ms",
+            "cmab_select_ms",
+            "factor_build_ms",
+        )
+    )
+    if search_loop_ms > 0.0:
+        collector.add(
+            "native_static_exe.search_loop.unattributed",
+            max(0.0, search_loop_ms - search_accounted_ms) / 1000.0,
+            items=max(0, int(selected_paths)),
+        )
+
+    apply_action_ms = _profile_timing_ms(profile, "apply_action_ms")
+    transition_accounted_ms = sum(
+        _profile_timing_ms(profile, key)
+        for key in (
+            "transition_state_copy_ms",
+            "transition_observation_copy_ms",
+            "transition_action_mutation_ms",
+            "transition_reveal_sync_ms",
+            "transition_regenerate_actions_ms",
+            "transition_hidden_enemy_ms",
+        )
+    )
+    if apply_action_ms > 0.0:
+        collector.add(
+            "native_static_exe.apply_action.unattributed",
+            max(0.0, apply_action_ms - transition_accounted_ms) / 1000.0,
+            items=max(0, int(selected_paths)),
+        )
+
+    root_setup_ms = _profile_timing_ms(profile, "root_setup_ms")
+    root_static_eval_ms = _profile_timing_ms(profile, "root_static_eval_ms")
+    if root_setup_ms > 0.0:
+        collector.add(
+            "native_static_exe.root_setup.unattributed",
+            max(0.0, root_setup_ms - root_static_eval_ms) / 1000.0,
+            items=1,
+        )
 
 
 def _run_static_exe_profile_case(
@@ -2018,7 +2163,9 @@ def _run_static_exe_profile_case(
             stats.turn_depth_sum += int(profile.get("turn_depth_sum", 0) or 0)
             stats.max_turn_depth = max(stats.max_turn_depth, int(profile.get("max_turn_depth", 0) or 0))
             selected_paths = int(profile.get("selected_paths", 0) or profile.get("completed_paths", 0) or 0)
-            collector.add("native_static_exe.search", float(profile.get("elapsed_sec", elapsed) or 0.0), items=selected_paths)
+            search_elapsed_sec = float(profile.get("elapsed_sec", elapsed) or 0.0)
+            collector.add("native_static_exe.search", search_elapsed_sec, items=selected_paths)
+            collector.add("native_static_exe.process.overhead", max(0.0, elapsed - search_elapsed_sec), items=1)
             _add_native_static_exe_timing_rows(collector, profile, selected_paths=selected_paths)
     stats.elapsed_sec = time.perf_counter() - started_at
     return last_result, stats, stats.elapsed_sec
@@ -2470,13 +2617,33 @@ def main() -> int:
         print(
             _format_table(
                 top_action_rows,
-                [("action_id", "action_id"), ("type", "type"), ("visit_share", "visits"), ("unit", "unit"), ("city", "city"), ("x", "x"), ("y", "y")],
+                [
+                    ("action_id", "action_id"),
+                    ("type", "type"),
+                    ("visit_share", "visit_%"),
+                    ("prior", "prior"),
+                    ("visits", "visits"),
+                    ("q_mean", "q_mean"),
+                    ("unit", "unit"),
+                    ("city", "city"),
+                    ("x", "x"),
+                    ("y", "y"),
+                ],
             )
         )
 
     rows = _timing_rows(collector, elapsed)
     if args.csv is not None:
         _write_csv(args.csv, rows)
+    exclusive_phase_rows = _exclusive_phase_rows(rows, limit=max(1, int(args.function_limit)))
+    if exclusive_phase_rows:
+        print("\nExclusive phase time")
+        print(
+            _format_table(
+                exclusive_phase_rows,
+                [("name", "phase"), ("calls", "calls"), ("items", "items"), ("total_ms", "total_ms"), ("avg_ms", "avg_ms"), ("pct", "%")],
+            )
+        )
     nn_module_rows = _nn_module_rows(rows, limit=max(1, int(args.section_limit)))
     if args.nn_module_csv is not None:
         _write_csv(args.nn_module_csv, [row for row in rows if str(row["name"]).startswith("nn.")])
@@ -2569,6 +2736,7 @@ def main() -> int:
             },
             "action_type_breadth": action_breadth_rows,
             "top_root_actions": top_action_rows,
+            "exclusive_phase_time": exclusive_phase_rows,
             "hotspots": hotspot_rows,
             "nn_module_time": nn_module_rows,
             "hardware": hardware_summary_rows,

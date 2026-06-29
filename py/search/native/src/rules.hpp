@@ -155,6 +155,7 @@ struct NativeGameState {
   std::string terminal_reason;
   bool leveling_up = false;
   bool can_end_turn = true;
+  bool generated_action_ids_enabled = true;
 };
 
 struct NativeRoot {

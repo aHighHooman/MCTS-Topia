@@ -39,6 +39,7 @@ struct CliConfig {
   bool profile_json = false;
   bool profile_timing = false;
   uint64_t seed = 13;
+  bool native_adversarial_opponent = false;
   std::string static_eval_variant = "baseline";
   std::string static_eval_weight_overrides;
   std::string search_mode = "primitive";
@@ -973,7 +974,8 @@ json choose_action_with_native_tree(const json& message, const CliConfig& cfg, s
       message.value("is_terminal", message.value("terminal", false)),
       cfg.seed,
       cfg.max_actions,
-      cfg.progressive_widening);
+      cfg.progressive_widening,
+      cfg.native_adversarial_opponent);
   if (collect_timing) {
     tree.set_static_timing_enabled(true);
   }
@@ -1159,6 +1161,15 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
       cfg.profile_timing = true;
     } else if (arg == "--seed") {
       cfg.seed = static_cast<uint64_t>(std::stoull(next()));
+    } else if (arg == "--native-opponent-mode") {
+      const std::string mode = next();
+      if (mode == "root-max") {
+        cfg.native_adversarial_opponent = false;
+      } else if (mode == "root-adversarial") {
+        cfg.native_adversarial_opponent = true;
+      } else {
+        throw std::runtime_error("Unsupported --native-opponent-mode: " + mode);
+      }
     } else if (arg == "--turn-cmab-simulations") {
       cfg.turn_cmab.simulations = std::stoi(next());
       cfg.turn_cmab_simulations_set = true;
@@ -1193,6 +1204,7 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
           << "  [--static-eval-variant baseline|experimental|experimental-2] [--static-eval-weight-overrides SPEC]\n"
           << "  [--deterministic] [--reuse-tree]\n"
           << "  [--profile-json] [--profile-timing] [--seed N]\n"
+          << "  [--native-opponent-mode root-adversarial|root-max]\n"
           << "  [--turn-cmab-simulations N] [--turn-cmab-max-turn-depth N]\n"
           << "  [--turn-cmab-max-primitives-per-turn N] [--turn-cmab-max-edges-per-node N]\n"
           << "  [--turn-cmab-outer-c X] [--turn-cmab-c X] [--turn-cmab-prior-weight X]\n"

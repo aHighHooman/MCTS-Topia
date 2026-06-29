@@ -104,6 +104,59 @@ def _message_with_unit_move() -> dict:
     return message
 
 
+def _message_with_simple_unit_action_reuse(action_type: str) -> dict:
+    message = _message()
+    for tribe in message["observation"]["tribes"]:
+        tribe["stars"] = 0
+        tribe["researched_tech_ids"] = []
+    message["observation"]["units"] = [
+        {
+            "id": 1,
+            "tribe_id": 0,
+            "city_id": 10,
+            "type": "WARRIOR",
+            "x": 1,
+            "y": 1,
+            "current_hp": 6,
+            "max_hp": 10,
+            "kills": 3,
+            "is_veteran": False,
+            "status": "FRESH",
+            "is_hidden": False,
+        },
+        {
+            "id": 2,
+            "tribe_id": 0,
+            "city_id": 10,
+            "type": "WARRIOR",
+            "x": 2,
+            "y": 1,
+            "current_hp": 6,
+            "max_hp": 10,
+            "kills": 0,
+            "is_veteran": False,
+            "status": "FRESH",
+            "is_hidden": False,
+        },
+    ]
+    message["observation"]["board"]["tiles"][1][1]["unit_id"] = 1
+    message["observation"]["board"]["tiles"][1][2]["unit_id"] = 2
+    first_action = (
+        {"id": "recover-u1", "type": "RECOVER", "unit_id": 1}
+        if action_type == "RECOVER"
+        else {"id": "veteran-u1", "type": "MAKE_VETERAN", "unit_id": 1}
+    )
+    message["actions"] = [
+        first_action,
+        {"id": "move-u1", "type": "MOVE", "unit_id": 1, "destination": {"x": 0, "y": 1}, "x": 0, "y": 1},
+        {"id": "recover-u2", "type": "RECOVER", "unit_id": 2},
+        {"id": "end", "type": "END_TURN"},
+    ]
+    if action_type == "MAKE_VETERAN":
+        message["actions"].insert(2, {"id": "recover-u1", "type": "RECOVER", "unit_id": 1})
+    return message
+
+
 def _message_with_infiltrate() -> dict:
     message = _message()
     observation = message["observation"]
@@ -1068,6 +1121,57 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertEqual(leaf_payload["observation"]["board"]["tiles"][1][1]["unit_id"], 0)
         self.assertEqual(leaf_payload["observation"]["board"]["tiles"][1][2]["unit_id"], 1)
 
+    def test_recover_reuses_parent_actions_without_recovered_unit_actions(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        tree = extension.NativeMCTS(
+            _message_with_simple_unit_action_reuse("RECOVER"),
+            [0, 1, 2, 3],
+            [1.0, 0.0, 0.0, 0.0],
+            0.1,
+            False,
+            7,
+            64,
+        )
+
+        selection = dict(tree.select_leaf(1.5))
+        leaf_payload = dict(selection["leaf_payload"])
+
+        self.assertFalse(leaf_payload["is_terminal"])
+        self.assertEqual(
+            [(action["id"], action["type"], action.get("unit_id")) for action in leaf_payload["actions"]],
+            [("recover-u2", "RECOVER", 2), ("end", "END_TURN", None)],
+        )
+        recovered = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 1)
+        self.assertEqual(recovered["current_hp"], 10)
+        self.assertEqual(recovered["status"], "FINISHED")
+
+    def test_make_veteran_reuses_parent_actions_without_veteran_or_recover_actions(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        tree = extension.NativeMCTS(
+            _message_with_simple_unit_action_reuse("MAKE_VETERAN"),
+            [0, 1, 2, 3, 4],
+            [1.0, 0.0, 0.0, 0.0, 0.0],
+            0.1,
+            False,
+            7,
+            64,
+        )
+
+        selection = dict(tree.select_leaf(1.5))
+        leaf_payload = dict(selection["leaf_payload"])
+
+        self.assertFalse(leaf_payload["is_terminal"])
+        self.assertEqual(
+            [(action["id"], action["type"], action.get("unit_id")) for action in leaf_payload["actions"]],
+            [("move-u1", "MOVE", 1), ("recover-u2", "RECOVER", 2), ("end", "END_TURN", None)],
+        )
+        veteran = next(unit for unit in leaf_payload["observation"]["units"] if unit["id"] == 1)
+        self.assertTrue(veteran["is_veteran"])
+        self.assertEqual(veteran["max_hp"], 15)
+        self.assertEqual(veteran["current_hp"], 15)
+
     def test_promote_root_child_compacts_selected_subtree(self) -> None:
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)
@@ -1605,6 +1709,29 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertEqual(leaf_payload["active_player_id"], 1)
         tree.expand(selection["parent_node_id"], selection["parent_action_index"], [1.0] * len(leaf_payload["actions"]), 0.8, False)
         tree.complete_selected_paths([selection["selection_id"]], [0.8])
+
+    def test_enemy_node_selection_minimizes_root_value_when_enabled(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message_with_end_turn(unit_owner=1)
+        message["player_id"] = 0
+        message["observation"]["active_player_id"] = 1
+        message["actions"] = [
+            {"id": "root_good", "type": "END_TURN"},
+            {"id": "root_bad", "type": "END_TURN"},
+        ]
+
+        adversarial = extension.NativeMCTS(message, [0, 1], [0.5, 0.5], 0.0, False, 7, 64, False, True)
+        root_max = extension.NativeMCTS(message, [0, 1], [0.5, 0.5], 0.0, False, 7, 64, False)
+        for tree in (adversarial, root_max):
+            tree.backprop([0], [0], 0.8)
+            tree.backprop([0], [1], -0.4)
+
+        adversarial_selection = dict(adversarial.select_leaf(0.0))
+        root_max_selection = dict(root_max.select_leaf(0.0))
+
+        self.assertEqual(adversarial_selection["parent_action_index"], 1)
+        self.assertEqual(root_max_selection["parent_action_index"], 0)
 
     def test_end_turn_visit_guard_requires_non_end_exploration(self) -> None:
         cfg = HybridAgentConfig()

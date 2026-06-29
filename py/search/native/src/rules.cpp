@@ -18,6 +18,15 @@ double elapsed_ms(TimingClock::time_point started_at) {
   return std::chrono::duration<double, std::milli>(TimingClock::now() - started_at).count();
 }
 
+bool payload_sync_enabled(const NativeGameState& state) {
+#ifdef TRIBES_NATIVE_MCTS_STANDALONE
+  (void)state;
+  return false;
+#else
+  return !state.observation.is_none();
+#endif
+}
+
 int read_int(const py::handle& object, const char* key, int fallback) {
   if (!py::isinstance<py::dict>(object)) {
     return fallback;
@@ -234,6 +243,32 @@ py::dict deepish_copy_observation(const py::dict& input) {
     out["_native_enemy_explored"] = output_memory;
   }
   return out;
+}
+
+NativeGameState copy_transition_state_without_observation(const NativeGameState& state) {
+  NativeGameState next;
+  next.board_size = state.board_size;
+  next.tiles = state.tiles;
+  next.units = state.units;
+  next.cities = state.cities;
+  next.tribes = state.tribes;
+  next.capital_city_ids = state.capital_city_ids;
+  next.relationships = state.relationships;
+  next.pending_offer_from = state.pending_offer_from;
+  next.pending_offer_types = state.pending_offer_types;
+  next.actor_id_floor = state.actor_id_floor;
+  next.root_player_id = state.root_player_id;
+  next.active_player_id = state.active_player_id;
+  next.tick = state.tick;
+  next.terminal = state.terminal;
+  next.leveling_up = state.leveling_up;
+  next.can_end_turn = state.can_end_turn;
+#ifdef TRIBES_NATIVE_MCTS_STANDALONE
+  next.generated_action_ids_enabled = false;
+#else
+  next.generated_action_ids_enabled = state.generated_action_ids_enabled;
+#endif
+  return next;
 }
 
 std::string canonical_action_type(const NativeAction& action) {
@@ -501,6 +536,9 @@ void set_matrix_cell(py::dict board, const char* key, int x, int y, const py::ha
 }
 
 void set_unit_payload_field(NativeGameState& state, int unit_id, const char* normalized, const char* compact, const py::handle& value) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (!state.observation.contains("units") || !py::isinstance<py::list>(state.observation["units"])) {
     return;
   }
@@ -529,6 +567,9 @@ void set_unit_payload_field(NativeGameState& state, int unit_id, const char* nor
 }
 
 void set_city_payload_field(NativeGameState& state, int city_id, const char* normalized, const char* compact, const py::handle& value) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (state.observation.contains("cities") && py::isinstance<py::list>(state.observation["cities"])) {
     py::list cities = py::reinterpret_borrow<py::list>(state.observation["cities"]);
     for (const auto& item : cities) {
@@ -567,6 +608,9 @@ void set_city_payload_field(NativeGameState& state, int city_id, const char* nor
 }
 
 void set_tribe_payload_field(NativeGameState& state, int tribe_id, const char* key, const py::handle& value) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (!state.observation.contains("tribes") || !py::isinstance<py::list>(state.observation["tribes"])) {
     return;
   }
@@ -600,6 +644,9 @@ void increment_tribe_kills(NativeGameState& state, int tribe_id) {
     return;
   }
   tribe->kills += 1;
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (!state.observation.contains("tribes") || !py::isinstance<py::list>(state.observation["tribes"])) {
     return;
   }
@@ -621,6 +668,9 @@ void increment_tribe_kills(NativeGameState& state, int tribe_id) {
 }
 
 void sync_tile_to_payload(NativeGameState& state, const NativeTile& tile) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (!state.observation.contains("board") || !py::isinstance<py::dict>(state.observation["board"])) {
     return;
   }
@@ -686,6 +736,9 @@ void remove_payload_int_from_list(py::dict owner, const char* key, int value) {
 }
 
 void remove_unit_ownership_payload(NativeGameState& state, const NativeUnit& unit) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (state.observation.contains("units") && py::isinstance<py::list>(state.observation["units"])) {
     py::list input = py::reinterpret_borrow<py::list>(state.observation["units"]);
     py::list output;
@@ -725,6 +778,9 @@ void remove_unit_ownership_payload(NativeGameState& state, const NativeUnit& uni
 }
 
 void remove_unit_from_owner_lists_payload(NativeGameState& state, const NativeUnit& unit) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (state.observation.contains("tribes") && py::isinstance<py::list>(state.observation["tribes"])) {
     py::list tribes = py::reinterpret_borrow<py::list>(state.observation["tribes"]);
     for (const auto& item : tribes) {
@@ -763,6 +819,9 @@ void append_city_payload_unit(NativeGameState& state, int city_id, int unit_id);
 int reveal_square_for_root(NativeGameState& state, int cx, int cy, int radius);
 
 void append_extra_unit_payload(NativeGameState& state, int tribe_id, int unit_id) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (!state.observation.contains("tribes") || !py::isinstance<py::list>(state.observation["tribes"])) {
     return;
   }
@@ -793,6 +852,9 @@ void erase_int(std::vector<int>& values, int value) {
 }
 
 void sync_tribe_city_ids_payload(NativeGameState& state, int tribe_id) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   NativeTribe* tribe = tribe_by_id(state, tribe_id);
   if (tribe == nullptr || !state.observation.contains("tribes") ||
       !py::isinstance<py::list>(state.observation["tribes"])) {
@@ -822,6 +884,9 @@ void sync_tribe_city_ids_payload(NativeGameState& state, int tribe_id) {
 }
 
 void sync_city_units_payload(NativeGameState& state, int city_id) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   NativeCity* city = city_by_id(state, city_id);
   if (city == nullptr || !state.observation.contains("cities") ||
       !py::isinstance<py::list>(state.observation["cities"])) {
@@ -1238,6 +1303,9 @@ int tech_order(const std::string& tech);
 std::string tech_id(const std::string& tech);
 
 void append_researched_tech_payload(NativeGameState& state, int tribe_id, const std::string& tech) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (tribe_id != state.root_player_id) {
     return;
   }
@@ -2275,7 +2343,7 @@ void append_generated_action(
   }
   const int index = static_cast<int>(actions.size());
 #ifdef TRIBES_NATIVE_MCTS_STANDALONE
-  if (action.id.empty()) {
+  if (state.generated_action_ids_enabled && action.id.empty()) {
     action.id = "A" + std::to_string(index);
   }
 #else
@@ -2318,9 +2386,11 @@ void append_tile_action(
     int city_id,
     int x,
     int y,
-    const char* position_key) {
+  const char* position_key) {
   NativeAction action;
-  action.id = "sim:p" + std::to_string(tribe_id) + ":t" + std::to_string(state.tick) + id_suffix;
+  if (state.generated_action_ids_enabled) {
+    action.id = "sim:p" + std::to_string(tribe_id) + ":t" + std::to_string(state.tick) + id_suffix;
+  }
   action.type = type;
   action.unit_id = unit_id;
   action.city_id = city_id;
@@ -2584,12 +2654,18 @@ bool apply_heal_others(NativeGameState& next, const NativeAction& action) {
 }
 
 void sync_all_tiles_to_payload(NativeGameState& state) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   for (const NativeTile& tile : state.tiles) {
     sync_tile_to_payload(state, tile);
   }
 }
 
 void append_visible_city_payload(NativeGameState& state, const NativeCity& city) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (city_payload_contains(state, city.id) ||
       !state.observation.contains("cities") || !py::isinstance<py::list>(state.observation["cities"])) {
     return;
@@ -2639,6 +2715,9 @@ void append_visible_city_payload(NativeGameState& state, const NativeCity& city)
 }
 
 void append_visible_unit_payload(NativeGameState& state, const NativeUnit& unit) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (!state.observation.contains("units") || !py::isinstance<py::list>(state.observation["units"])) {
     return;
   }
@@ -3466,8 +3545,10 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
   if (unit_is_fresh(unit) && current_tile != nullptr && current_tile->resource == "RUINS" &&
       !tribe->city_ids.empty()) {
     NativeAction examine;
-    examine.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
-        ":u" + std::to_string(unit.id) + ":examine";
+    if (state.generated_action_ids_enabled) {
+      examine.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
+          ":u" + std::to_string(unit.id) + ":examine";
+    }
     examine.type = "EXAMINE";
     examine.unit_id = unit.id;
     init_generated_payload(examine);
@@ -3491,8 +3572,10 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
         continue;
       }
       NativeAction infiltrate;
-      infiltrate.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
-          ":u" + std::to_string(unit.id) + ":infiltrate:c" + std::to_string(city.id);
+      if (state.generated_action_ids_enabled) {
+        infiltrate.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
+            ":u" + std::to_string(unit.id) + ":infiltrate:c" + std::to_string(city.id);
+      }
       infiltrate.type = "INFILTRATE";
       infiltrate.unit_id = unit.id;
       infiltrate.city_id = city.id;
@@ -3520,8 +3603,10 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
           continue;
         }
         NativeAction attack;
-        attack.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
-            ":u" + std::to_string(unit.id) + ":attack:u" + std::to_string(target->id);
+        if (state.generated_action_ids_enabled) {
+          attack.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
+              ":u" + std::to_string(unit.id) + ":attack:u" + std::to_string(target->id);
+        }
         attack.type = "ATTACK";
         attack.unit_id = unit.id;
         init_generated_payload(attack);
@@ -3538,8 +3623,10 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
         relationship_between(state, unit.tribe_id, city->tribe_id) != "TREATY")) {
       const bool village_capture = current_tile->terrain == "VILLAGE";
       NativeAction capture;
-      capture.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
-          ":u" + std::to_string(unit.id) + ":capture";
+      if (state.generated_action_ids_enabled) {
+        capture.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
+            ":u" + std::to_string(unit.id) + ":capture";
+      }
       capture.type = "CAPTURE";
       capture.unit_id = unit.id;
       capture.city_id = village_capture || city == nullptr ? 0 : city->id;
@@ -3568,8 +3655,10 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
           continue;
         }
         NativeAction convert;
-        convert.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
-            ":u" + std::to_string(unit.id) + ":convert:u" + std::to_string(target->id);
+        if (state.generated_action_ids_enabled) {
+          convert.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
+              ":u" + std::to_string(unit.id) + ":convert:u" + std::to_string(target->id);
+        }
         convert.type = "CONVERT";
         convert.unit_id = unit.id;
         init_generated_payload(convert);
@@ -3582,8 +3671,10 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
 
   if (unit.type == "MIND_BENDER" && heal_others_target_exists(state, unit)) {
     NativeAction heal;
-    heal.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
-        ":u" + std::to_string(unit.id) + ":heal_others";
+    if (state.generated_action_ids_enabled) {
+      heal.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
+          ":u" + std::to_string(unit.id) + ":heal_others";
+    }
     heal.type = "HEAL_OTHERS";
     heal.unit_id = unit.id;
     init_generated_payload(heal);
@@ -3684,8 +3775,10 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
 
   if (unit_is_fresh(unit) && unit.current_hp > 0 && unit.max_hp > 0 && unit.current_hp < unit.max_hp) {
     NativeAction recover;
-    recover.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
-        ":u" + std::to_string(unit.id) + ":recover";
+    if (state.generated_action_ids_enabled) {
+      recover.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) +
+          ":u" + std::to_string(unit.id) + ":recover";
+    }
     recover.type = "RECOVER";
     recover.unit_id = unit.id;
     init_generated_payload(recover);
@@ -3949,7 +4042,9 @@ void regenerate_tribe_actions(NativeGameState& state, std::vector<NativeAction>&
 
   if (state.can_end_turn) {
     NativeAction end_turn;
-    end_turn.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) + ":end";
+    if (state.generated_action_ids_enabled) {
+      end_turn.id = "sim:p" + std::to_string(state.active_player_id) + ":t" + std::to_string(state.tick) + ":end";
+    }
     end_turn.type = "END_TURN";
     init_generated_payload(end_turn);
     set_generated_actor(end_turn, state.active_player_id);
@@ -3970,13 +4065,7 @@ void regenerate_actions(NativeGameState& state, std::vector<NativeAction>& actio
   }
 
   for (int city_id : active_tribe->city_ids) {
-    const NativeCity* city = nullptr;
-    for (const NativeCity& candidate : state.cities) {
-      if (candidate.id == city_id) {
-        city = &candidate;
-        break;
-      }
-    }
+    const NativeCity* city = city_by_id(state, city_id);
     if (city == nullptr) {
       continue;
     }
@@ -4006,15 +4095,406 @@ void regenerate_actions(NativeGameState& state, std::vector<NativeAction>& actio
     append_hidden_enemy_capital_spawn_action(state, actions, max_actions);
   }
   regenerate_tribe_actions(state, actions, max_actions);
-  for (const NativeCity& city : state.cities) {
-    if (city.tribe_id == state.active_player_id) {
-      regenerate_city_actions(state, actions, max_actions, city);
+  for (int city_id : active_tribe->city_ids) {
+    const NativeCity* city = city_by_id(state, city_id);
+    if (city != nullptr && city->tribe_id == state.active_player_id) {
+      regenerate_city_actions(state, actions, max_actions, *city);
     }
   }
   for (const NativeUnit& unit : state.units) {
     regenerate_unit_actions(state, actions, max_actions, unit);
   }
   sync_observation_turn_flags(state);
+}
+
+bool try_reuse_legal_actions_after_simple_unit_update(
+    const NativeGameState& previous,
+    NativeGameState& next,
+    const std::vector<NativeAction>& actions,
+    const NativeAction& applied,
+    const std::string& type,
+    int max_actions) {
+  if (type != "RECOVER" && type != "MAKE_VETERAN") {
+    return false;
+  }
+  if (max_actions >= 0 && static_cast<int>(previous.legal_action_indexes.size()) >= max_actions) {
+    return false;
+  }
+  const int unit_id = action_int(applied, "unit_id", "u", 0);
+  if (unit_id <= 0) {
+    return false;
+  }
+
+  next.tile_coord_index = previous.tile_coord_index;
+  next.unit_id_index = previous.unit_id_index;
+  next.city_id_index = previous.city_id_index;
+  next.legal_action_indexes.clear();
+  next.legal_action_indexes.reserve(previous.legal_action_indexes.size());
+  for (int action_index : previous.legal_action_indexes) {
+    if (action_index < 0 || action_index >= static_cast<int>(actions.size())) {
+      continue;
+    }
+    const NativeAction& action = actions[static_cast<size_t>(action_index)];
+    const int action_unit_id = action_int(action, "unit_id", "u", 0);
+    const std::string action_type = canonical_action_type(action);
+    if (type == "RECOVER" && action_unit_id == unit_id) {
+      continue;
+    }
+    if (type == "MAKE_VETERAN" && action_unit_id == unit_id &&
+        (action_type == "MAKE_VETERAN" || action_type == "RECOVER")) {
+      continue;
+    }
+    next.legal_action_indexes.push_back(action_index);
+  }
+  sync_observation_turn_flags(next);
+  return true;
+}
+
+bool active_player_has_level_up_action(const NativeGameState& state) {
+  const NativeTribe* active_tribe = tribe_by_id(const_cast<NativeGameState&>(state), state.active_player_id);
+  if (active_tribe == nullptr) {
+    return false;
+  }
+  for (int city_id : active_tribe->city_ids) {
+    const NativeCity* city = city_by_id(const_cast<NativeGameState&>(state), city_id);
+    if (city != nullptr && city_can_level_up(*city)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+int active_city_center_id_at(const NativeGameState& state, int x, int y) {
+  const NativeTile* tile = tile_at(const_cast<NativeGameState&>(state), x, y);
+  if (tile == nullptr || tile->city_id <= 0) {
+    return 0;
+  }
+  const NativeCity* city = city_by_id(const_cast<NativeGameState&>(state), tile->city_id);
+  if (city == nullptr || city->tribe_id != state.active_player_id || city->x != x || city->y != y) {
+    return 0;
+  }
+  return city->id;
+}
+
+void add_active_city_center_if_present(const NativeGameState& state, int x, int y, std::set<int>& city_ids) {
+  const int city_id = active_city_center_id_at(state, x, y);
+  if (city_id > 0) {
+    city_ids.insert(city_id);
+  }
+}
+
+bool append_legal_indexes_with_cap(std::vector<int>& out, const std::vector<int>& indexes, int max_actions) {
+  for (int action_index : indexes) {
+    if (max_actions >= 0 && static_cast<int>(out.size()) >= max_actions) {
+      return false;
+    }
+    out.push_back(action_index);
+  }
+  return true;
+}
+
+std::vector<int> regenerate_city_action_indexes(
+    NativeGameState& state,
+    std::vector<NativeAction>& actions,
+    const NativeCity& city) {
+  state.legal_action_indexes.clear();
+  regenerate_city_actions(state, actions, -1, city);
+  return state.legal_action_indexes;
+}
+
+std::vector<int> regenerate_unit_action_indexes(
+    NativeGameState& state,
+    std::vector<NativeAction>& actions,
+    const NativeUnit& unit) {
+  state.legal_action_indexes.clear();
+  regenerate_unit_actions(state, actions, -1, unit);
+  return state.legal_action_indexes;
+}
+
+std::vector<int> regenerate_all_active_unit_action_indexes(
+    NativeGameState& state,
+    std::vector<NativeAction>& actions) {
+  std::vector<int> out;
+  for (const NativeUnit& unit : state.units) {
+    if (unit.tribe_id != state.active_player_id) {
+      continue;
+    }
+    state.legal_action_indexes.clear();
+    regenerate_unit_actions(state, actions, -1, unit);
+    out.insert(out.end(), state.legal_action_indexes.begin(), state.legal_action_indexes.end());
+  }
+  return out;
+}
+
+bool partially_regenerate_all_unit_actions(
+    const NativeGameState& previous,
+    NativeGameState& next,
+    std::vector<NativeAction>& actions,
+    const std::set<int>& dirty_city_ids,
+    int max_actions) {
+  const NativeTribe* active_tribe = tribe_by_id(next, next.active_player_id);
+  if (active_tribe == nullptr || active_player_has_level_up_action(next)) {
+    return false;
+  }
+
+  std::vector<int> tribe_action_indexes;
+  std::map<int, std::vector<int>> city_action_indexes;
+  for (int action_index : previous.legal_action_indexes) {
+    if (action_index < 0 || action_index >= static_cast<int>(actions.size())) {
+      continue;
+    }
+    const NativeAction& action = actions[static_cast<size_t>(action_index)];
+    const int unit_id = action_int(action, "unit_id", "u", 0);
+    if (unit_id > 0) {
+      continue;
+    }
+    const int city_id = action_int(action, "city_id", "c", 0);
+    if (city_id > 0) {
+      city_action_indexes[city_id].push_back(action_index);
+    } else {
+      tribe_action_indexes.push_back(action_index);
+    }
+  }
+
+  std::map<int, std::vector<int>> regenerated_city_action_indexes;
+  for (int city_id : dirty_city_ids) {
+    const NativeCity* city = city_by_id(next, city_id);
+    if (city != nullptr && city->tribe_id == next.active_player_id) {
+      regenerated_city_action_indexes[city_id] = regenerate_city_action_indexes(next, actions, *city);
+    }
+  }
+  const std::vector<int> regenerated_unit_action_indexes =
+      regenerate_all_active_unit_action_indexes(next, actions);
+
+  std::vector<int> merged;
+  if (!append_legal_indexes_with_cap(merged, tribe_action_indexes, max_actions)) {
+    next.legal_action_indexes = std::move(merged);
+    sync_observation_turn_flags(next);
+    return true;
+  }
+  for (int city_id : active_tribe->city_ids) {
+    const auto regenerated = regenerated_city_action_indexes.find(city_id);
+    if (regenerated != regenerated_city_action_indexes.end()) {
+      if (!append_legal_indexes_with_cap(merged, regenerated->second, max_actions)) {
+        next.legal_action_indexes = std::move(merged);
+        sync_observation_turn_flags(next);
+        return true;
+      }
+      continue;
+    }
+    const auto preserved = city_action_indexes.find(city_id);
+    if (preserved != city_action_indexes.end() &&
+        !append_legal_indexes_with_cap(merged, preserved->second, max_actions)) {
+      next.legal_action_indexes = std::move(merged);
+      sync_observation_turn_flags(next);
+      return true;
+    }
+  }
+  append_legal_indexes_with_cap(merged, regenerated_unit_action_indexes, max_actions);
+  next.legal_action_indexes = std::move(merged);
+  sync_observation_turn_flags(next);
+  return true;
+}
+
+bool partially_regenerate_single_unit_actions(
+    const NativeGameState& previous,
+    NativeGameState& next,
+    std::vector<NativeAction>& actions,
+    int dirty_unit_id,
+    int max_actions) {
+  const NativeUnit* unit = unit_by_id(next, dirty_unit_id);
+  const std::vector<int> regenerated_unit_action_indexes =
+      unit == nullptr ? std::vector<int>{} : regenerate_unit_action_indexes(next, actions, *unit);
+
+  bool inserted_dirty_unit_actions = false;
+  std::vector<int> merged;
+  for (int action_index : previous.legal_action_indexes) {
+    if (action_index < 0 || action_index >= static_cast<int>(actions.size())) {
+      continue;
+    }
+    const NativeAction& action = actions[static_cast<size_t>(action_index)];
+    const int unit_id = action_int(action, "unit_id", "u", 0);
+    if (unit_id == dirty_unit_id) {
+      if (!inserted_dirty_unit_actions) {
+        append_legal_indexes_with_cap(merged, regenerated_unit_action_indexes, max_actions);
+        inserted_dirty_unit_actions = true;
+      }
+      continue;
+    }
+    if (max_actions >= 0 && static_cast<int>(merged.size()) >= max_actions) {
+      break;
+    }
+    merged.push_back(action_index);
+  }
+  if (!inserted_dirty_unit_actions) {
+    append_legal_indexes_with_cap(merged, regenerated_unit_action_indexes, max_actions);
+  }
+  next.legal_action_indexes = std::move(merged);
+  sync_observation_turn_flags(next);
+  return true;
+}
+
+std::vector<int> regenerate_tribe_action_indexes(
+    NativeGameState& state,
+    std::vector<NativeAction>& actions) {
+  state.legal_action_indexes.clear();
+  regenerate_tribe_actions(state, actions, -1);
+  return state.legal_action_indexes;
+}
+
+std::vector<int> regenerate_all_active_city_action_indexes(
+    NativeGameState& state,
+    std::vector<NativeAction>& actions) {
+  std::vector<int> out;
+  const NativeTribe* active_tribe = tribe_by_id(state, state.active_player_id);
+  if (active_tribe == nullptr) {
+    return out;
+  }
+  for (int city_id : active_tribe->city_ids) {
+    const NativeCity* city = city_by_id(state, city_id);
+    if (city == nullptr || city->tribe_id != state.active_player_id) {
+      continue;
+    }
+    state.legal_action_indexes.clear();
+    regenerate_city_actions(state, actions, -1, *city);
+    out.insert(out.end(), state.legal_action_indexes.begin(), state.legal_action_indexes.end());
+  }
+  return out;
+}
+
+bool active_unit_actions_may_depend_on_research_or_stars(
+    const NativeGameState& state,
+    const std::string& researched_tech) {
+  if (researched_tech == "FREE_SPIRIT" || researched_tech == "RAMMING" ||
+      researched_tech == "SAILING" || researched_tech == "NAVIGATION" ||
+      researched_tech == "DIPLOMACY") {
+    return true;
+  }
+  for (const NativeUnit& unit : state.units) {
+    if (unit.tribe_id != state.active_player_id || unit.current_hp <= 0) {
+      continue;
+    }
+    if (unit.type == "RAFT" || unit.type == "SCOUT") {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool partially_regenerate_research_preserving_unit_actions(
+    const NativeGameState& previous,
+    NativeGameState& next,
+    std::vector<NativeAction>& actions,
+    const NativeAction& applied,
+    int max_actions,
+    int newly_explored) {
+  if (max_actions >= 0 && static_cast<int>(previous.legal_action_indexes.size()) >= max_actions) {
+    return false;
+  }
+  if (newly_explored != 0 || previous.leveling_up || next.leveling_up ||
+      active_player_has_level_up_action(next)) {
+    return false;
+  }
+  const std::string researched_tech = action_string(applied, "tech");
+  if (researched_tech.empty() ||
+      active_unit_actions_may_depend_on_research_or_stars(previous, researched_tech)) {
+    return false;
+  }
+
+  const std::vector<int> regenerated_tribe_action_indexes = regenerate_tribe_action_indexes(next, actions);
+  const std::vector<int> regenerated_city_action_indexes = regenerate_all_active_city_action_indexes(next, actions);
+  std::vector<int> preserved_unit_action_indexes;
+  for (int action_index : previous.legal_action_indexes) {
+    if (action_index < 0 || action_index >= static_cast<int>(actions.size())) {
+      continue;
+    }
+    const NativeAction& action = actions[static_cast<size_t>(action_index)];
+    if (action_int(action, "unit_id", "u", 0) > 0) {
+      preserved_unit_action_indexes.push_back(action_index);
+    }
+  }
+
+  std::vector<int> merged;
+  if (!append_legal_indexes_with_cap(merged, regenerated_tribe_action_indexes, max_actions) ||
+      !append_legal_indexes_with_cap(merged, regenerated_city_action_indexes, max_actions)) {
+    next.legal_action_indexes = std::move(merged);
+    sync_observation_turn_flags(next);
+    return true;
+  }
+  append_legal_indexes_with_cap(merged, preserved_unit_action_indexes, max_actions);
+  next.legal_action_indexes = std::move(merged);
+  sync_observation_turn_flags(next);
+  return true;
+}
+
+bool try_partially_regenerate_actions_after_attack_or_move(
+    const NativeGameState& previous,
+    NativeGameState& next,
+    std::vector<NativeAction>& actions,
+    const NativeAction& applied,
+    const std::string& type,
+    int max_actions,
+    int newly_explored) {
+  if (max_actions >= 0 && static_cast<int>(previous.legal_action_indexes.size()) >= max_actions) {
+    return false;
+  }
+  if (newly_explored != 0 || previous.leveling_up || next.leveling_up) {
+    return false;
+  }
+
+  if (type == "MOVE" || type == "STEP_MOVE") {
+    const int unit_id = action_int(applied, "unit_id", "u", 0);
+    const NativeUnit* previous_unit = unit_by_id(const_cast<NativeGameState&>(previous), unit_id);
+    if (previous_unit == nullptr) {
+      return false;
+    }
+    const int destination_x = action_int(applied, "x", nullptr, previous_unit->x);
+    const int destination_y = action_int(applied, "y", nullptr, previous_unit->y);
+    if (destination_x == previous_unit->x && destination_y == previous_unit->y) {
+      return false;
+    }
+    std::set<int> dirty_city_ids;
+    add_active_city_center_if_present(next, previous_unit->x, previous_unit->y, dirty_city_ids);
+    add_active_city_center_if_present(next, destination_x, destination_y, dirty_city_ids);
+    return partially_regenerate_all_unit_actions(previous, next, actions, dirty_city_ids, max_actions);
+  }
+
+  if (type != "ATTACK") {
+    return false;
+  }
+
+  const int attacker_id = action_int(applied, "unit_id", "u", 0);
+  const int target_id = action_int(applied, "target_unit_id", "tu", 0);
+  const NativeUnit* previous_attacker = unit_by_id(const_cast<NativeGameState&>(previous), attacker_id);
+  const NativeUnit* previous_target = unit_by_id(const_cast<NativeGameState&>(previous), target_id);
+  if (previous_attacker == nullptr || previous_target == nullptr) {
+    return false;
+  }
+  if (relationship_between(previous, previous_attacker->tribe_id, previous_target->tribe_id) != "WAR") {
+    return false;
+  }
+
+  const NativeUnit* next_attacker = unit_by_id(next, attacker_id);
+  const NativeUnit* next_target = unit_by_id(next, target_id);
+  const bool simple_nonlethal =
+      next_attacker != nullptr && next_attacker->current_hp > 0 &&
+      next_target != nullptr && next_target->current_hp > 0 &&
+      next_attacker->x == previous_attacker->x &&
+      next_attacker->y == previous_attacker->y;
+  if (simple_nonlethal) {
+    return partially_regenerate_single_unit_actions(previous, next, actions, attacker_id, max_actions);
+  }
+
+  std::set<int> dirty_city_ids;
+  add_active_city_center_if_present(next, previous_attacker->x, previous_attacker->y, dirty_city_ids);
+  add_active_city_center_if_present(next, previous_target->x, previous_target->y, dirty_city_ids);
+  if (next_attacker != nullptr) {
+    add_active_city_center_if_present(next, next_attacker->x, next_attacker->y, dirty_city_ids);
+  }
+  if (next_target != nullptr) {
+    add_active_city_center_if_present(next, next_target->x, next_target->y, dirty_city_ids);
+  }
+  return partially_regenerate_all_unit_actions(previous, next, actions, dirty_city_ids, max_actions);
 }
 
 bool tile_visible_for_asset(const NativeGameState& state, int x, int y) {
@@ -4064,10 +4544,12 @@ int choose_next_active_player(const NativeGameState& state) {
 
 void set_active_player(NativeGameState& state, int player_id) {
   state.active_player_id = player_id;
-  state.observation["active_player_id"] = player_id;
-  state.observation["active"] = player_id;
-  state.observation["can_end_turn"] = true;
-  state.observation["end"] = true;
+  if (payload_sync_enabled(state)) {
+    state.observation["active_player_id"] = player_id;
+    state.observation["active"] = player_id;
+    state.observation["can_end_turn"] = true;
+    state.observation["end"] = true;
+  }
   state.transition_kind.clear();
 }
 
@@ -4420,7 +4902,8 @@ bool apply_spawn(NativeGameState& next, const NativeAction& action) {
     append_city_payload_unit(next, city->id, unit.id);
   }
   sync_tile_to_payload(next, *tile);
-  if (visible_to_root &&
+  if (payload_sync_enabled(next) &&
+      visible_to_root &&
       next.observation.contains("units") && py::isinstance<py::list>(next.observation["units"])) {
     py::dict out;
     out["id"] = unit.id;
@@ -4809,7 +5292,9 @@ bool apply_disband(NativeGameState& next, const NativeAction& action) {
   }
   const int tribe_id = unit->tribe_id;
   next.actor_id_floor = std::max(next.actor_id_floor, unit->id);
-  next.observation["_native_actor_id_floor"] = next.actor_id_floor;
+  if (payload_sync_enabled(next)) {
+    next.observation["_native_actor_id_floor"] = next.actor_id_floor;
+  }
   remove_unit_ownership_payload(next, *unit);
   mark_unit_removed(next, *unit);
   update_tribe_economy(next, tribe_id, std::max(0, unit_cost(unit->type) / 2), -unit_points(unit->type));
@@ -5166,6 +5651,9 @@ void parse_tribes(NativeGameState& state) {
 }
 
 void append_city_payload_unit(NativeGameState& state, int city_id, int unit_id) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (!state.observation.contains("cities") || !py::isinstance<py::list>(state.observation["cities"])) {
     return;
   }
@@ -5199,6 +5687,9 @@ void append_city_payload_unit(NativeGameState& state, int city_id, int unit_id) 
 }
 
 void append_city_payload_building(NativeGameState& state, int city_id, const NativeBuilding& building) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (!state.observation.contains("cities") || !py::isinstance<py::list>(state.observation["cities"])) {
     return;
   }
@@ -5270,6 +5761,9 @@ py::list remove_building_from_payload_list(const py::handle& value, int x, int y
 }
 
 void remove_city_payload_building(NativeGameState& state, int city_id, int x, int y) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (!state.observation.contains("cities") || !py::isinstance<py::list>(state.observation["cities"])) {
     return;
   }
@@ -5293,6 +5787,9 @@ void remove_city_payload_building(NativeGameState& state, int city_id, int x, in
 }
 
 void ensure_city_payload_visible(NativeGameState& state, const NativeCity& native_city) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (!state.observation.contains("cities") || !py::isinstance<py::list>(state.observation["cities"])) {
     return;
   }
@@ -5355,6 +5852,9 @@ void ensure_city_payload_visible(NativeGameState& state, const NativeCity& nativ
 }
 
 void append_tribe_payload_city(NativeGameState& state, int tribe_id, int city_id) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (!state.observation.contains("tribes") || !py::isinstance<py::list>(state.observation["tribes"])) {
     return;
   }
@@ -5566,6 +6066,9 @@ bool ranks_before(const NativeTribe& left, const NativeTribe& right, const Nativ
 }
 
 void sync_observation_ranking(NativeGameState& state) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   std::vector<const NativeTribe*> ordered;
   ordered.reserve(state.tribes.size());
   for (const NativeTribe& tribe : state.tribes) {
@@ -5586,6 +6089,9 @@ void sync_observation_ranking(NativeGameState& state) {
 }
 
 void sync_observation_turn_flags(NativeGameState& state) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   state.observation["active_player_id"] = state.active_player_id;
   state.observation["active"] = state.active_player_id;
   state.observation["can_end_turn"] = state.can_end_turn;
@@ -5596,6 +6102,9 @@ void sync_observation_turn_flags(NativeGameState& state) {
 }
 
 void sync_relationships_payload(NativeGameState& state) {
+  if (!payload_sync_enabled(state)) {
+    return;
+  }
   if (state.relationships.empty()) {
     return;
   }
@@ -6377,12 +6886,10 @@ NativeGameState apply_action_strict(
     int max_actions) {
   g_last_transition_timing = NativeTransitionTiming{};
   auto started_at = TimingClock::now();
-  NativeGameState next = state;
+  NativeGameState next = copy_transition_state_without_observation(state);
   g_last_transition_timing.state_copy_ms += elapsed_ms(started_at);
   started_at = TimingClock::now();
-#ifdef TRIBES_NATIVE_MCTS_STANDALONE
-  next.observation = py::dict();
-#else
+#ifndef TRIBES_NATIVE_MCTS_STANDALONE
   next.observation = deepish_copy_observation(state.observation);
 #endif
   g_last_transition_timing.observation_copy_ms += elapsed_ms(started_at);
@@ -6521,8 +7028,27 @@ NativeGameState apply_action_strict(
   g_last_transition_timing.reveal_sync_ms += elapsed_ms(started_at);
   next.transition_kind = type;
   started_at = TimingClock::now();
-  rebuild_state_indexes(next);
-  regenerate_actions(next, actions, max_actions);
+  if (!try_reuse_legal_actions_after_simple_unit_update(state, next, actions, applied, type, max_actions)) {
+    rebuild_state_indexes(next);
+    if (!try_partially_regenerate_actions_after_attack_or_move(
+            state,
+            next,
+            actions,
+            applied,
+            type,
+            max_actions,
+            newly_explored) &&
+        !(type == "RESEARCH_TECH" &&
+            partially_regenerate_research_preserving_unit_actions(
+                state,
+                next,
+                actions,
+                applied,
+                max_actions,
+                newly_explored))) {
+      regenerate_actions(next, actions, max_actions);
+    }
+  }
   g_last_transition_timing.regenerate_actions_ms += elapsed_ms(started_at);
   if (type == "ATTACK") {
     started_at = TimingClock::now();

@@ -130,9 +130,11 @@ class NativeMCTS {
       bool root_terminal,
       uint64_t seed,
       int max_actions,
-      bool use_progressive_widening = true) :
+      bool use_progressive_widening = true,
+      bool adversarial_opponent = false) :
       max_actions_(max_actions),
       use_progressive_widening_(use_progressive_widening),
+      adversarial_opponent_(adversarial_opponent),
       rng_(seed) {
     NativeRoot root = parse_root_payload(root_payload, max_actions);
     actions_ = root.actions;
@@ -150,8 +152,9 @@ class NativeMCTS {
     if (root.state.terminal && root.state.terminal_reason.empty()) {
       root.state.terminal_reason = "root_terminal";
     }
-    states_.push_back(root.state);
-    nodes_.push_back(make_node(0, root_priors, root_value, root.state.terminal));
+    const bool effective_root_terminal = root.state.terminal;
+    states_.push_back(std::move(root.state));
+    nodes_.push_back(make_node(0, root_priors, root_value, effective_root_terminal));
   }
 
   void add_root_dirichlet_noise(double alpha, double epsilon) {
@@ -967,10 +970,11 @@ class NativeMCTS {
       throw std::invalid_argument("Child priors must match child legal action count.");
     }
     int state_index = static_cast<int>(states_.size());
-    states_.push_back(child_state);
+    const bool effective_child_terminal = child_state.terminal;
+    states_.push_back(std::move(child_state));
     int child_node_id = static_cast<int>(nodes_.size());
     nodes_[parent_node_id].child_node_ids[parent_action_index] = child_node_id;
-    nodes_.push_back(make_node(state_index, child_priors, child_value, child_state.terminal));
+    nodes_.push_back(make_node(state_index, child_priors, child_value, effective_child_terminal));
     return child_node_id;
   }
 
@@ -1375,6 +1379,7 @@ class NativeMCTS {
   int last_batch_max_turn_depth_ = 0;
   int max_actions_ = 0;
   bool use_progressive_widening_ = true;
+  bool adversarial_opponent_ = true;
   bool static_timing_enabled_ = false;
   double last_static_select_ms_ = 0.0;
   double last_static_apply_ms_ = 0.0;
@@ -1660,6 +1665,9 @@ class NativeMCTS {
     if (node.priors.size() <= 1) {
       return 0;
     }
+    const NativeGameState& state = states_[node.state_index];
+    const double player_sign =
+        adversarial_opponent_ && state.active_player_id != state.root_player_id ? -1.0 : 1.0;
     const size_t action_count = use_progressive_widening_ ? progressive_action_count(node) : node.priors.size();
     const double sqrt_total = std::sqrt(std::max(1.0, static_cast<double>(node.total_visits)));
     double best_score = -std::numeric_limits<double>::infinity();
@@ -1668,7 +1676,7 @@ class NativeMCTS {
       const double visit_count = static_cast<double>(node.visits[i]);
       const double q = visit_count > 0.0 ? node.value_sums[i] / visit_count : 0.0;
       const double u = c_puct * node.priors[i] * sqrt_total / (1.0 + visit_count);
-      const double score = q + u;
+      const double score = player_sign * q + u;
       if (score > best_score) {
         best_score = score;
         best_index = static_cast<int>(i);
@@ -1697,6 +1705,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            bool,
            uint64_t,
            int,
+           bool,
            bool>(),
            py::arg("root_payload"),
            py::arg("root_action_indexes"),
@@ -1705,7 +1714,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("root_terminal"),
            py::arg("seed"),
            py::arg("max_actions"),
-           py::arg("use_progressive_widening") = true)
+           py::arg("use_progressive_widening") = true,
+           py::arg("adversarial_opponent") = false)
       .def("add_root_dirichlet_noise", &NativeMCTS::add_root_dirichlet_noise)
       .def("reserve_tree_capacity", &NativeMCTS::reserve_tree_capacity)
       .def("select_leaf", &NativeMCTS::select_leaf)
