@@ -1512,8 +1512,8 @@ def _load_mcts_search_config(path: Path = DEFAULT_MCTS_SEARCH_CONFIG) -> argpars
     values["synthetic"] = False
     if str(values.get("evaluator")) not in {"nn", "static_exe", "bot"}:
         raise ValueError("mcts_search config evaluator must be one of: nn, static_exe, bot")
-    if str(values.get("static_eval_variant")) not in {"baseline", "experimental", "experimental-2"}:
-        raise ValueError("mcts_search config static_eval_variant must be one of: baseline, experimental, experimental-2")
+    if str(values.get("static_eval_variant")) not in {"baseline", "experimental", "experimental-2", "experimental-training"}:
+        raise ValueError("mcts_search config static_eval_variant must be one of: baseline, experimental, experimental-2, experimental-training")
     if str(values.get("native_static_search_mode")) not in {"primitive", "turn-cmab"}:
         raise ValueError("mcts_search config native_static_search_mode must be one of: primitive, turn-cmab")
     if str(values.get("turn_cmab_opponent_mode")) not in {"root-max", "root-adversarial"}:

@@ -11,6 +11,11 @@ def _resolve_config_path(path: Path) -> Path:
         return path
 
     py_root = Path(__file__).resolve().parents[1]
+    project_root = py_root.parent
+    from_project_root = project_root / path
+    if from_project_root.exists():
+        return from_project_root
+
     if path.parts and path.parts[0] == "py":
         from_py_root = py_root.joinpath(*path.parts[1:])
         if from_py_root.exists():

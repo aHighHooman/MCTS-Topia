@@ -24,6 +24,9 @@ def parse_target(spec: str) -> dict[str, str]:
     if not rest and (name or spec) in {"baseline", "experimental"}:
         variant = name or spec
         return {"name": variant, "variant": variant, "mcts_impl": "native_static_exe"}
+    if not rest and (name or spec) in {"uniform", "unbiased", "naive"}:
+        prior_name = name or spec
+        return {"name": prior_name, "variant": "baseline", "prior": "uniform", "mcts_impl": "native_static_exe"}
     target = {"name": name or spec, "variant": "baseline", "mcts_impl": "native_static_exe"}
     for part in rest.split(","):
         if not part:
@@ -39,6 +42,11 @@ def parse_target(spec: str) -> dict[str, str]:
 def _target_weight_overrides(target: dict[str, str]) -> str:
     raw = str(target.get("weight_overrides") or target.get("static_eval_weight_overrides") or target.get("overrides") or "")
     return raw.replace(";", ",")
+
+
+def _target_uses_uniform_prior(target: dict[str, str]) -> bool:
+    raw = str(target.get("prior") or target.get("prior_mode") or target.get("search_prior") or "").strip().lower()
+    return raw in {"uniform", "unbiased", "naive"}
 
 
 @contextmanager
@@ -162,6 +170,8 @@ def _run_native_static_exe(
     overrides = _target_weight_overrides(target)
     if overrides:
         command.extend(["--static-eval-weight-overrides", overrides])
+    if _target_uses_uniform_prior(target):
+        command.append("--uniform-prior")
     request = dict(payload)
     request["type"] = "action_request"
     completed = subprocess.run(
