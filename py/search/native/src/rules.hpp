@@ -188,6 +188,7 @@ enum class StaticEvalVariant {
   Baseline,
   Experimental,
   Experimental2,
+  ExperimentalTraining,
 };
 
 StaticEvalVariant static_eval_variant();

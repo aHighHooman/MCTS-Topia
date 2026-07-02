@@ -1830,6 +1830,69 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertIn("technology.researched_tech", terms)
         self.assertFalse(bool(terms["technology.researched_tech"]["contributes"]))
 
+    def test_static_eval_experimental_training_exposes_tunable_leaf_terms(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        message = _message()
+        message["observation"]["tribes"][0]["researched_tech_ids"] = ["ORGANIZATION", "HUNTING", "FISHING"]
+
+        terms = {
+            str(term["name"]): term
+            for term in _static_breakdown_for_variant(extension, message, "experimental-training")["terms"]
+        }
+
+        self.assertIn("technology.researched_tech.organization", terms)
+        self.assertIn("technology.researched_tech.fishing", terms)
+        self.assertIn("military.unit_power.training_formula.material", terms)
+        self.assertIn("military.unit_power.training_formula.attack", terms)
+        self.assertIn("military.unit_power.training_formula.defense", terms)
+        self.assertIn("military.unit_power.training_formula.veteran", terms)
+        self.assertIn("military.unit_power.training_formula.kills", terms)
+        self.assertNotIn("military.unit_power.training_formula.own.material", terms)
+        self.assertNotIn("military.unit_power.training_formula.enemy.material", terms)
+        self.assertIn("economy.city_quality.base_city", terms)
+        self.assertIn("economy.city_quality.income", terms)
+        self.assertIn("economy.city_quality.level", terms)
+        self.assertIn("economy.city_quality.population_progress", terms)
+        self.assertIn("economy.city_quality.walls", terms)
+        self.assertNotIn("economy.city_quality.own.base_city", terms)
+        self.assertNotIn("economy.city_quality.enemy.base_city", terms)
+
+        self.assertEqual(float(terms["military.own_unit_material.own"]["weight"]), 0.0)
+        self.assertGreater(float(terms["military.unit_power.training_formula.material"]["weight"]), 0.0)
+        self.assertGreater(float(terms["military.unit_power.training_formula.attack"]["weight"]), 0.0)
+        self.assertGreater(float(terms["military.unit_power.training_formula.defense"]["weight"]), 0.0)
+        self.assertEqual(float(terms["military.unit_power"]["weight"]), 1.0)
+        self.assertEqual(float(terms["territory.city_count.own"]["weight"]), 0.0)
+        self.assertGreater(float(terms["economy.city_quality.base_city"]["weight"]), 0.0)
+        self.assertEqual(float(terms["territory.city_count"]["weight"]), 1.0)
+        self.assertEqual(float(terms["economy.city_quality"]["weight"]), 1.0)
+
+        parent_override_terms = {
+            str(term["name"]): term
+            for term in _static_breakdown_for_variant(
+                extension,
+                message,
+                "experimental-training",
+                overrides="military.unit_power=2.0",
+            )["terms"]
+        }
+        self.assertEqual(
+            float(parent_override_terms["military.unit_power.training_formula.attack"]["weight"]),
+            float(terms["military.unit_power.training_formula.attack"]["weight"]),
+        )
+
+        leaf_override_terms = {
+            str(term["name"]): term
+            for term in _static_breakdown_for_variant(
+                extension,
+                message,
+                "experimental-training",
+                overrides="military.unit_power.training_formula.attack=2.0",
+            )["terms"]
+        }
+        self.assertEqual(float(leaf_override_terms["military.unit_power.training_formula.attack"]["weight"]), 2.0)
+
     def test_static_eval_experimental_unit_power_kill_bonus(self) -> None:
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)

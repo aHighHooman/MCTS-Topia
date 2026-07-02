@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <cmath>
 #include <map>
 #include <set>
@@ -277,43 +278,47 @@ std::string canonical_action_type(const NativeAction& action) {
 }
 
 int action_scalar_int(const NativeAction& action, const char* key, bool* found) {
-  const std::string name = key == nullptr ? "" : std::string(key);
-  if (name == "unit_id" || name == "u") {
+  if (key == nullptr) {
+    *found = false;
+    return 0;
+  }
+  if (std::strcmp(key, "unit_id") == 0 || std::strcmp(key, "u") == 0) {
     if (action.unit_id != 0) {
       *found = true;
       return action.unit_id;
     }
-  } else if (name == "city_id" || name == "c") {
+  } else if (std::strcmp(key, "city_id") == 0 || std::strcmp(key, "c") == 0) {
     if (action.city_id != 0) {
       *found = true;
       return action.city_id;
     }
-  } else if (name == "tribe_id" || name == "p") {
+  } else if (std::strcmp(key, "tribe_id") == 0 || std::strcmp(key, "p") == 0) {
     if (action.tribe_id != 0) {
       *found = true;
       return action.tribe_id;
     }
-  } else if (name == "target_unit_id" || name == "tu") {
+  } else if (std::strcmp(key, "target_unit_id") == 0 || std::strcmp(key, "tu") == 0) {
     if (action.target_unit_id != 0) {
       *found = true;
       return action.target_unit_id;
     }
-  } else if (name == "target_city_id" || name == "tc") {
+  } else if (std::strcmp(key, "target_city_id") == 0 || std::strcmp(key, "tc") == 0) {
     if (action.target_city_id != 0) {
       *found = true;
       return action.target_city_id;
     }
-  } else if (name == "target_player_id" || name == "tp" || name == "target_id" || name == "targetID") {
+  } else if (std::strcmp(key, "target_player_id") == 0 || std::strcmp(key, "tp") == 0 ||
+             std::strcmp(key, "target_id") == 0 || std::strcmp(key, "targetID") == 0) {
     if (action.target_player_id >= 0) {
       *found = true;
       return action.target_player_id;
     }
-  } else if (name == "x") {
+  } else if (std::strcmp(key, "x") == 0) {
     if (action.has_xy) {
       *found = true;
       return action.x;
     }
-  } else if (name == "y") {
+  } else if (std::strcmp(key, "y") == 0) {
     if (action.has_xy) {
       *found = true;
       return action.y;
@@ -324,14 +329,17 @@ int action_scalar_int(const NativeAction& action, const char* key, bool* found) 
 }
 
 std::string action_scalar_string(const NativeAction& action, const char* key, bool* found) {
-  const std::string name = key == nullptr ? "" : std::string(key);
+  if (key == nullptr) {
+    *found = false;
+    return "";
+  }
   const std::string* value = nullptr;
-  if (name == "unit_type" || name == "ut") value = &action.unit_type;
-  else if (name == "building_type" || name == "bt") value = &action.building_type;
-  else if (name == "resource_type" || name == "rt") value = &action.resource_type;
-  else if (name == "capture_type" || name == "ct") value = &action.capture_type;
-  else if (name == "bonus" || name == "b") value = &action.bonus;
-  else if (name == "technology" || name == "tech") value = &action.tech;
+  if (std::strcmp(key, "unit_type") == 0 || std::strcmp(key, "ut") == 0) value = &action.unit_type;
+  else if (std::strcmp(key, "building_type") == 0 || std::strcmp(key, "bt") == 0) value = &action.building_type;
+  else if (std::strcmp(key, "resource_type") == 0 || std::strcmp(key, "rt") == 0) value = &action.resource_type;
+  else if (std::strcmp(key, "capture_type") == 0 || std::strcmp(key, "ct") == 0) value = &action.capture_type;
+  else if (std::strcmp(key, "bonus") == 0 || std::strcmp(key, "b") == 0) value = &action.bonus;
+  else if (std::strcmp(key, "technology") == 0 || std::strcmp(key, "tech") == 0) value = &action.tech;
   if (value != nullptr && !value->empty()) {
     *found = true;
     return *value;
@@ -2481,8 +2489,10 @@ std::vector<std::pair<int, int>> reachable_move_targets(const NativeGameState& s
   const double max_cost = static_cast<double>(std::max(1, unit.movement));
   const int board_size = state.board_size;
   const int board_cells = board_size * board_size;
+  targets.reserve(static_cast<size_t>(board_cells));
   std::vector<double> best(static_cast<size_t>(board_cells), std::numeric_limits<double>::infinity());
   std::vector<std::pair<int, int>> frontier;
+  frontier.reserve(static_cast<size_t>(board_cells));
   const std::pair<int, int> start{unit.x, unit.y};
   const auto board_index = [board_size](int x, int y) {
     return y * board_size + x;
@@ -3701,6 +3711,7 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
 
   if (unit_can_move(unit)) {
     std::vector<std::pair<int, int>> java_priority_order;
+    java_priority_order.reserve(8);
     if (state.active_player_id == state.root_player_id) {
       static const int move_order[8][2] = {{-1, -1}, {1, 1}, {1, 0}, {1, -1}, {0, 1}, {0, -1}, {-1, 1}, {-1, 0}};
       for (const auto& delta : move_order) {
@@ -3716,6 +3727,7 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
       }
     } else {
       std::vector<std::pair<int, int>> move_targets;
+      move_targets.reserve(8);
       for (int x = std::max(0, unit.x - 1); x <= std::min(state.board_size - 1, unit.x + 1); ++x) {
         for (int y = std::max(0, unit.y - 1); y <= std::min(state.board_size - 1, unit.y + 1); ++y) {
           if (x == unit.x && y == unit.y) {
@@ -3926,31 +3938,21 @@ void regenerate_tribe_actions(NativeGameState& state, std::vector<NativeAction>&
   const int tribe_count = static_cast<int>(state.tribes.size());
 
   if (has_tech(*tribe, "ROADS") && stars >= 3) {
-    std::vector<NativeTile*> road_tiles;
-    for (NativeTile& tile : state.tiles) {
-      if (!can_build_road_at(state, state.active_player_id, tile) ||
-          stars < road_cost_at(tile)) {
-        continue;
+    for (int x = 0; x < state.board_size; ++x) {
+      for (int y = 0; y < state.board_size; ++y) {
+        NativeTile* tile = tile_at(state, x, y);
+        if (tile == nullptr ||
+            !can_build_road_at(state, state.active_player_id, *tile) ||
+            stars < road_cost_at(*tile)) {
+          continue;
+        }
+        NativeAction road;
+        road.type = "BUILD_ROAD";
+        init_generated_payload(road);
+        set_generated_actor(road, state.active_player_id);
+        set_generated_xy(road, tile->x, tile->y);
+        append_generated_action(state, actions, max_actions, std::move(road));
       }
-      road_tiles.push_back(&tile);
-    }
-    std::sort(road_tiles.begin(), road_tiles.end(), [](const NativeTile* left, const NativeTile* right) {
-      if (left->x != right->x) {
-        return left->x < right->x;
-      }
-      return left->y < right->y;
-    });
-    std::set<std::pair<int, int>> seen;
-    for (const NativeTile* tile : road_tiles) {
-      if (!seen.emplace(tile->x, tile->y).second) {
-        continue;
-      }
-      NativeAction road;
-      road.type = "BUILD_ROAD";
-      init_generated_payload(road);
-      set_generated_actor(road, state.active_player_id);
-      set_generated_xy(road, tile->x, tile->y);
-      append_generated_action(state, actions, max_actions, std::move(road));
     }
   }
 
@@ -4888,7 +4890,9 @@ bool apply_spawn(NativeGameState& next, const NativeAction& action) {
   unit.defence = unit_defence(type);
   unit.movement = unit_movement(type);
   const StaticEvalVariant variant = static_eval_variant();
-  unit.range = (variant == StaticEvalVariant::Experimental || variant == StaticEvalVariant::Experimental2)
+  unit.range = (variant == StaticEvalVariant::Experimental ||
+                variant == StaticEvalVariant::Experimental2 ||
+                variant == StaticEvalVariant::ExperimentalTraining)
       ? (type == "CATAPULT" ? 3 : (type == "ARCHER" ? 2 : 1))
       : 1;
   unit.cost = unit_cost(type);

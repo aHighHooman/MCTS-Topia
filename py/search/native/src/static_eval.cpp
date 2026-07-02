@@ -31,6 +31,8 @@ struct StaticEvalTerm {
 
 struct UnitPowerParts {
   double projection = 0.0;
+  double attack_projection = 0.0;
+  double defense_projection = 0.0;
   double defense = 0.0;
   double veteran = 0.0;
   double kills = 0.0;
@@ -42,11 +44,18 @@ struct ValueHeadProfile {
 };
 
 bool is_experimental_value_variant(StaticEvalVariant variant) {
-  return variant == StaticEvalVariant::Experimental || variant == StaticEvalVariant::Experimental2;
+  return variant == StaticEvalVariant::Experimental ||
+      variant == StaticEvalVariant::Experimental2 ||
+      variant == StaticEvalVariant::ExperimentalTraining;
+}
+
+bool is_experimental_training_variant(StaticEvalVariant variant) {
+  return variant == StaticEvalVariant::ExperimentalTraining;
 }
 
 bool uses_per_tech_research_value(StaticEvalVariant variant) {
-  return variant == StaticEvalVariant::Experimental2;
+  return variant == StaticEvalVariant::Experimental2 ||
+      variant == StaticEvalVariant::ExperimentalTraining;
 }
 
 std::unordered_map<std::string, double> parse_weight_overrides() {
@@ -379,6 +388,16 @@ double value_head_profile_weight(
         is_experimental_value_variant(profile.variant)) {
       return 0.0;
     }
+    if ((name == "economy.city_quality.own" ||
+         name == "economy.city_quality.enemy") &&
+        is_experimental_training_variant(profile.variant)) {
+      return 0.0;
+    }
+    if ((name == "economy.resource_potential.own" ||
+         name == "economy.resource_potential.enemy") &&
+        is_experimental_training_variant(profile.variant)) {
+      return name.find(".enemy") == std::string::npos ? 1.0 : -1.0;
+    }
     if (name == "threat.vulnerable_units.baseline_formula" &&
         is_experimental_value_variant(profile.variant)) {
       return 0.0;
@@ -402,6 +421,25 @@ double value_head_profile_weight(
     }
     return name.find(".enemy.") == std::string::npos ? power_weight : -power_weight;
   }
+  const bool unit_power_training =
+      name.rfind("military.unit_power.training_formula.", 0) == 0;
+  if (unit_power_training) {
+    if (!is_experimental_training_variant(profile.variant)) {
+      return 0.0;
+    }
+    if (name.find(".material") != std::string::npos) {
+      return 3.706896551724;
+    }
+    return power_weight;
+  }
+  if (is_experimental_training_variant(profile.variant) &&
+      name.rfind("economy.city_quality.", 0) == 0) {
+    if (name.find(".base_city") != std::string::npos) return experimentalValueHeadCityCountCoeff;
+    if (name.find(".income") != std::string::npos) return 8.0;
+    if (name.find(".level") != std::string::npos) return 2.0;
+    if (name.find(".population_progress") != std::string::npos) return 1.0;
+    if (name.find(".walls") != std::string::npos) return 2.0;
+  }
   return 0.0;
 }
 
@@ -415,6 +453,9 @@ StaticEvalVariant static_eval_variant() {
       return StaticEvalVariant::Baseline;
     }
     const std::string variant(value);
+    if (variant == "experimental-training") {
+      return StaticEvalVariant::ExperimentalTraining;
+    }
     if (variant == "experimental-2") {
       return StaticEvalVariant::Experimental2;
     }
@@ -427,6 +468,9 @@ StaticEvalVariant static_eval_variant() {
     return StaticEvalVariant::Baseline;
   }
   const std::string variant(value);
+  if (variant == "experimental-training") {
+    return StaticEvalVariant::ExperimentalTraining;
+  }
   if (variant == "experimental-2") {
     return StaticEvalVariant::Experimental2;
   }
@@ -2503,8 +2547,9 @@ double state_raw_value(
   // Experimental currently changes lower-level feature calculations while the
   // default value-head weights stay baseline-compatible. Analysis overrides can
   // still alter weights through TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES.
-  const bool experimental_eval = false;
   const ValueHeadProfile profile{static_eval_variant()};
+  const bool experimental_training_eval = is_experimental_training_variant(profile.variant);
+  const bool experimental_eval = experimental_training_eval;
   const bool needs_terms = terms != nullptr;
   const bool experimental_family_selected = is_experimental_value_variant(profile.variant);
 #ifdef TRIBES_NATIVE_MCTS_STANDALONE
@@ -2628,6 +2673,8 @@ double state_raw_value(
       my_material += unit_value(unit);
       if (need_baseline_unit_power) {
         my_power_baseline.projection += baseline_power_parts.projection;
+        my_power_baseline.attack_projection += baseline_power_parts.attack_projection;
+        my_power_baseline.defense_projection += baseline_power_parts.defense_projection;
         my_power_baseline.defense += baseline_power_parts.defense;
         my_power_baseline.veteran += baseline_power_parts.veteran;
         my_power_baseline.kills += baseline_power_parts.kills;
@@ -2635,6 +2682,8 @@ double state_raw_value(
       }
       if (need_experimental_unit_power) {
         my_power_experimental.projection += experimental_power_parts.projection;
+        my_power_experimental.attack_projection += experimental_power_parts.attack_projection;
+        my_power_experimental.defense_projection += experimental_power_parts.defense_projection;
         my_power_experimental.defense += experimental_power_parts.defense;
         my_power_experimental.veteran += experimental_power_parts.veteran;
         my_power_experimental.kills += experimental_power_parts.kills;
@@ -2655,6 +2704,8 @@ double state_raw_value(
       enemy_material += unit_value(unit);
       if (need_baseline_unit_power) {
         enemy_power_baseline.projection += baseline_power_parts.projection;
+        enemy_power_baseline.attack_projection += baseline_power_parts.attack_projection;
+        enemy_power_baseline.defense_projection += baseline_power_parts.defense_projection;
         enemy_power_baseline.defense += baseline_power_parts.defense;
         enemy_power_baseline.veteran += baseline_power_parts.veteran;
         enemy_power_baseline.kills += baseline_power_parts.kills;
@@ -2662,6 +2713,8 @@ double state_raw_value(
       }
       if (need_experimental_unit_power) {
         enemy_power_experimental.projection += experimental_power_parts.projection;
+        enemy_power_experimental.attack_projection += experimental_power_parts.attack_projection;
+        enemy_power_experimental.defense_projection += experimental_power_parts.defense_projection;
         enemy_power_experimental.defense += experimental_power_parts.defense;
         enemy_power_experimental.veteran += experimental_power_parts.veteran;
         enemy_power_experimental.kills += experimental_power_parts.kills;
@@ -2674,6 +2727,14 @@ double state_raw_value(
   int enemy_cities = 0;
   double my_city_quality = 0.0;
   double enemy_city_quality = 0.0;
+  double my_city_quality_income = 0.0;
+  double enemy_city_quality_income = 0.0;
+  double my_city_quality_level = 0.0;
+  double enemy_city_quality_level = 0.0;
+  double my_city_quality_population_progress = 0.0;
+  double enemy_city_quality_population_progress = 0.0;
+  double my_city_quality_walls = 0.0;
+  double enemy_city_quality_walls = 0.0;
   double my_population_progress_value = 0.0;
   double enemy_population_progress_value = 0.0;
   double my_unit_capacity = 0.0;
@@ -2682,6 +2743,10 @@ double state_raw_value(
   double city_threat = 0.0;
   double enemy_city_pressure = 0.0;
   for (const NativeCity& city : state.cities) {
+    const double city_quality_income = static_cast<double>(city.production);
+    const double city_quality_level = static_cast<double>(city.level);
+    const double city_quality_population_progress = population_progress_value_for_city(city);
+    const double city_quality_walls = city.walls ? 1.0 : 0.0;
     const double quality = experimental_eval
         ? experimental_city_quality_for_value(city)
         : 3.0 + 1.7 * city.level + city_production_quality_coeff * city.production +
@@ -2690,6 +2755,10 @@ double state_raw_value(
     if (city.tribe_id == player_id) {
       ++my_cities;
       my_city_quality += quality;
+      my_city_quality_income += city_quality_income;
+      my_city_quality_level += city_quality_level;
+      my_city_quality_population_progress += city_quality_population_progress;
+      my_city_quality_walls += city_quality_walls;
       if (experimental_eval) {
         my_unit_capacity += static_cast<double>(unit_capacity_for_city(city));
       }
@@ -2713,6 +2782,10 @@ double state_raw_value(
       }
       ++enemy_cities;
       enemy_city_quality += quality;
+      enemy_city_quality_income += city_quality_income;
+      enemy_city_quality_level += city_quality_level;
+      enemy_city_quality_population_progress += city_quality_population_progress;
+      enemy_city_quality_walls += city_quality_walls;
       if (experimental_eval) {
         enemy_unit_capacity += static_cast<double>(unit_capacity_for_city(city));
       }
@@ -2821,7 +2894,7 @@ double state_raw_value(
       : 0.0;
   const double villages_feature =
       2.672413793103 * static_cast<double>(visible_villages) + 2.413793103448 * village_control;
-  if (!needs_terms && weight_overrides.empty()) {
+  if (!needs_terms && weight_overrides.empty() && !experimental_training_eval) {
     const UnitPowerParts& selected_my_power = experimental_family_selected
         ? my_power_experimental
         : my_power_baseline;
@@ -2910,8 +2983,9 @@ double state_raw_value(
       const std::string& parent = "",
       bool parent_override_enabled = true) {
     const double default_weight = profile_weight(name);
+    const bool allow_parent_override = parent_override_enabled && !experimental_training_eval;
     if (!needs_terms) {
-      raw_accum += feature_value * raw_weight(name, default_weight, parent, parent_override_enabled);
+      raw_accum += feature_value * raw_weight(name, default_weight, parent, allow_parent_override);
       return;
     }
     raw_terms.push_back(eval_term(
@@ -2920,7 +2994,7 @@ double state_raw_value(
         feature_value,
         default_weight,
         parent,
-        parent_override_enabled));
+        allow_parent_override));
   };
   auto add_term_with_default_weight = [&](
       const std::string& name,
@@ -2928,8 +3002,9 @@ double state_raw_value(
       double default_weight,
       const std::string& parent = "",
       bool parent_override_enabled = true) {
+    const bool allow_parent_override = parent_override_enabled && !experimental_training_eval;
     if (!needs_terms) {
-      raw_accum += feature_value * raw_weight(name, default_weight, parent, parent_override_enabled);
+      raw_accum += feature_value * raw_weight(name, default_weight, parent, allow_parent_override);
       return;
     }
     raw_terms.push_back(eval_term(
@@ -2938,7 +3013,7 @@ double state_raw_value(
         feature_value,
         default_weight,
         parent,
-        parent_override_enabled));
+        allow_parent_override));
   };
   auto add_summary = [&](const std::string& name, double feature_value, double weight, size_t begin_index) {
     if (!needs_terms) {
@@ -2950,7 +3025,11 @@ double state_raw_value(
         raw_total_for_summary += raw_terms[i].raw;
       }
     }
-    raw_terms.push_back(summary_term(name, feature_value, weight, raw_total_for_summary));
+    raw_terms.push_back(summary_term(
+        name,
+        feature_value,
+        experimental_training_eval ? 1.0 : weight,
+        raw_total_for_summary));
   };
   auto add_pair = [&](
       const std::string& parent,
@@ -2975,7 +3054,8 @@ double state_raw_value(
 
   const size_t unit_power_begin = raw_terms.size();
   const bool baseline_formula_selected = !experimental_family_selected;
-  const bool experimental_formula_selected = experimental_family_selected;
+  const bool training_formula_selected = experimental_training_eval;
+  const bool experimental_formula_selected = experimental_family_selected && !training_formula_selected;
   add_term("military.unit_power.baseline_formula.own.projection", my_power_baseline.projection, "military.unit_power", baseline_formula_selected);
   add_term("military.unit_power.baseline_formula.own.defense", my_power_baseline.defense, "military.unit_power", baseline_formula_selected);
   add_term("military.unit_power.baseline_formula.own.veteran", my_power_baseline.veteran, "military.unit_power", baseline_formula_selected);
@@ -2992,13 +3072,21 @@ double state_raw_value(
   add_term("military.unit_power.experimental_formula.enemy.defense", enemy_power_experimental.defense, "military.unit_power", experimental_formula_selected);
   add_term("military.unit_power.experimental_formula.enemy.veteran", enemy_power_experimental.veteran, "military.unit_power", experimental_formula_selected);
   add_term("military.unit_power.experimental_formula.enemy.kills", enemy_power_experimental.kills, "military.unit_power", experimental_formula_selected);
+  add_term("military.unit_power.training_formula.material", my_material - enemy_material, "military.unit_power", training_formula_selected);
+  add_term("military.unit_power.training_formula.attack", my_power_experimental.attack_projection - enemy_power_experimental.attack_projection, "military.unit_power", training_formula_selected);
+  add_term("military.unit_power.training_formula.defense", my_power_experimental.defense_projection - enemy_power_experimental.defense_projection, "military.unit_power", training_formula_selected);
+  add_term("military.unit_power.training_formula.veteran", my_power_experimental.veteran - enemy_power_experimental.veteran, "military.unit_power", training_formula_selected);
+  add_term("military.unit_power.training_formula.kills", my_power_experimental.kills - enemy_power_experimental.kills, "military.unit_power", training_formula_selected);
   const UnitPowerParts& selected_my_power = experimental_family_selected
       ? my_power_experimental
       : my_power_baseline;
   const UnitPowerParts& selected_enemy_power = experimental_family_selected
       ? enemy_power_experimental
       : enemy_power_baseline;
-  add_summary("military.unit_power", selected_my_power.total - selected_enemy_power.total, power_weight, unit_power_begin);
+  const double unit_power_summary_feature = training_formula_selected
+      ? (my_material + selected_my_power.total) - (enemy_material + selected_enemy_power.total)
+      : selected_my_power.total - selected_enemy_power.total;
+  add_summary("military.unit_power", unit_power_summary_feature, power_weight, unit_power_begin);
 
   add_pair(
       "territory.city_count",
@@ -3007,13 +3095,23 @@ double state_raw_value(
       "territory.city_count.enemy",
       static_cast<double>(enemy_cities),
       profile_weight("territory.city_count.own"));
-  add_pair(
-      "economy.city_quality",
-      "economy.city_quality.own",
-      my_city_quality,
-      "economy.city_quality.enemy",
-      enemy_city_quality,
-      profile_weight("economy.city_quality.own"));
+  if (experimental_training_eval) {
+    const size_t city_quality_begin = raw_terms.size();
+    add_term("economy.city_quality.base_city", static_cast<double>(my_cities - enemy_cities), "economy.city_quality");
+    add_term("economy.city_quality.income", my_city_quality_income - enemy_city_quality_income, "economy.city_quality");
+    add_term("economy.city_quality.level", my_city_quality_level - enemy_city_quality_level, "economy.city_quality");
+    add_term("economy.city_quality.population_progress", my_city_quality_population_progress - enemy_city_quality_population_progress, "economy.city_quality");
+    add_term("economy.city_quality.walls", my_city_quality_walls - enemy_city_quality_walls, "economy.city_quality");
+    add_summary("economy.city_quality", my_city_quality - enemy_city_quality, 1.0, city_quality_begin);
+  } else {
+    add_pair(
+        "economy.city_quality",
+        "economy.city_quality.own",
+        my_city_quality,
+        "economy.city_quality.enemy",
+        enemy_city_quality,
+        profile_weight("economy.city_quality.own"));
+  }
 
   const size_t unit_capacity_begin = raw_terms.size();
   add_term("economy.unit_capacity.population_progress", experimental_population_term, "economy.unit_capacity");
@@ -3178,14 +3276,22 @@ UnitPowerParts unit_power_parts_for_formula(
 
   const double projection_power = reach * attack * hp_frac * survival_attacks;
   const double defensive_anchor = defence * hp_frac;
+  parts.attack_projection = experimental
+      ? reach * attack * hp_frac * survival_attacks
+      : projection_power;
+  parts.defense_projection = experimental
+      ? reach * defence * hp_frac * survival_attacks
+      : defensive_anchor;
   parts.projection = experimental
-      ? reach * (attack + defence) * hp_frac * survival_attacks
+      ? parts.attack_projection + parts.defense_projection
       : projection_power;
   parts.defense = experimental ? 0.0 : defensive_anchor;
   parts.veteran = unit.veteran ? (experimental ? 20.0 : 0.8) : 0.0;
   if (experimental) {
     parts.kills = 5.0 * std::min(2, unit.kills);
     parts.projection *= 0.6;
+    parts.attack_projection *= 0.6;
+    parts.defense_projection *= 0.6;
   }
   parts.total = parts.projection + parts.defense + parts.veteran + parts.kills;
   return parts;

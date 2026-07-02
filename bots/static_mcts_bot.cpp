@@ -40,6 +40,7 @@ struct CliConfig {
   bool profile_timing = false;
   uint64_t seed = 13;
   bool native_adversarial_opponent = false;
+  bool uniform_prior = false;
   std::string static_eval_variant = "baseline";
   std::string static_eval_weight_overrides;
   std::string search_mode = "primitive";
@@ -958,6 +959,9 @@ json choose_action_with_native_tree(const json& message, const CliConfig& cfg, s
     searched_ids.push_back(cli_action_id(root_actions[index], index));
     priors.push_back(all_priors[index]);
   }
+  if (cfg.uniform_prior) {
+    std::fill(priors.begin(), priors.end(), 1.0);
+  }
   double total = 0.0;
   for (double prior : priors) total += std::max(0.0, prior);
   if (total <= 0.0) {
@@ -1148,6 +1152,7 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
     else if (arg == "--c-puct") cfg.c_puct = std::stod(next());
     else if (arg == "--static-eval-variant") cfg.static_eval_variant = next();
     else if (arg == "--static-eval-weight-overrides") cfg.static_eval_weight_overrides = next();
+    else if (arg == "--uniform-prior" || arg == "--uniform-priors") cfg.uniform_prior = true;
     else if (arg == "--deterministic") {
       cfg.sample_action = false;
       cfg.root_temperature = 1e-6;
@@ -1201,7 +1206,8 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
           << "static_mcts_bot.exe [--search-mode primitive|turn-cmab] [--simulations N]\n"
           << "  [--wall-clock-per-action-seconds SEC]\n"
           << "  [--top-k-actions N] [--max-actions N] [--search-batch-size N] [--c-puct X]\n"
-          << "  [--static-eval-variant baseline|experimental|experimental-2] [--static-eval-weight-overrides SPEC]\n"
+          << "  [--static-eval-variant baseline|experimental|experimental-2|experimental-training] [--static-eval-weight-overrides SPEC]\n"
+          << "  [--uniform-prior]\n"
           << "  [--deterministic] [--reuse-tree]\n"
           << "  [--profile-json] [--profile-timing] [--seed N]\n"
           << "  [--native-opponent-mode root-adversarial|root-max]\n"
