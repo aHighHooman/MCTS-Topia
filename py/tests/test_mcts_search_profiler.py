@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 import torch
 
 from nn.encoding import EncodedObservation
@@ -8,6 +11,8 @@ from profiling.mcts_search import (
     _action_breadth_rows,
     _branching_key_stats,
     _branching_pressure_rows,
+    _load_mcts_search_config,
+    _native_static_exe_command,
 )
 from search.native.mcts import SearchResult
 
@@ -120,3 +125,23 @@ def test_encoded_batch_policy_pressure_and_transfer_bytes() -> None:
     assert collector.policy_padding_waste_slots == 1
     assert collector.policy_total_slots == 4
     assert collector.cpu_to_device_bytes > 0
+
+
+def test_turn_macro_exp_config_and_static_exe_command() -> None:
+    cfg_path = Path("py/profiling/configs/mcts_search_turn_macro_exp.json")
+    args = _load_mcts_search_config(cfg_path)
+    cfg = SimpleNamespace(
+        search=SimpleNamespace(num_simulations=64, top_k_actions=32, batch_size=16, seed=7),
+        model=SimpleNamespace(max_actions=128),
+    )
+
+    command = _native_static_exe_command(Path("out/native/static_mcts_bot.exe"), cfg, args, using_walltime=True)
+
+    assert args.native_static_search_mode == "turn-macro-exp"
+    assert command[command.index("--search-mode") + 1] == "turn-macro-exp"
+    assert "--turn-macro-max-turn-depth" not in command
+    assert command[command.index("--turn-macro-max-primitives-per-turn") + 1] == "24"
+    assert command[command.index("--turn-macro-max-edges-per-node") + 1] == "4"
+    assert command[command.index("--turn-macro-inner-simulations") + 1] == "1024"
+    assert command[command.index("--turn-macro-inner-c-puct") + 1] == "1.5"
+    assert command[command.index("--turn-macro-opponent-mode") + 1] == "root-adversarial"

@@ -1,0 +1,970 @@
+#include "turn_macro_exp.hpp"
+
+#include "static_eval.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <limits>
+#include <numeric>
+#include <sstream>
+#include <stdexcept>
+#include <unordered_set>
+
+namespace tribes::native {
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+const char* macro_exp_stage_name(MacroExpStage stage) {
+  switch (stage) {
+    case MacroExpStage::Forced: return "forced";
+    case MacroExpStage::Tactical: return "tactical";
+    case MacroExpStage::Research: return "research";
+    case MacroExpStage::City: return "city";
+    case MacroExpStage::ResourceBuild: return "resource_build";
+    case MacroExpStage::Road: return "road";
+    case MacroExpStage::Diplomacy: return "diplomacy";
+    case MacroExpStage::Cleanup: return "cleanup";
+    case MacroExpStage::EndTurn: return "end_turn";
+  }
+  return "unknown";
+}
+
+bool macro_exp_is_forced_type(const std::string& type) {
+  return type == "LEVEL_UP" || type == "MAKE_VETERAN" || type == "CAPTURE" || type == "EXAMINE";
+}
+
+bool macro_exp_is_tactical_type(const std::string& type) {
+  return type == "ATTACK" || type == "CONVERT" || type == "INFILTRATE" ||
+      type == "HEAL_OTHERS" || type == "MOVE" || type == "STEP_MOVE" ||
+      type == "RECOVER" || type == "UPGRADE_RAMMER" || type == "UPGRADE_SCOUT" ||
+      type == "UPGRADE_BOMBER" || type == "UPGRADE_SHIP" || type == "UPGRADE_BOAT";
+}
+
+bool macro_exp_is_resource_build_type(const std::string& type) {
+  return type == "RESOURCE_GATHERING" || type == "BUILD" || type == "BURN_FOREST" ||
+      type == "CLEAR_FOREST" || type == "GROW_FOREST" || type == "DESTROY";
+}
+
+bool macro_exp_is_diplomacy_type(const std::string& type) {
+  return type == "BUILD_EMBASSY" || type == "PROPOSE_PEACE" || type == "ACCEPT_PEACE" ||
+      type == "PROPOSE_TREATY" || type == "ACCEPT_TREATY" || type == "CANCEL_TREATY" ||
+      type == "SEND_STARS";
+}
+
+bool macro_exp_belongs_to_stage(const NativeAction& action, MacroExpStage stage) {
+  const std::string& type = action.type;
+  switch (stage) {
+    case MacroExpStage::Forced:
+      return macro_exp_is_forced_type(type);
+    case MacroExpStage::Tactical:
+      return macro_exp_is_tactical_type(type);
+    case MacroExpStage::Research:
+      return type == "RESEARCH_TECH";
+    case MacroExpStage::City:
+      return type == "SPAWN";
+    case MacroExpStage::ResourceBuild:
+      return macro_exp_is_resource_build_type(type);
+    case MacroExpStage::Road:
+      return type == "BUILD_ROAD";
+    case MacroExpStage::Diplomacy:
+      return macro_exp_is_diplomacy_type(type);
+    case MacroExpStage::Cleanup:
+      return !macro_exp_is_forced_type(type) && !macro_exp_is_tactical_type(type) && type != "RESEARCH_TECH" &&
+          type != "SPAWN" && !macro_exp_is_resource_build_type(type) && type != "BUILD_ROAD" &&
+          !macro_exp_is_diplomacy_type(type) && type != "END_TURN";
+    case MacroExpStage::EndTurn:
+      return type == "END_TURN";
+  }
+  return false;
+}
+
+MacroExpKind macro_exp_kind_for_action(const NativeAction& action, MacroExpStage stage) {
+  if (stage == MacroExpStage::Forced) return MacroExpKind::ForcedLevelUp;
+  if (stage == MacroExpStage::Tactical) return MacroExpKind::Unit;
+  if (stage == MacroExpStage::Research) return MacroExpKind::Research;
+  if (stage == MacroExpStage::City) return MacroExpKind::City;
+  if (stage == MacroExpStage::Road) return MacroExpKind::Road;
+  if (stage == MacroExpStage::Diplomacy) return MacroExpKind::Diplomacy;
+  if (stage == MacroExpStage::EndTurn) return MacroExpKind::EndTurn;
+  if (action.type == "BUILD") return MacroExpKind::Build;
+  if (action.type == "RESOURCE_GATHERING") return MacroExpKind::Resource;
+  return MacroExpKind::Build;
+}
+
+int macro_exp_actor_id_for_action(const NativeAction& action, MacroExpStage stage) {
+  if (stage == MacroExpStage::Tactical || action.unit_id > 0) return action.unit_id;
+  if (stage == MacroExpStage::City || stage == MacroExpStage::ResourceBuild || action.city_id > 0) {
+    return action.city_id;
+  }
+  return action.tribe_id;
+}
+
+std::string macro_exp_factor_key_for_action(const NativeAction& action, MacroExpStage stage, const NativeGameState& state) {
+  std::ostringstream out;
+  switch (stage) {
+    case MacroExpStage::Forced:
+      out << "forced:" << action.type << ":" << macro_exp_actor_id_for_action(action, stage);
+      break;
+    case MacroExpStage::Tactical:
+      out << "unit:" << action.unit_id;
+      break;
+    case MacroExpStage::Research:
+      out << "research:" << state.active_player_id;
+      break;
+    case MacroExpStage::City:
+      out << "city:" << action.city_id;
+      break;
+    case MacroExpStage::ResourceBuild:
+      out << "resource_build:" << action.city_id;
+      break;
+    case MacroExpStage::Road:
+      out << "road:" << state.active_player_id;
+      break;
+    case MacroExpStage::Diplomacy:
+      out << "diplomacy:" << state.active_player_id;
+      break;
+    case MacroExpStage::Cleanup:
+      out << "cleanup:" << action.type << ":" << macro_exp_actor_id_for_action(action, stage);
+      break;
+    case MacroExpStage::EndTurn:
+      out << "end_turn:" << state.active_player_id;
+      break;
+  }
+  return out.str();
+}
+
+int macro_exp_cap_for_stage(MacroExpStage stage, const TurnMacroExpConfig& config) {
+  switch (stage) {
+    case MacroExpStage::Tactical: return config.max_unit_choices;
+    case MacroExpStage::City: return config.max_city_choices;
+    case MacroExpStage::ResourceBuild: return config.max_resource_choices;
+    case MacroExpStage::Road: return config.max_road_choices;
+    default: return config.max_choices_per_factor;
+  }
+}
+
+double macro_exp_choice_score(
+    const MacroExpChoiceStats& stats,
+    double prior,
+    int total_samples,
+    double c,
+    double prior_weight,
+    double player_sign) {
+  const double q = stats.visits > 0 ? stats.value_sum_root / static_cast<double>(stats.visits) : 0.0;
+  const double u = c * std::sqrt(std::log(1.0 + static_cast<double>(total_samples)) / (1.0 + stats.visits));
+  return player_sign * q + u + prior_weight * prior;
+}
+
+void macro_exp_record_choice(MacroExpTurnPlan& plan, const MacroExpChoice& choice) {
+  MacroExpTurnPlanChoice selected;
+  selected.choice_key = choice.choice_key;
+  selected.macro_exp_action_signature = choice.macro_exp_action_signature;
+  selected.stage = choice.stage;
+  selected.kind = choice.kind;
+  plan.choices.push_back(std::move(selected));
+}
+
+void macro_exp_record_execution(MacroExpTurnPlan& plan, const NativeAction& action) {
+  const std::string signature = macro_exp_action_signature(action);
+  plan.executed_macro_exp_action_signatures.push_back(signature);
+  plan.executed_action_ids.push_back(action.id);
+  if (plan.first_action_id.empty()) {
+    plan.first_action_id = action.id;
+    plan.first_macro_exp_action_signature = signature;
+  }
+}
+
+std::vector<MacroExpStage> macro_exp_stage_order_for_state(const NativeGameState& state) {
+  if (state.leveling_up) {
+    return {MacroExpStage::Forced};
+  }
+  return {
+      MacroExpStage::Forced,
+      MacroExpStage::Tactical,
+      MacroExpStage::Research,
+      MacroExpStage::City,
+      MacroExpStage::ResourceBuild,
+      MacroExpStage::Road,
+      MacroExpStage::Diplomacy,
+      MacroExpStage::Cleanup,
+      MacroExpStage::EndTurn,
+  };
+}
+
+}  // namespace
+
+struct TurnMacroExpMCTS::TurnEdge {
+  MacroExpTurnPlan plan;
+  int child_node_id = -1;
+  int visits = 0;
+  double value_sum_root = 0.0;
+  double prior = 0.0;
+};
+
+struct TurnMacroExpMCTS::TurnNode {
+  int state_index = -1;
+  bool terminal = false;
+  double value_estimate_root = 0.0;
+  int visits = 0;
+  std::vector<TurnEdge> edges;
+  MacroExpStats macro_exp;
+};
+
+std::string macro_exp_action_signature(const NativeAction& action) {
+  std::ostringstream out;
+  out << action.type;
+  if (action.unit_id > 0) out << ":u=" << action.unit_id;
+  if (action.city_id > 0) out << ":c=" << action.city_id;
+  if (action.tribe_id >= 0) out << ":p=" << action.tribe_id;
+  if (action.target_unit_id > 0) out << ":tu=" << action.target_unit_id;
+  if (action.target_city_id > 0) out << ":tc=" << action.target_city_id;
+  if (action.target_player_id >= 0) out << ":tp=" << action.target_player_id;
+  if (action.has_xy) out << ":x=" << action.x << ":y=" << action.y;
+  if (!action.unit_type.empty()) out << ":unit=" << action.unit_type;
+  if (!action.building_type.empty()) out << ":building=" << action.building_type;
+  if (!action.resource_type.empty()) out << ":resource=" << action.resource_type;
+  if (!action.capture_type.empty()) out << ":capture=" << action.capture_type;
+  if (!action.bonus.empty()) out << ":bonus=" << action.bonus;
+  if (!action.tech.empty()) out << ":tech=" << action.tech;
+  return out.str();
+}
+
+int macro_exp_find_legal_action_by_signature(
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions,
+    const std::string& signature) {
+  if (signature.empty()) return -1;
+  for (int action_index : state.legal_action_indexes) {
+    if (action_index < 0 || action_index >= static_cast<int>(actions.size())) continue;
+    if (macro_exp_action_signature(actions[action_index]) == signature) return action_index;
+  }
+  return -1;
+}
+
+bool macro_exp_is_end_turn_signature(const std::string& signature) {
+  return signature == "END_TURN" || signature.rfind("END_TURN:", 0) == 0;
+}
+
+std::vector<MacroExpFactor> macro_exp_build_factors_for_stage(
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions,
+    MacroExpStage stage,
+    const TurnMacroExpConfig& config) {
+  StaticEvaluation eval = evaluate_static_state(state, actions);
+  std::unordered_map<int, double> prior_by_global_index;
+  for (size_t local = 0; local < state.legal_action_indexes.size() && local < eval.priors.size(); ++local) {
+    prior_by_global_index[state.legal_action_indexes[local]] = eval.priors[local];
+  }
+
+  std::unordered_map<std::string, size_t> factor_offsets;
+  std::vector<MacroExpFactor> factors;
+  for (int global_index : state.legal_action_indexes) {
+    if (global_index < 0 || global_index >= static_cast<int>(actions.size())) continue;
+    const NativeAction& action = actions[global_index];
+    if (!macro_exp_belongs_to_stage(action, stage)) continue;
+
+    const std::string factor_key = macro_exp_factor_key_for_action(action, stage, state);
+    auto offset_it = factor_offsets.find(factor_key);
+    if (offset_it == factor_offsets.end()) {
+      offset_it = factor_offsets.emplace(factor_key, factors.size()).first;
+      MacroExpFactor factor;
+      factor.factor_key = factor_key;
+      factor.stage = stage;
+      factor.kind = macro_exp_kind_for_action(action, stage);
+      factors.push_back(std::move(factor));
+    }
+
+    MacroExpChoice choice;
+    choice.macro_exp_action_signature = macro_exp_action_signature(action);
+    choice.choice_key = std::string(macro_exp_stage_name(stage)) + "|" + factor_key + "|" + choice.macro_exp_action_signature;
+    choice.initial_action_index = global_index;
+    choice.prior = prior_by_global_index.count(global_index) ? prior_by_global_index[global_index] : 0.0;
+    choice.stage = stage;
+    choice.kind = macro_exp_kind_for_action(action, stage);
+    choice.actor_id = macro_exp_actor_id_for_action(action, stage);
+    factors[offset_it->second].choices.push_back(std::move(choice));
+  }
+
+  const bool optional = stage != MacroExpStage::Forced && stage != MacroExpStage::EndTurn;
+  for (MacroExpFactor& factor : factors) {
+    std::sort(factor.choices.begin(), factor.choices.end(), [](const MacroExpChoice& left, const MacroExpChoice& right) {
+      return left.prior > right.prior;
+    });
+    const int executable_cap = std::max(1, macro_exp_cap_for_stage(stage, config));
+    if (static_cast<int>(factor.choices.size()) > executable_cap) {
+      factor.choices.resize(executable_cap);
+    }
+    if (optional) {
+      MacroExpChoice none;
+      none.choice_key = std::string(macro_exp_stage_name(stage)) + "|" + factor.factor_key + "|none";
+      none.prior = 0.05;
+      none.stage = stage;
+      none.kind = factor.kind;
+      factor.choices.push_back(std::move(none));
+    }
+    double total = 0.0;
+    for (const MacroExpChoice& choice : factor.choices) total += std::max(0.0, choice.prior);
+    if (total <= 0.0) {
+      const double uniform = factor.choices.empty() ? 0.0 : 1.0 / static_cast<double>(factor.choices.size());
+      for (MacroExpChoice& choice : factor.choices) choice.prior = uniform;
+    } else {
+      for (MacroExpChoice& choice : factor.choices) choice.prior = std::max(0.0, choice.prior) / total;
+    }
+  }
+  return factors;
+}
+
+struct MacroExpInnerActionCandidate {
+  int global_action_index = -1;
+  int visits = 0;
+  double q_root = 0.0;
+  double prior = 0.0;
+  double score = 0.0;
+};
+
+class MacroExpInnerPrimitiveMCTS {
+ public:
+  MacroExpInnerPrimitiveMCTS(
+      NativeGameState root_state,
+      std::vector<NativeAction>& actions,
+      int root_player_id,
+      int owner_player_id,
+      int max_actions,
+      double c_puct) :
+      actions_(actions),
+      root_player_id_(root_player_id),
+      owner_player_id_(owner_player_id),
+      max_actions_(max_actions),
+      c_puct_(c_puct) {
+    make_node(std::move(root_state));
+  }
+
+  void run(int simulations) {
+    for (int sim = 0; sim < simulations; ++sim) {
+      run_one();
+    }
+  }
+
+  std::vector<MacroExpInnerActionCandidate> root_candidates() const {
+    std::vector<MacroExpInnerActionCandidate> out;
+    if (nodes_.empty()) return out;
+    const InnerNode& root = nodes_[0];
+    const NativeGameState& root_state = states_[root.state_index];
+    const double sign = owner_sign();
+    out.reserve(root_state.legal_action_indexes.size());
+    for (size_t local = 0; local < root_state.legal_action_indexes.size(); ++local) {
+      const int visits = root.visits[local];
+      const double q = visits > 0
+          ? root.value_sums_root[local] / static_cast<double>(visits)
+          : root.value_estimate_root;
+      const double prior = local < root.priors.size() ? root.priors[local] : 0.0;
+      MacroExpInnerActionCandidate candidate;
+      candidate.global_action_index = root_state.legal_action_indexes[local];
+      candidate.visits = visits;
+      candidate.q_root = q;
+      candidate.prior = prior;
+      candidate.score = sign * q + 0.05 * prior + 0.002 * std::log1p(static_cast<double>(visits));
+      out.push_back(candidate);
+    }
+    std::sort(out.begin(), out.end(), [](const MacroExpInnerActionCandidate& left, const MacroExpInnerActionCandidate& right) {
+      if (left.score != right.score) return left.score > right.score;
+      if (left.visits != right.visits) return left.visits > right.visits;
+      return left.prior > right.prior;
+    });
+    return out;
+  }
+
+  int expanded_nodes() const {
+    return std::max(0, static_cast<int>(nodes_.size()) - 1);
+  }
+
+ private:
+  struct InnerNode {
+    int state_index = -1;
+    bool terminal = false;
+    double value_estimate_root = 0.0;
+    int total_visits = 0;
+    std::vector<double> priors;
+    std::vector<int> visits;
+    std::vector<double> value_sums_root;
+    std::vector<int> child_node_ids;
+  };
+
+  std::vector<NativeAction>& actions_;
+  std::vector<NativeGameState> states_;
+  std::vector<InnerNode> nodes_;
+  int root_player_id_ = 0;
+  int owner_player_id_ = 0;
+  int max_actions_ = 512;
+  double c_puct_ = 1.5;
+
+  double owner_sign() const {
+    return owner_player_id_ == root_player_id_ ? 1.0 : -1.0;
+  }
+
+  double evaluate_root(const NativeGameState& state) const {
+    if (state.terminal) {
+      return state.terminal_value_known ? state.terminal_value : 0.0;
+    }
+    StaticEvaluation eval = evaluate_static_state(state, actions_);
+    return value_to_root_perspective(eval.value, root_player_id_, state.active_player_id);
+  }
+
+  int make_node(NativeGameState state) {
+    const int state_index = static_cast<int>(states_.size());
+    const bool terminal = state.terminal || state.legal_action_indexes.empty();
+    StaticEvaluation eval;
+    if (terminal) {
+      eval.value = state.terminal_value_known ? state.terminal_value : 0.0;
+    } else {
+      eval = evaluate_static_state(state, actions_);
+    }
+    const double value_root = terminal && state.terminal_value_known
+        ? state.terminal_value
+        : value_to_root_perspective(eval.value, root_player_id_, state.active_player_id);
+    const size_t action_count = state.legal_action_indexes.size();
+    states_.push_back(std::move(state));
+    InnerNode node;
+    node.state_index = state_index;
+    node.terminal = terminal;
+    node.value_estimate_root = value_root;
+    node.priors.assign(action_count, action_count > 0 ? 1.0 / static_cast<double>(action_count) : 0.0);
+    for (size_t i = 0; i < action_count && i < eval.priors.size(); ++i) {
+      node.priors[i] = std::max(0.0, eval.priors[i]);
+    }
+    const double prior_total = std::accumulate(node.priors.begin(), node.priors.end(), 0.0);
+    if (prior_total > 0.0) {
+      for (double& prior : node.priors) prior /= prior_total;
+    }
+    node.visits.assign(action_count, 0);
+    node.value_sums_root.assign(action_count, 0.0);
+    node.child_node_ids.assign(action_count, -1);
+    const int node_id = static_cast<int>(nodes_.size());
+    nodes_.push_back(std::move(node));
+    return node_id;
+  }
+
+  int select_action(const InnerNode& node, const NativeGameState& state) const {
+    const double sign = owner_sign();
+    const double sqrt_total = std::sqrt(1.0 + static_cast<double>(std::max(1, node.total_visits)));
+    double best_score = -std::numeric_limits<double>::infinity();
+    int best = 0;
+    for (int local = 0; local < static_cast<int>(state.legal_action_indexes.size()); ++local) {
+      const int visits = node.visits[local];
+      const double q = visits > 0 ? node.value_sums_root[local] / static_cast<double>(visits) : node.value_estimate_root;
+      const double u = c_puct_ * node.priors[local] * sqrt_total / (1.0 + static_cast<double>(visits));
+      const double score = sign * q + u;
+      if (score > best_score) {
+        best_score = score;
+        best = local;
+      }
+    }
+    return best;
+  }
+
+  void run_one() {
+    if (nodes_.empty()) return;
+    std::vector<int> path_nodes;
+    std::vector<int> path_actions;
+    path_nodes.reserve(32);
+    path_actions.reserve(32);
+    int node_id = 0;
+    double leaf_value_root = nodes_[0].value_estimate_root;
+
+    for (int depth = 0; depth < 64; ++depth) {
+      InnerNode& node = nodes_[node_id];
+      const NativeGameState& state = states_[node.state_index];
+      if (node.terminal || state.terminal || state.legal_action_indexes.empty()) {
+        leaf_value_root = evaluate_root(state);
+        break;
+      }
+      const int local_action = select_action(node, state);
+      path_nodes.push_back(node_id);
+      path_actions.push_back(local_action);
+      if (node.child_node_ids[local_action] < 0) {
+        NativeGameState child = apply_action_strict(
+            state,
+            actions_,
+            state.legal_action_indexes[local_action],
+            max_actions_);
+        leaf_value_root = evaluate_root(child);
+        const int child_id = make_node(std::move(child));
+        nodes_[node_id].child_node_ids[local_action] = child_id;
+        break;
+      }
+      node_id = node.child_node_ids[local_action];
+    }
+
+    for (size_t i = 0; i < path_nodes.size() && i < path_actions.size(); ++i) {
+      InnerNode& node = nodes_[path_nodes[i]];
+      const int action = path_actions[i];
+      node.total_visits += 1;
+      node.visits[action] += 1;
+      node.value_sums_root[action] += leaf_value_root;
+    }
+  }
+};
+
+TurnMacroExpMCTS::TurnMacroExpMCTS(
+    const py::dict& root_payload,
+    const TurnMacroExpConfig& config,
+    uint64_t seed) :
+    config_(config),
+    rng_(seed) {
+  NativeRoot root = parse_root_payload(root_payload, config_.max_actions);
+  actions_ = std::move(root.actions);
+  root_player_id_ = root.state.root_player_id;
+  root.state.terminal = root.state.terminal || root.state.legal_action_indexes.empty();
+  make_turn_node(std::move(root.state));
+}
+
+int TurnMacroExpMCTS::make_turn_node(NativeGameState state) {
+  const int state_index = static_cast<int>(states_.size());
+  const bool terminal = state.terminal || state.legal_action_indexes.empty();
+  states_.push_back(std::move(state));
+  TurnNode node;
+  node.state_index = state_index;
+  node.terminal = terminal;
+  node.value_estimate_root = evaluate_state_root_perspective(states_[state_index]);
+  const int node_id = static_cast<int>(nodes_.size());
+  nodes_.push_back(std::move(node));
+  return node_id;
+}
+
+double TurnMacroExpMCTS::evaluate_state_root_perspective(const NativeGameState& state) {
+  if (state.terminal) {
+    return state.terminal_value_known ? state.terminal_value : 0.0;
+  }
+  const auto started = Clock::now();
+  StaticEvaluation eval = evaluate_static_state(state, actions_);
+  if (config_.profile_json) {
+    static_eval_ms_ += std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+  }
+  return value_to_root_perspective(eval.value, root_player_id_, state.active_player_id);
+}
+
+double TurnMacroExpMCTS::player_sign_for_state(const NativeGameState& state) const {
+  if (config_.opponent_mode == TurnMacroExpOpponentMode::RootMax) return 1.0;
+  if (config_.opponent_mode == TurnMacroExpOpponentMode::ActiveSelfish) {
+    return state.active_player_id == root_player_id_ ? 1.0 : -1.0;
+  }
+  return state.active_player_id == root_player_id_ ? 1.0 : -1.0;
+}
+
+int TurnMacroExpMCTS::progressive_edge_limit(const TurnNode& node) const {
+  const int limit = config_.progressive_base +
+      static_cast<int>(config_.progressive_scale * std::sqrt(std::max(1, node.visits)));
+  return std::min(config_.max_new_edges_per_node, std::max(1, limit));
+}
+
+int TurnMacroExpMCTS::select_existing_turn_edge(const TurnNode& node) const {
+  if (node.edges.empty()) return -1;
+  const NativeGameState& state = states_[node.state_index];
+  const double player_sign = player_sign_for_state(state);
+  const double log_n = std::log(1.0 + static_cast<double>(std::max(1, node.visits)));
+  double best_score = -std::numeric_limits<double>::infinity();
+  int best = 0;
+  for (int i = 0; i < static_cast<int>(node.edges.size()); ++i) {
+    const TurnEdge& edge = node.edges[i];
+    const double q = edge.visits > 0 ? edge.value_sum_root / static_cast<double>(edge.visits) : 0.0;
+    const double u = config_.outer_c * std::sqrt(log_n / (1.0 + edge.visits));
+    const double score = player_sign * q + u + 0.10 * edge.prior;
+    if (score > best_score) {
+      best_score = score;
+      best = i;
+    }
+  }
+  return best;
+}
+
+TurnMacroExpMCTS::TurnEdge TurnMacroExpMCTS::sample_new_turn_edge(int node_id) {
+  std::vector<TurnEdge> edges = generate_turn_edges(node_id, 1);
+  return edges.empty() ? TurnEdge() : std::move(edges.front());
+}
+
+std::vector<TurnMacroExpMCTS::TurnEdge> TurnMacroExpMCTS::generate_turn_edges(int node_id, int max_edges) {
+  TurnNode& node = nodes_[node_id];
+  const NativeGameState root_state = states_[node.state_index];
+  const int starting_player = root_state.active_player_id;
+  std::unordered_set<std::string> used_first_action_signatures;
+  for (const TurnEdge& edge : node.edges) {
+    if (!edge.plan.first_macro_exp_action_signature.empty()) {
+      used_first_action_signatures.insert(edge.plan.first_macro_exp_action_signature);
+    }
+  }
+  std::vector<TurnEdge> out;
+  if (max_edges <= 0 || root_state.terminal || root_state.legal_action_indexes.empty()) return out;
+
+  const auto inner_started = Clock::now();
+  MacroExpInnerPrimitiveMCTS inner(
+      root_state,
+      actions_,
+      root_player_id_,
+      starting_player,
+      config_.max_actions,
+      config_.inner_c_puct);
+  const int sims = std::max(1, config_.inner_simulations);
+  inner.run(sims);
+  if (config_.profile_json) {
+    inner_search_ms_ += std::chrono::duration<double, std::milli>(Clock::now() - inner_started).count();
+  }
+  inner_searches_ += 1;
+  inner_simulations_executed_ += sims;
+  inner_nodes_expanded_ += inner.expanded_nodes();
+
+  std::vector<MacroExpInnerActionCandidate> candidates = inner.root_candidates();
+  if (candidates.empty()) return out;
+
+  auto static_best_action = [&](const NativeGameState& state) -> std::pair<int, double> {
+    if (state.legal_action_indexes.empty()) return {-1, 0.0};
+    const double sign = player_sign_for_state(state);
+    int best_action = -1;
+    double best_score = -std::numeric_limits<double>::infinity();
+    double best_prior = 0.0;
+    StaticEvaluation eval = evaluate_static_state(state, actions_);
+    for (size_t local = 0; local < state.legal_action_indexes.size(); ++local) {
+      const int action_index = state.legal_action_indexes[local];
+      if (action_index < 0 || action_index >= static_cast<int>(actions_.size())) continue;
+      const double prior = local < eval.priors.size() ? eval.priors[local] : 0.0;
+      const NativeGameState child = apply_action_strict(state, actions_, action_index, config_.max_actions);
+      const double value = child.terminal
+          ? (child.terminal_value_known ? child.terminal_value : 0.0)
+          : value_to_root_perspective(evaluate_static_state(child, actions_).value, root_player_id_, child.active_player_id);
+      const double score = sign * value + 0.05 * prior;
+      if (score > best_score) {
+        best_score = score;
+        best_action = action_index;
+        best_prior = prior;
+      }
+    }
+    return {best_action, best_prior};
+  };
+
+  auto record_selected_action = [&](MacroExpTurnPlan& plan, const NativeGameState& before, int action_index, double prior) {
+    const NativeAction& action = actions_[action_index];
+    MacroExpChoice choice;
+    choice.choice_key = std::string("inner_mcts|") + macro_exp_action_signature(action);
+    choice.macro_exp_action_signature = macro_exp_action_signature(action);
+    choice.initial_action_index = action_index;
+    choice.prior = prior;
+    choice.stage = action.type == "END_TURN" ? MacroExpStage::EndTurn : MacroExpStage::Cleanup;
+    choice.kind = action.type == "END_TURN" ? MacroExpKind::EndTurn : MacroExpKind::Build;
+    macro_exp_record_choice(plan, choice);
+    macro_exp_record_execution(plan, action);
+    if (plan.first_action_root_index < 0) {
+      for (size_t local = 0; local < root_state.legal_action_indexes.size(); ++local) {
+        if (root_state.legal_action_indexes[local] == action_index) {
+          plan.first_action_root_index = static_cast<int>(local);
+          break;
+        }
+      }
+    }
+    (void)before;
+  };
+
+  for (const MacroExpInnerActionCandidate& candidate : candidates) {
+    if (static_cast<int>(out.size()) >= max_edges) break;
+    if (candidate.global_action_index < 0 || candidate.global_action_index >= static_cast<int>(actions_.size())) continue;
+    const std::string first_signature = macro_exp_action_signature(actions_[candidate.global_action_index]);
+    if (used_first_action_signatures.count(first_signature)) continue;
+    used_first_action_signatures.insert(first_signature);
+
+    NativeGameState current = root_state;
+    MacroExpTurnPlan plan;
+    double prior_sum = 0.0;
+    int prior_count = 0;
+
+    record_selected_action(plan, current, candidate.global_action_index, candidate.prior);
+    prior_sum += std::max(0.0, candidate.prior);
+    prior_count += 1;
+    const auto first_apply_started = Clock::now();
+    current = apply_action_strict(current, actions_, candidate.global_action_index, config_.max_actions);
+    if (config_.profile_json) {
+      apply_action_ms_ += std::chrono::duration<double, std::milli>(Clock::now() - first_apply_started).count();
+    }
+    plan.primitives_executed += 1;
+    primitive_actions_executed_ += 1;
+    if (macro_exp_is_end_turn_signature(first_signature) || current.active_player_id != starting_player) {
+      plan.reached_turn_boundary = true;
+    }
+
+    while (!current.terminal && current.active_player_id == starting_player && !plan.reached_turn_boundary &&
+           plan.primitives_executed < config_.max_primitives_per_turn) {
+      const auto [action_index, prior] = static_best_action(current);
+      if (action_index < 0) break;
+      const std::string signature = macro_exp_action_signature(actions_[action_index]);
+      record_selected_action(plan, current, action_index, prior);
+      prior_sum += std::max(0.0, prior);
+      prior_count += 1;
+      const auto apply_started = Clock::now();
+      current = apply_action_strict(current, actions_, action_index, config_.max_actions);
+      if (config_.profile_json) {
+        apply_action_ms_ += std::chrono::duration<double, std::milli>(Clock::now() - apply_started).count();
+      }
+      plan.primitives_executed += 1;
+      primitive_actions_executed_ += 1;
+      if (macro_exp_is_end_turn_signature(signature) || current.active_player_id != starting_player) {
+        plan.reached_turn_boundary = true;
+        break;
+      }
+    }
+
+    if (!current.terminal && current.active_player_id == starting_player && !plan.reached_turn_boundary) {
+      const int end_index = macro_exp_find_legal_action_by_signature(current, actions_, "END_TURN:p=" + std::to_string(current.active_player_id));
+      const int fallback_end_index = end_index >= 0 ? end_index : macro_exp_find_legal_action_by_signature(current, actions_, "END_TURN");
+      if (fallback_end_index >= 0) {
+        record_selected_action(plan, current, fallback_end_index, 0.0);
+        prior_count += 1;
+        const auto apply_started = Clock::now();
+        current = apply_action_strict(current, actions_, fallback_end_index, config_.max_actions);
+        if (config_.profile_json) {
+          apply_action_ms_ += std::chrono::duration<double, std::milli>(Clock::now() - apply_started).count();
+        }
+        plan.primitives_executed += 1;
+        primitive_actions_executed_ += 1;
+        plan.reached_turn_boundary = true;
+      }
+    }
+
+    plan.result_state = std::move(current);
+    plan.terminal = plan.result_state.terminal;
+    plan.value_root = evaluate_state_root_perspective(plan.result_state);
+    max_primitives_per_turn_sample_ = std::max(max_primitives_per_turn_sample_, plan.primitives_executed);
+    node.macro_exp.samples += 1;
+
+    TurnEdge edge;
+    edge.plan = std::move(plan);
+    edge.prior = prior_count > 0 ? prior_sum / static_cast<double>(prior_count) : 0.0;
+    out.push_back(std::move(edge));
+  }
+  return out;
+}
+
+void TurnMacroExpMCTS::run(int simulations) {
+  if (nodes_.empty()) return;
+  const auto started = Clock::now();
+  for (int sim = 0; sim < simulations; ++sim) {
+    std::vector<int> path_node_ids;
+    std::vector<int> path_edge_ids;
+    int node_id = 0;
+    int sim_turn_depth = 0;
+    double leaf_value_root = nodes_[0].value_estimate_root;
+
+    for (;;) {
+      TurnNode& node = nodes_[node_id];
+      const NativeGameState& state = states_[node.state_index];
+      if (node.terminal || state.terminal) {
+        leaf_value_root = evaluate_state_root_perspective(state);
+        break;
+      }
+
+      const int allowed_edges = progressive_edge_limit(node);
+      if (static_cast<int>(node.edges.size()) < allowed_edges) {
+        const int available_slots = std::max(1, allowed_edges - static_cast<int>(node.edges.size()));
+        std::vector<TurnEdge> new_edges = generate_turn_edges(node_id, available_slots);
+        if (new_edges.empty()) {
+          break;
+        }
+        const int edge_id = static_cast<int>(node.edges.size());
+        for (TurnEdge& edge : new_edges) {
+          node.edges.push_back(std::move(edge));
+        }
+        path_node_ids.push_back(node_id);
+        path_edge_ids.push_back(edge_id);
+        sim_turn_depth += 1;
+        leaf_value_root = node.edges[edge_id].plan.value_root;
+        if (!node.edges[edge_id].plan.terminal &&
+            node.edges[edge_id].plan.result_state.active_player_id != state.active_player_id) {
+          NativeGameState child_state = node.edges[edge_id].plan.result_state;
+          const int child_node_id = make_turn_node(std::move(child_state));
+          nodes_[node_id].edges[edge_id].child_node_id = child_node_id;
+        }
+        break;
+      }
+
+      const int edge_id = select_existing_turn_edge(node);
+      if (edge_id < 0) break;
+      path_node_ids.push_back(node_id);
+      path_edge_ids.push_back(edge_id);
+      sim_turn_depth += 1;
+      TurnEdge& edge = node.edges[edge_id];
+      if (edge.child_node_id < 0) {
+        leaf_value_root = edge.plan.value_root;
+        break;
+      }
+      node_id = edge.child_node_id;
+    }
+
+    const auto backup_started = Clock::now();
+    backup_turn_path(path_node_ids, path_edge_ids, leaf_value_root);
+    turn_depth_sum_ += sim_turn_depth;
+    max_turn_depth_reached_ = std::max(max_turn_depth_reached_, sim_turn_depth);
+    if (config_.profile_json) {
+      backup_ms_ += std::chrono::duration<double, std::milli>(Clock::now() - backup_started).count();
+    }
+  }
+  search_loop_ms_ += std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+}
+
+void TurnMacroExpMCTS::backup_turn_path(
+    const std::vector<int>& node_ids,
+    const std::vector<int>& edge_ids,
+    double value_root) {
+  for (size_t i = 0; i < node_ids.size() && i < edge_ids.size(); ++i) {
+    TurnNode& node = nodes_[node_ids[i]];
+    TurnEdge& edge = node.edges[edge_ids[i]];
+    node.visits += 1;
+    edge.visits += 1;
+    edge.value_sum_root += value_root;
+  }
+}
+
+py::dict TurnMacroExpMCTS::result_py(double temperature, bool sample_action) {
+  py::dict response;
+  py::list ranked;
+  if (nodes_.empty()) {
+    response["actionId"] = py::none();
+    response["rankedActionIds"] = ranked;
+    return response;
+  }
+  const TurnNode& root = nodes_[0];
+  const NativeGameState& root_state = states_[root.state_index];
+  std::unordered_map<std::string, int> visits_by_id;
+  std::unordered_map<std::string, double> value_by_id;
+  for (const TurnEdge& edge : root.edges) {
+    if (edge.plan.first_action_id.empty()) continue;
+    visits_by_id[edge.plan.first_action_id] += edge.visits;
+    value_by_id[edge.plan.first_action_id] += edge.value_sum_root;
+  }
+
+  std::vector<std::string> ids;
+  ids.reserve(visits_by_id.size());
+  for (const auto& item : visits_by_id) ids.push_back(item.first);
+  std::sort(ids.begin(), ids.end(), [&](const std::string& left, const std::string& right) {
+    const int lv = visits_by_id[left];
+    const int rv = visits_by_id[right];
+    if (lv != rv) return lv > rv;
+    const double lq = lv > 0 ? value_by_id[left] / static_cast<double>(lv) : 0.0;
+    const double rq = rv > 0 ? value_by_id[right] / static_cast<double>(rv) : 0.0;
+    return lq > rq;
+  });
+
+  std::unordered_set<std::string> legal_root_ids;
+  for (int action_index : root_state.legal_action_indexes) {
+    if (action_index >= 0 && action_index < static_cast<int>(actions_.size())) {
+      legal_root_ids.insert(actions_[action_index].id);
+    }
+  }
+
+  std::string selected_id;
+  if (!ids.empty() && sample_action && temperature > 1e-9) {
+    std::vector<double> weights;
+    std::vector<std::string> legal_ids;
+    for (const std::string& id : ids) {
+      if (!legal_root_ids.count(id)) continue;
+      legal_ids.push_back(id);
+      weights.push_back(std::pow(std::max(0, visits_by_id[id]), 1.0 / std::max(1e-6, temperature)));
+    }
+    if (!legal_ids.empty()) {
+      std::discrete_distribution<int> dist(weights.begin(), weights.end());
+      selected_id = legal_ids[dist(rng_)];
+    }
+  }
+  if (selected_id.empty()) {
+    for (const std::string& id : ids) {
+      if (legal_root_ids.count(id)) {
+        selected_id = id;
+        break;
+      }
+    }
+  }
+
+  std::unordered_set<std::string> seen;
+  for (const std::string& id : ids) {
+    if (legal_root_ids.count(id) && seen.insert(id).second) ranked.append(id);
+  }
+  for (int action_index : root_state.legal_action_indexes) {
+    if (action_index < 0 || action_index >= static_cast<int>(actions_.size())) continue;
+    const std::string& id = actions_[action_index].id;
+    if (seen.insert(id).second) ranked.append(id);
+    if (selected_id.empty()) selected_id = id;
+  }
+
+  response["actionId"] = selected_id.empty() ? py::none() : py::str(selected_id);
+  response["rankedActionIds"] = ranked;
+  if (config_.profile_json) {
+    response["_profile"] = profile_py();
+  }
+  return response;
+}
+
+py::dict TurnMacroExpMCTS::profile_py() const {
+  py::dict profile;
+  int edge_count = 0;
+  int macro_exp_samples = 0;
+  for (const TurnNode& node : nodes_) {
+    edge_count += static_cast<int>(node.edges.size());
+    macro_exp_samples += node.macro_exp.samples;
+  }
+  py::dict root_first_action_visits;
+  if (!nodes_.empty()) {
+    for (const TurnEdge& edge : nodes_[0].edges) {
+      if (edge.plan.first_action_id.empty()) continue;
+      int current = 0;
+      if (root_first_action_visits.contains(edge.plan.first_action_id)) {
+        current = py::cast<int>(root_first_action_visits[edge.plan.first_action_id]);
+      }
+      root_first_action_visits[edge.plan.first_action_id] = current + edge.visits;
+    }
+  }
+  py::dict timing;
+  timing["search_loop_ms"] = search_loop_ms_;
+  timing["inner_search_ms"] = inner_search_ms_;
+  timing["apply_action_ms"] = apply_action_ms_;
+  timing["static_eval_ms"] = static_eval_ms_;
+  timing["backup_ms"] = backup_ms_;
+
+  profile["search_mode"] = py::str("turn-macro-exp");
+  profile["elapsed_sec"] = search_loop_ms_ / 1000.0;
+  profile["outer_simulations"] = nodes_.empty() ? 0 : nodes_[0].visits;
+  profile["simulations"] = nodes_.empty() ? 0 : nodes_[0].visits;
+  profile["selected_paths"] = nodes_.empty() ? 0 : nodes_[0].visits;
+  profile["completed_paths"] = nodes_.empty() ? 0 : nodes_[0].visits;
+  profile["turn_nodes"] = static_cast<int>(nodes_.size());
+  profile["turn_edges"] = edge_count;
+  profile["expanded_nodes"] = static_cast<int>(nodes_.size());
+  profile["node_count"] = static_cast<int>(nodes_.size());
+  profile["depth_sum"] = turn_depth_sum_;
+  profile["max_depth"] = max_turn_depth_reached_;
+  profile["turn_depth_sum"] = turn_depth_sum_;
+  profile["max_turn_depth"] = max_turn_depth_reached_;
+  profile["avg_turn_depth"] = nodes_.empty() || nodes_[0].visits <= 0
+      ? 0.0
+      : static_cast<double>(turn_depth_sum_) / static_cast<double>(nodes_[0].visits);
+  profile["root_turn_edges"] = nodes_.empty() ? 0 : static_cast<int>(nodes_[0].edges.size());
+  profile["macro_exp_samples"] = macro_exp_samples;
+  profile["inner_searches"] = inner_searches_;
+  profile["inner_simulations"] = inner_simulations_executed_;
+  profile["inner_nodes_expanded"] = inner_nodes_expanded_;
+  profile["inner_simulations_per_search"] = inner_searches_ > 0
+      ? static_cast<double>(inner_simulations_executed_) / static_cast<double>(inner_searches_)
+      : 0.0;
+  profile["primitive_actions_executed"] = primitive_actions_executed_;
+  profile["avg_primitives_per_turn_sample"] = macro_exp_samples > 0
+      ? static_cast<double>(primitive_actions_executed_) / static_cast<double>(macro_exp_samples)
+      : 0.0;
+  profile["max_primitives_per_turn_sample"] = max_primitives_per_turn_sample_;
+  profile["fallback_used"] = false;
+  profile["root_first_action_visits"] = root_first_action_visits;
+  profile["timing_ms"] = timing;
+  return profile;
+}
+
+int TurnMacroExpMCTS::root_edge_count() const {
+  return nodes_.empty() ? 0 : static_cast<int>(nodes_[0].edges.size());
+}
+
+}  // namespace tribes::native
