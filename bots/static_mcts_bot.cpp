@@ -17,7 +17,6 @@
 #define TRIBES_NATIVE_MCTS_STANDALONE
 #endif
 #include "../py/search/native/src/mcts.cpp"
-#include "../py/search/native/src/turn_cmab.cpp"
 #include "../py/search/native/src/turn_macro_exp.cpp"
 
 using json = nlohmann::json;
@@ -45,8 +44,6 @@ struct CliConfig {
   std::string static_eval_variant = "baseline";
   std::string static_eval_weight_overrides;
   std::string search_mode = "primitive";
-  tribes::native::TurnCmabConfig turn_cmab;
-  bool turn_cmab_simulations_set = false;
   tribes::native::TurnMacroExpConfig turn_macro;
   bool turn_macro_simulations_set = false;
 };
@@ -1099,41 +1096,6 @@ json choose_action_with_native_tree(const json& message, const CliConfig& cfg, s
   return response;
 }
 
-json choose_action_with_turn_cmab_tree(const json& message, const CliConfig& cfg, std::mt19937_64& rng) {
-  tribes::native::TurnCmabConfig cmab_cfg = cfg.turn_cmab;
-  cmab_cfg.max_actions = cfg.max_actions;
-  cmab_cfg.simulations = cfg.turn_cmab_simulations_set ? cfg.turn_cmab.simulations : cfg.simulations;
-  cmab_cfg.deterministic = !cfg.sample_action;
-  cmab_cfg.profile_json = cfg.profile_json;
-
-  py::dict root_payload = py::reinterpret_borrow<py::dict>(py_from_json(message));
-  tribes::native::TurnCmabMCTS tree(root_payload, cmab_cfg, cfg.seed);
-  if (cfg.wall_clock_seconds > 0.0) {
-    const auto started = std::chrono::steady_clock::now();
-    const int chunk = std::max(1, cfg.batch_size);
-    while (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() < cfg.wall_clock_seconds) {
-      tree.run(chunk);
-    }
-  } else {
-    tree.run(cmab_cfg.simulations);
-  }
-  json response = json_from_py(tree.result_py(cfg.root_temperature, cfg.sample_action));
-  std::vector<json> root_actions = json_actions(message, cfg.max_actions);
-  if (!response.contains("actionId") || response["actionId"].is_null() || tree.root_edge_count() <= 0) {
-    json fallback = choose_action_with_native_tree(message, cfg, rng);
-    if (cfg.profile_json) {
-      json profile = response.value("_profile", json::object());
-      if (!profile.is_object()) profile = json::object();
-      profile["search_mode"] = "turn-cmab";
-      profile["fallback_used"] = true;
-      fallback["_profile"] = profile;
-    }
-    return fallback;
-  }
-  attach_wire_indexes(response, root_actions);
-  return response;
-}
-
 json choose_action_with_turn_macro_exp_tree(const json& message, const CliConfig& cfg, std::mt19937_64& rng) {
   tribes::native::TurnMacroExpConfig macro_cfg = cfg.turn_macro;
   macro_cfg.max_actions = cfg.max_actions;
@@ -1141,19 +1103,39 @@ json choose_action_with_turn_macro_exp_tree(const json& message, const CliConfig
   macro_cfg.deterministic = !cfg.sample_action;
   macro_cfg.profile_json = cfg.profile_json;
 
+  std::vector<json> root_actions = json_actions(message, cfg.max_actions);
+  if (root_actions.empty()) {
+    return json{{"actionId", nullptr}, {"rankedActionIds", json::array()}, {"i", nullptr}, {"rankedActionIndexes", json::array()}};
+  }
+  if (root_actions.size() == 1) {
+    const std::string id = cli_action_id(root_actions.front(), 0);
+    json response{{"actionId", id}, {"rankedActionIds", json::array({id})}};
+    if (cfg.profile_json) {
+      response["_profile"] = {
+          {"search_mode", "turn-macro-exp"},
+          {"fallback_used", false},
+          {"single_legal_action_fast_path", true},
+          {"simulations", 0},
+          {"selected_paths", 0},
+          {"completed_paths", 0},
+          {"outer_simulations", 0},
+      };
+    }
+    attach_wire_indexes(response, root_actions);
+    return response;
+  }
+
   py::dict root_payload = py::reinterpret_borrow<py::dict>(py_from_json(message));
   tribes::native::TurnMacroExpMCTS tree(root_payload, macro_cfg, cfg.seed);
   if (cfg.wall_clock_seconds > 0.0) {
     const auto started = std::chrono::steady_clock::now();
-    const int chunk = std::max(1, cfg.batch_size);
     while (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() < cfg.wall_clock_seconds) {
-      tree.run(chunk);
+      tree.run(1);
     }
   } else {
     tree.run(macro_cfg.simulations);
   }
   json response = json_from_py(tree.result_py(cfg.root_temperature, cfg.sample_action));
-  std::vector<json> root_actions = json_actions(message, cfg.max_actions);
   if (!response.contains("actionId") || response["actionId"].is_null() || tree.root_edge_count() <= 0) {
     json fallback = choose_action_with_native_tree(message, cfg, rng);
     if (cfg.profile_json) {
@@ -1179,7 +1161,7 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
     if (arg == "--simulations") cfg.simulations = std::stoi(next());
     else if (arg == "--search-mode") {
       cfg.search_mode = next();
-      if (cfg.search_mode != "primitive" && cfg.search_mode != "turn-cmab" && cfg.search_mode != "turn-macro-exp") {
+      if (cfg.search_mode != "primitive" && cfg.search_mode != "turn-macro-exp") {
         throw std::runtime_error("Unsupported --search-mode: " + cfg.search_mode);
       }
     }
@@ -1213,32 +1195,6 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
       } else {
         throw std::runtime_error("Unsupported --native-opponent-mode: " + mode);
       }
-    } else if (arg == "--turn-cmab-simulations") {
-      cfg.turn_cmab.simulations = std::stoi(next());
-      cfg.turn_cmab_simulations_set = true;
-    } else if (arg == "--turn-cmab-max-turn-depth") {
-      cfg.turn_cmab.max_turn_depth = std::stoi(next());
-    } else if (arg == "--turn-cmab-max-primitives-per-turn") {
-      cfg.turn_cmab.max_primitives_per_turn = std::stoi(next());
-    } else if (arg == "--turn-cmab-max-edges-per-node") {
-      cfg.turn_cmab.max_new_edges_per_node = std::stoi(next());
-    } else if (arg == "--turn-cmab-outer-c") {
-      cfg.turn_cmab.outer_c = std::stod(next());
-    } else if (arg == "--turn-cmab-c") {
-      cfg.turn_cmab.cmab_c = std::stod(next());
-    } else if (arg == "--turn-cmab-prior-weight") {
-      cfg.turn_cmab.cmab_prior_weight = std::stod(next());
-    } else if (arg == "--turn-cmab-temperature") {
-      cfg.turn_cmab.cmab_temperature = std::stod(next());
-    } else if (arg == "--turn-cmab-opponent-mode") {
-      const std::string mode = next();
-      if (mode == "root-max") {
-        cfg.turn_cmab.opponent_mode = tribes::native::TurnCmabOpponentMode::RootMax;
-      } else if (mode == "root-adversarial") {
-        cfg.turn_cmab.opponent_mode = tribes::native::TurnCmabOpponentMode::RootAdversarial;
-      } else {
-        throw std::runtime_error("Unsupported --turn-cmab-opponent-mode: " + mode);
-      }
     } else if (arg == "--turn-macro-simulations") {
       cfg.turn_macro.simulations = std::stoi(next());
       cfg.turn_macro_simulations_set = true;
@@ -1258,6 +1214,8 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
       cfg.turn_macro.inner_simulations = std::stoi(next());
     } else if (arg == "--turn-macro-inner-c-puct") {
       cfg.turn_macro.inner_c_puct = std::stod(next());
+    } else if (arg == "--turn-macro-greedy-eval-top-k") {
+      cfg.turn_macro.greedy_eval_top_k = std::stoi(next());
     } else if (arg == "--turn-macro-opponent-mode") {
       const std::string mode = next();
       if (mode == "root-max") {
@@ -1269,7 +1227,7 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
       }
     } else if (arg == "--help" || arg == "-h") {
       std::cout
-          << "static_mcts_bot.exe [--search-mode primitive|turn-cmab|turn-macro-exp] [--simulations N]\n"
+          << "static_mcts_bot.exe [--search-mode primitive|turn-macro-exp] [--simulations N]\n"
           << "  [--wall-clock-per-action-seconds SEC]\n"
           << "  [--top-k-actions N] [--max-actions N] [--search-batch-size N] [--c-puct X]\n"
           << "  [--static-eval-variant baseline|experimental|experimental-2|experimental-training] [--static-eval-weight-overrides SPEC]\n"
@@ -1277,14 +1235,11 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
           << "  [--deterministic] [--reuse-tree]\n"
           << "  [--profile-json] [--profile-timing] [--seed N]\n"
           << "  [--native-opponent-mode root-adversarial|root-max]\n"
-          << "  [--turn-cmab-simulations N] [--turn-cmab-max-turn-depth N]\n"
-          << "  [--turn-cmab-max-primitives-per-turn N] [--turn-cmab-max-edges-per-node N]\n"
-          << "  [--turn-cmab-outer-c X] [--turn-cmab-c X] [--turn-cmab-prior-weight X]\n"
-          << "  [--turn-cmab-temperature X] [--turn-cmab-opponent-mode root-max|root-adversarial]\n"
           << "  [--turn-macro-simulations N]\n"
           << "  [--turn-macro-max-primitives-per-turn N] [--turn-macro-max-edges-per-node N]\n"
           << "  [--turn-macro-outer-c X] [--turn-macro-c X] [--turn-macro-prior-weight X]\n"
           << "  [--turn-macro-temperature X] [--turn-macro-inner-simulations N] [--turn-macro-inner-c-puct X]\n"
+          << "  [--turn-macro-greedy-eval-top-k N]\n"
           << "  [--turn-macro-opponent-mode root-max|root-adversarial]\n";
       std::exit(0);
     }
@@ -1325,9 +1280,7 @@ int main(int argc, char** argv) {
       const std::string type = message.value("type", "");
       if (type == "action_request") {
         message = normalize_cli_message(message);
-        if (cfg.search_mode == "turn-cmab") {
-          std::cout << choose_action_with_turn_cmab_tree(message, cfg, rng).dump() << std::endl;
-        } else if (cfg.search_mode == "turn-macro-exp") {
+        if (cfg.search_mode == "turn-macro-exp") {
           std::cout << choose_action_with_turn_macro_exp_tree(message, cfg, rng).dump() << std::endl;
         } else {
           std::cout << choose_action_with_native_tree(message, cfg, rng).dump() << std::endl;

@@ -60,24 +60,16 @@ _MCTS_SEARCH_DEFAULTS: dict[str, Any] = {
     "native_static_search_mode": "primitive",
     "native_static_exe": "out/native/static_mcts_bot.exe",
     "build_native_static_exe": True,
-    "turn_cmab_simulations": None,
-    "turn_cmab_max_turn_depth": 3,
-    "turn_cmab_max_primitives_per_turn": 32,
-    "turn_cmab_max_edges_per_node": 64,
-    "turn_cmab_outer_c": 1.4,
-    "turn_cmab_c": 1.0,
-    "turn_cmab_prior_weight": 0.35,
-    "turn_cmab_temperature": 1.0,
-    "turn_cmab_opponent_mode": "root-adversarial",
     "turn_macro_simulations": None,
-    "turn_macro_max_primitives_per_turn": 32,
+    "turn_macro_max_primitives_per_turn": 4,
     "turn_macro_max_edges_per_node": 4,
     "turn_macro_outer_c": 1.4,
     "turn_macro_c": 1.0,
     "turn_macro_prior_weight": 0.35,
     "turn_macro_temperature": 1.0,
-    "turn_macro_inner_simulations": 1024,
+    "turn_macro_inner_simulations": 128,
     "turn_macro_inner_c_puct": 1.5,
+    "turn_macro_greedy_eval_top_k": 1,
     "turn_macro_opponent_mode": "root-adversarial",
     "device": None,
     "simulations": None,
@@ -183,6 +175,11 @@ class SearchStats:
     inner_searches: int = 0
     inner_simulations: int = 0
     inner_nodes_expanded: int = 0
+    static_eval_calls: int = 0
+    greedy_static_calls: int = 0
+    greedy_static_candidates_considered: int = 0
+    greedy_static_child_evals: int = 0
+    greedy_static_child_eval_skips: int = 0
 
     @property
     def average_depth(self) -> float:
@@ -1552,10 +1549,8 @@ def _load_mcts_search_config(path: Path = DEFAULT_MCTS_SEARCH_CONFIG) -> argpars
         raise ValueError("mcts_search config evaluator must be one of: nn, static_exe, bot")
     if str(values.get("static_eval_variant")) not in {"baseline", "experimental", "experimental-2", "experimental-training"}:
         raise ValueError("mcts_search config static_eval_variant must be one of: baseline, experimental, experimental-2, experimental-training")
-    if str(values.get("native_static_search_mode")) not in {"primitive", "turn-cmab", "turn-macro-exp"}:
-        raise ValueError("mcts_search config native_static_search_mode must be one of: primitive, turn-cmab, turn-macro-exp")
-    if str(values.get("turn_cmab_opponent_mode")) not in {"root-max", "root-adversarial"}:
-        raise ValueError("mcts_search config turn_cmab_opponent_mode must be one of: root-max, root-adversarial")
+    if str(values.get("native_static_search_mode")) not in {"primitive", "turn-macro-exp"}:
+        raise ValueError("mcts_search config native_static_search_mode must be one of: primitive, turn-macro-exp")
     if str(values.get("turn_macro_opponent_mode")) not in {"root-max", "root-adversarial"}:
         raise ValueError("mcts_search config turn_macro_opponent_mode must be one of: root-max, root-adversarial")
     for key in _PATH_CONFIG_KEYS:
@@ -1581,6 +1576,11 @@ def _add_stats(total: SearchStats, item: SearchStats) -> None:
     total.inner_searches += int(item.inner_searches)
     total.inner_simulations += int(item.inner_simulations)
     total.inner_nodes_expanded += int(item.inner_nodes_expanded)
+    total.static_eval_calls += int(item.static_eval_calls)
+    total.greedy_static_calls += int(item.greedy_static_calls)
+    total.greedy_static_candidates_considered += int(item.greedy_static_candidates_considered)
+    total.greedy_static_child_evals += int(item.greedy_static_child_evals)
+    total.greedy_static_child_eval_skips += int(item.greedy_static_child_eval_skips)
 
 
 def _payload_actions(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2018,30 +2018,6 @@ def _native_static_exe_command(exe: Path, cfg: HybridAgentConfig, args: argparse
     ]
     if using_walltime:
         command.extend(["--wall-clock-per-action-seconds", str(max(0.0, float(args.wall_time_sec)))])
-    if str(getattr(args, "native_static_search_mode", "primitive")) == "turn-cmab":
-        turn_cmab_simulations = getattr(args, "turn_cmab_simulations", None)
-        if turn_cmab_simulations is not None:
-            command.extend(["--turn-cmab-simulations", str(int(turn_cmab_simulations))])
-        command.extend(
-            [
-                "--turn-cmab-max-turn-depth",
-                str(int(getattr(args, "turn_cmab_max_turn_depth", 3))),
-                "--turn-cmab-max-primitives-per-turn",
-                str(int(getattr(args, "turn_cmab_max_primitives_per_turn", 32))),
-                "--turn-cmab-max-edges-per-node",
-                str(int(getattr(args, "turn_cmab_max_edges_per_node", 64))),
-                "--turn-cmab-outer-c",
-                str(float(getattr(args, "turn_cmab_outer_c", 1.4))),
-                "--turn-cmab-c",
-                str(float(getattr(args, "turn_cmab_c", 1.0))),
-                "--turn-cmab-prior-weight",
-                str(float(getattr(args, "turn_cmab_prior_weight", 0.35))),
-                "--turn-cmab-temperature",
-                str(float(getattr(args, "turn_cmab_temperature", 1.0))),
-                "--turn-cmab-opponent-mode",
-                str(getattr(args, "turn_cmab_opponent_mode", "root-adversarial")),
-            ]
-        )
     if str(getattr(args, "native_static_search_mode", "primitive")) == "turn-macro-exp":
         turn_macro_simulations = getattr(args, "turn_macro_simulations", None)
         if turn_macro_simulations is not None:
@@ -2049,7 +2025,7 @@ def _native_static_exe_command(exe: Path, cfg: HybridAgentConfig, args: argparse
         command.extend(
             [
                 "--turn-macro-max-primitives-per-turn",
-                str(int(getattr(args, "turn_macro_max_primitives_per_turn", 32))),
+                str(int(getattr(args, "turn_macro_max_primitives_per_turn", 4))),
                 "--turn-macro-max-edges-per-node",
                 str(int(getattr(args, "turn_macro_max_edges_per_node", 4))),
                 "--turn-macro-outer-c",
@@ -2061,9 +2037,11 @@ def _native_static_exe_command(exe: Path, cfg: HybridAgentConfig, args: argparse
                 "--turn-macro-temperature",
                 str(float(getattr(args, "turn_macro_temperature", 1.0))),
                 "--turn-macro-inner-simulations",
-                str(int(getattr(args, "turn_macro_inner_simulations", 1024))),
+                str(int(getattr(args, "turn_macro_inner_simulations", 128))),
                 "--turn-macro-inner-c-puct",
                 str(float(getattr(args, "turn_macro_inner_c_puct", 1.5))),
+                "--turn-macro-greedy-eval-top-k",
+                str(int(getattr(args, "turn_macro_greedy_eval_top_k", 1))),
                 "--turn-macro-opponent-mode",
                 str(getattr(args, "turn_macro_opponent_mode", "root-adversarial")),
             ]
@@ -2086,8 +2064,6 @@ _NATIVE_STATIC_EXE_TIMING_ROWS = {
     "transition_regenerate_actions_ms": ("native_static_exe.transition.regenerate_actions", "paths"),
     "transition_hidden_enemy_ms": ("native_static_exe.transition.hidden_enemy", "paths"),
     "search_loop_ms": ("native_static_exe.search_loop", "paths"),
-    "factor_build_ms": ("native_static_exe.turn_cmab.factor_build", "paths"),
-    "cmab_select_ms": ("native_static_exe.turn_cmab.select", "paths"),
     "macro_exp_factor_build_ms": ("native_static_exe.turn_macro.factor_build", "paths"),
     "macro_exp_select_ms": ("native_static_exe.turn_macro.select", "paths"),
     "inner_search_ms": ("native_static_exe.turn_macro.inner_search", "paths"),
@@ -2142,8 +2118,6 @@ def _add_native_static_exe_timing_rows(
             "static_eval_ms",
             "node_allocation_ms",
             "backup_ms",
-            "cmab_select_ms",
-            "factor_build_ms",
             "macro_exp_select_ms",
             "macro_exp_factor_build_ms",
             "inner_search_ms",
@@ -2240,6 +2214,11 @@ def _run_static_exe_profile_case(
             stats.inner_searches += int(profile.get("inner_searches", 0) or 0)
             stats.inner_simulations += int(profile.get("inner_simulations", 0) or 0)
             stats.inner_nodes_expanded += int(profile.get("inner_nodes_expanded", 0) or 0)
+            stats.static_eval_calls += int(profile.get("static_eval_calls", 0) or 0)
+            stats.greedy_static_calls += int(profile.get("greedy_static_calls", 0) or 0)
+            stats.greedy_static_candidates_considered += int(profile.get("greedy_static_candidates_considered", 0) or 0)
+            stats.greedy_static_child_evals += int(profile.get("greedy_static_child_evals", 0) or 0)
+            stats.greedy_static_child_eval_skips += int(profile.get("greedy_static_child_eval_skips", 0) or 0)
             selected_paths = int(profile.get("selected_paths", 0) or profile.get("completed_paths", 0) or 0)
             search_elapsed_sec = float(profile.get("elapsed_sec", elapsed) or 0.0)
             collector.add("native_static_exe.search", search_elapsed_sec, items=selected_paths)
@@ -2546,7 +2525,7 @@ def main() -> int:
                 args=args,
                 device=device,
                 using_walltime=using_walltime,
-                wall_time_sec=float(args.wall_time_sec),
+                wall_time_sec=float(args.wall_time_sec) if using_walltime else 0.0,
                 repeats=max(1, int(args.repeats)),
             )
             _add_stats(total_stats, run_stats)
@@ -2575,6 +2554,12 @@ def main() -> int:
                 "inner_simulations_per_sec": _format_rate(run_stats.inner_simulations, elapsed),
                 "inner_nodes_expanded": run_stats.inner_nodes_expanded,
                 "inner_nodes_expanded_per_sec": _format_rate(run_stats.inner_nodes_expanded, elapsed),
+                "static_eval_calls": run_stats.static_eval_calls,
+                "static_eval_calls_per_sec": _format_rate(run_stats.static_eval_calls, elapsed),
+                "greedy_static_calls": run_stats.greedy_static_calls,
+                "greedy_static_candidates_considered": run_stats.greedy_static_candidates_considered,
+                "greedy_static_child_evals": run_stats.greedy_static_child_evals,
+                "greedy_static_child_eval_skips": run_stats.greedy_static_child_eval_skips,
                 "eval_batches": run_stats.eval_batches,
                 "eval_positions": run_stats.eval_positions,
                 "eval_cache_hits": run_stats.eval_cache_hits,
@@ -2636,6 +2621,10 @@ def main() -> int:
                 ("inner_simulations", "inner_sims"),
                 ("inner_simulations_per_sec", "inner_sims/s"),
                 ("inner_nodes_expanded", "inner_nodes"),
+                ("static_eval_calls", "static_evals"),
+                ("static_eval_calls_per_sec", "static_evals/s"),
+                ("greedy_static_child_evals", "greedy_evals"),
+                ("greedy_static_child_eval_skips", "greedy_skips"),
             ],
         )
     )
@@ -2655,6 +2644,10 @@ def main() -> int:
             f"inner_simulations_per_sec={_format_rate(total_stats.inner_simulations, elapsed)} "
             f"inner_searches={total_stats.inner_searches} "
             f"inner_nodes_expanded={total_stats.inner_nodes_expanded} "
+            f"static_eval_calls={total_stats.static_eval_calls} "
+            f"static_eval_calls_per_sec={_format_rate(total_stats.static_eval_calls, elapsed)} "
+            f"greedy_static_child_evals={total_stats.greedy_static_child_evals} "
+            f"greedy_static_child_eval_skips={total_stats.greedy_static_child_eval_skips} "
             f"eval_batches={total_stats.eval_batches} "
             f"eval_positions={total_stats.eval_positions} "
             f"eval_cache_hits={total_stats.eval_cache_hits}"
@@ -2827,6 +2820,15 @@ def main() -> int:
                 "inner_simulations_per_sec": _format_rate(total_stats.inner_simulations, elapsed),
                 "inner_nodes_expanded": total_stats.inner_nodes_expanded,
                 "inner_nodes_expanded_per_sec": _format_rate(total_stats.inner_nodes_expanded, elapsed),
+                "static_eval_calls": total_stats.static_eval_calls,
+                "static_eval_calls_per_sec": _format_rate(total_stats.static_eval_calls, elapsed),
+                "greedy_static_calls": total_stats.greedy_static_calls,
+                "greedy_static_candidates_considered": total_stats.greedy_static_candidates_considered,
+                "greedy_static_child_evals": total_stats.greedy_static_child_evals,
+                "greedy_static_child_eval_skips": total_stats.greedy_static_child_eval_skips,
+                "greedy_static_child_eval_skip_rate_pct": (
+                    f"{(100.0 * total_stats.greedy_static_child_eval_skips / max(1, total_stats.greedy_static_child_evals + total_stats.greedy_static_child_eval_skips)):.3f}"
+                ),
                 "eval_batches": total_stats.eval_batches,
                 "eval_positions": total_stats.eval_positions,
                 "eval_cache_hits": total_stats.eval_cache_hits,

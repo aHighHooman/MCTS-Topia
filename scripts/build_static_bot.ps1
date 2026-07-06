@@ -58,18 +58,31 @@ $includeFlags = @(
 $commonCompileFlags = @(
     "/nologo",
     "/EHsc",
-    "/O2",
-    "/Ob3",
-    "/Oi",
-    "/Ot",
-    "/fp:fast",
-    "/arch:AVX2",
-    "/GL",
-    "/DNDEBUG",
     "/DTRIBES_NATIVE_MCTS_STANDALONE",
     "/std:c++17",
     "/bigobj"
 ) + $includeFlags
+
+$linkFlags = @()
+if ($Configuration -ieq "Asan") {
+    $commonCompileFlags += @(
+        "/Od",
+        "/Zi",
+        "/fsanitize=address"
+    )
+} else {
+    $commonCompileFlags += @(
+        "/O2",
+        "/Ob3",
+        "/Oi",
+        "/Ot",
+        "/fp:fast",
+        "/arch:AVX2",
+        "/GL",
+        "/DNDEBUG"
+    )
+    $linkFlags += "/LTCG"
+}
 
 & cl.exe @commonCompileFlags "/Fo$rulesObj" "/c" $rulesSource
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -84,9 +97,10 @@ $compileFlags = @(
     $source,
     $rulesObj,
     $staticEvalObj,
-    "/link",
-    "/LTCG"
+    "/link"
 )
+
+$compileFlags += $linkFlags
 
 & cl.exe @compileFlags
 if ($LASTEXITCODE -ne 0) {

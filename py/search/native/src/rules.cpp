@@ -2979,7 +2979,7 @@ void preserve_hidden_enemy_action_state(
     if (action_index < 0 || action_index >= static_cast<int>(previous_actions.size())) {
       continue;
     }
-    const NativeAction& prior = previous_actions[action_index];
+    const NativeAction prior = previous_actions[action_index];
     const std::string type = canonical_action_type(prior);
     if (type == "BUILD_ROAD" && !has_tech(*next_active_tribe, "ROADS")) {
       next_active_tribe->researched_tech_ids.push_back(tech_id("ROADS"));
@@ -3081,7 +3081,7 @@ void preserve_hidden_enemy_visible_actions(
     if (action_index < 0 || action_index >= static_cast<int>(previous_actions.size())) {
       continue;
     }
-    const NativeAction& prior = previous_actions[action_index];
+    const NativeAction prior = previous_actions[action_index];
     const std::string type = canonical_action_type(prior);
     if (type != "RESEARCH_TECH" && type != "SPAWN") {
       continue;
@@ -6907,7 +6907,7 @@ NativeGameState apply_action_strict(
     throw_transition_error("invalid_action_index:" + std::to_string(global_action_index));
   }
 
-  const NativeAction& applied = actions[global_action_index];
+  const NativeAction applied = actions[global_action_index];
   const std::string type = canonical_action_type(applied);
   if (type == "END_TURN") {
     started_at = TimingClock::now();
@@ -7034,24 +7034,7 @@ NativeGameState apply_action_strict(
   started_at = TimingClock::now();
   if (!try_reuse_legal_actions_after_simple_unit_update(state, next, actions, applied, type, max_actions)) {
     rebuild_state_indexes(next);
-    if (!try_partially_regenerate_actions_after_attack_or_move(
-            state,
-            next,
-            actions,
-            applied,
-            type,
-            max_actions,
-            newly_explored) &&
-        !(type == "RESEARCH_TECH" &&
-            partially_regenerate_research_preserving_unit_actions(
-                state,
-                next,
-                actions,
-                applied,
-                max_actions,
-                newly_explored))) {
-      regenerate_actions(next, actions, max_actions);
-    }
+    regenerate_actions(next, actions, max_actions);
   }
   g_last_transition_timing.regenerate_actions_ms += elapsed_ms(started_at);
   if (type == "ATTACK") {

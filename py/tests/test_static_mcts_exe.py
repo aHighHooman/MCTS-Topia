@@ -418,40 +418,6 @@ def test_static_mcts_exe_accepts_dense_java_protocol() -> None:
     assert response["rankedActionIndexes"][:2] == [0, 1]
 
 
-def test_static_mcts_exe_turn_cmab_returns_legal_root_action() -> None:
-    message = _message_with_capital_capture(second_action={"id": "end", "type": "END_TURN"})
-    message["type"] = "action_request"
-    completed = subprocess.run(
-        [
-            str(_require_exe()),
-            "--search-mode",
-            "turn-cmab",
-            "--simulations",
-            "16",
-            "--turn-cmab-max-turn-depth",
-            "1",
-            "--turn-cmab-max-primitives-per-turn",
-            "8",
-            "--deterministic",
-            "--profile-json",
-            "--seed",
-            "13",
-        ],
-        input=json.dumps(message) + "\n",
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=True,
-    )
-
-    response = json.loads(completed.stdout.strip().splitlines()[-1])
-    legal_ids = {action["id"] for action in message["actions"]}
-
-    assert response["actionId"] in legal_ids
-    assert response["rankedActionIds"][0] in legal_ids
-    assert response["_profile"]["search_mode"] == "turn-cmab"
-
-
 def test_static_mcts_exe_turn_macro_exp_returns_legal_root_action() -> None:
     message = _message_with_capital_capture(second_action={"id": "end", "type": "END_TURN"})
     message["type"] = "action_request"
@@ -482,6 +448,46 @@ def test_static_mcts_exe_turn_macro_exp_returns_legal_root_action() -> None:
     assert response["actionId"] in legal_ids
     assert response["rankedActionIds"][0] in legal_ids
     assert response["_profile"]["search_mode"] == "turn-macro-exp"
+
+
+def test_static_mcts_exe_turn_macro_exp_wall_clock_returns_legal_root_action() -> None:
+    message = _message_with_capital_capture(second_action={"id": "end", "type": "END_TURN"})
+    message["type"] = "action_request"
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode",
+            "turn-macro-exp",
+            "--wall-clock-per-action-seconds",
+            "0.01",
+            "--search-batch-size",
+            "64",
+            "--turn-macro-inner-simulations",
+            "8",
+            "--turn-macro-greedy-eval-top-k",
+            "4",
+            "--turn-macro-max-primitives-per-turn",
+            "8",
+            "--deterministic",
+            "--profile-json",
+            "--seed",
+            "13",
+        ],
+        input=json.dumps(message) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+
+    response = json.loads(completed.stdout.strip().splitlines()[-1])
+    legal_ids = {action["id"] for action in message["actions"]}
+
+    assert response["actionId"] in legal_ids
+    assert response["_profile"]["search_mode"] == "turn-macro-exp"
+    assert int(response["_profile"]["inner_simulations"]) >= 8
+    assert int(response["_profile"]["greedy_static_child_eval_limit"]) == 4
+    assert "greedy_static_child_evals" in response["_profile"]
 
 
 @pytest.mark.parametrize("mode", ["root-adversarial", "root-max"])

@@ -196,7 +196,7 @@ def main() -> int:
     parser.add_argument("--c-puct", type=float, default=1.5)
     parser.add_argument("--native-static-exe", type=Path, default=PROJECT_ROOT / "out" / "native" / "static_mcts_bot.exe")
     parser.add_argument("--build-native-static-exe", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--native-static-search-mode", choices=("primitive", "turn-cmab"), default="primitive")
+    parser.add_argument("--native-static-search-mode", choices=("primitive", "turn-macro-exp"), default="primitive")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     args = load_config_defaults(parser, default_config=DEFAULT_CONFIG)

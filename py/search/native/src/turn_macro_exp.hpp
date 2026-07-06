@@ -29,7 +29,7 @@ enum class TurnMacroExpOpponentMode {
 struct TurnMacroExpConfig {
   int simulations = 256;
   int max_actions = 512;
-  int max_primitives_per_turn = 32;
+  int max_primitives_per_turn = 4;
   int max_new_edges_per_node = 4;
   int progressive_base = 4;
   double progressive_scale = 1.5;
@@ -37,8 +37,9 @@ struct TurnMacroExpConfig {
   double macro_exp_c = 1.0;
   double macro_exp_prior_weight = 0.35;
   double macro_exp_temperature = 1.0;
-  int inner_simulations = 1024;
+  int inner_simulations = 128;
   double inner_c_puct = 1.5;
+  int greedy_eval_top_k = 1;
   int max_choices_per_factor = 12;
   int max_road_choices = 8;
   int max_resource_choices = 12;
@@ -168,11 +169,17 @@ class TurnMacroExpMCTS {
   double apply_action_ms_ = 0.0;
   double static_eval_ms_ = 0.0;
   double backup_ms_ = 0.0;
+  int static_eval_calls_ = 0;
+  int greedy_static_calls_ = 0;
+  int greedy_static_candidates_considered_ = 0;
+  int greedy_static_child_evals_ = 0;
+  int greedy_static_child_eval_skips_ = 0;
   int inner_searches_ = 0;
   int inner_simulations_executed_ = 0;
   int inner_nodes_expanded_ = 0;
 
   int make_turn_node(NativeGameState state);
+  int make_turn_node_with_value(NativeGameState state, double value_estimate_root);
   TurnEdge sample_new_turn_edge(int node_id);
   std::vector<TurnEdge> generate_turn_edges(int node_id, int max_edges);
   int select_existing_turn_edge(const TurnNode& node) const;
