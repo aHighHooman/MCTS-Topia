@@ -53,6 +53,9 @@ struct Args {
   int feature_threads = 0;
   double validation_fraction = 0.2;
   int seed = 0;
+  double action_ranking_weight = 0.25;
+  double action_ranking_temperature = 0.25;
+  int action_ranking_max_negatives = 8;
   std::unordered_map<std::string, double> feature_scales;
   fs::path output_dir = "debug-logs/analysis/static-value-result-tuning";
   std::string run_id;
@@ -69,6 +72,21 @@ struct Example {
   double sample_weight = 1.0;
 };
 
+struct ActionPairExample {
+  double good_fixed_raw = 0.0;
+  std::unordered_map<std::string, double> good_features;
+  double bad_fixed_raw = 0.0;
+  std::unordered_map<std::string, double> bad_features;
+  std::unordered_map<std::string, double> initial_weights;
+  std::string game_key;
+  double sample_weight = 1.0;
+};
+
+struct TrainingData {
+  std::vector<Example> examples;
+  std::vector<ActionPairExample> action_pairs;
+};
+
 struct Metrics {
   double count = 0.0;
   double mse = 0.0;
@@ -83,15 +101,26 @@ struct DenseExample {
   std::vector<double> features;
 };
 
+struct DenseActionPairExample {
+  double good_fixed_raw = 0.0;
+  double bad_fixed_raw = 0.0;
+  double sample_weight = 1.0;
+  std::vector<double> good_features;
+  std::vector<double> bad_features;
+};
+
 struct DenseSplit {
   std::vector<DenseExample> train;
   std::vector<DenseExample> val;
+  std::vector<DenseActionPairExample> action_pair_train;
+  std::vector<DenseActionPairExample> action_pair_val;
   std::vector<std::string> terms;
   std::vector<double> initial;
   std::vector<double> actual_initial;
   std::vector<double> feature_scales;
   std::vector<std::pair<double, double>> bounds;
   double train_weight_sum = 1.0;
+  double action_pair_train_weight_sum = 1.0;
 };
 
 double as_double(const json& value, double fallback = 0.0) {
@@ -251,6 +280,36 @@ std::string game_key_for_row(const json& row) {
   return "payload:" + as_string(row.value("payload_hash", ""));
 }
 
+std::string action_id_for_payload_action(const json& action, size_t index) {
+  if (action.is_object()) {
+    const std::string id = as_string(action.value("id", ""));
+    if (!id.empty()) return id;
+    const int wire_index = as_int(action.value("i", static_cast<int>(index)), static_cast<int>(index));
+    return "A" + std::to_string(wire_index);
+  }
+  return "A" + std::to_string(index);
+}
+
+std::vector<std::string> sampled_negative_action_ids(const json& payload, const std::string& selected, int max_negatives) {
+  std::vector<std::string> candidates;
+  if (!payload.is_object() || !payload.contains("actions") || !payload["actions"].is_array()) return candidates;
+  const json& actions = payload["actions"];
+  for (size_t i = 0; i < actions.size(); ++i) {
+    const std::string id = action_id_for_payload_action(actions[i], i);
+    if (!id.empty() && id != selected) candidates.push_back(id);
+  }
+  if (max_negatives <= 0 || static_cast<int>(candidates.size()) <= max_negatives) return candidates;
+  std::vector<std::string> sampled;
+  sampled.reserve(static_cast<size_t>(max_negatives));
+  for (int i = 0; i < max_negatives; ++i) {
+    const size_t index = static_cast<size_t>((static_cast<long long>(i) * static_cast<long long>(candidates.size())) / max_negatives);
+    sampled.push_back(candidates[std::min(index, candidates.size() - 1)]);
+  }
+  std::sort(sampled.begin(), sampled.end());
+  sampled.erase(std::unique(sampled.begin(), sampled.end()), sampled.end());
+  return sampled;
+}
+
 bool ends_with(const std::string& value, const std::string& suffix) {
   return value.size() >= suffix.size() && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
@@ -355,7 +414,7 @@ std::vector<json> load_record_rows(const std::vector<fs::path>& paths) {
   return rows;
 }
 
-std::vector<Example> build_examples(const std::vector<json>& rows, const Args& args) {
+TrainingData build_examples(const std::vector<json>& rows, const Args& args) {
   std::unordered_set<std::string> whitelist(args.whitelist.begin(), args.whitelist.end());
   set_env_var("TRIBES_STATIC_EVAL_VARIANT", args.static_eval_variant);
   set_env_var("TRIBES_STATIC_EVAL_WEIGHT_OVERRIDES", args.initial_overrides);
@@ -416,7 +475,8 @@ std::vector<Example> build_examples(const std::vector<json>& rows, const Args& a
     if (ok[i]) feature_cache.emplace(payloads[i].first, std::move(computed[i]));
   }
 
-  std::vector<Example> examples;
+  TrainingData data;
+  std::vector<Example>& examples = data.examples;
   examples.reserve(rows.size());
   for (const json& row : rows) {
     if (!row.contains("payload_path")) continue;
@@ -438,7 +498,116 @@ std::vector<Example> build_examples(const std::vector<json>& rows, const Args& a
   std::unordered_map<std::string, int> counts;
   for (const Example& example : examples) counts[example.game_key] += 1;
   for (Example& example : examples) example.sample_weight = 1.0 / std::max(1, counts[example.game_key]);
-  return examples;
+
+  if (args.action_ranking_weight > 0.0 && args.action_ranking_max_negatives != 0) {
+    struct ActionRequest {
+      std::string key;
+      std::string payload_path;
+      std::string action_id;
+    };
+    std::vector<ActionRequest> requests;
+    std::unordered_set<std::string> seen_action_requests;
+    std::vector<std::tuple<std::string, std::string, std::vector<std::string>, std::string>> row_pair_specs;
+    requests.reserve(rows.size());
+    row_pair_specs.reserve(rows.size());
+
+    for (const json& row : rows) {
+      if (terminal_target_for_row(row) <= 0.0) continue;
+      const std::string selected = as_string(row.value("selected_action_id", ""));
+      if (selected.empty()) continue;
+      const std::string payload_path = as_string(row.value("payload_path", ""));
+      if (payload_path.empty()) continue;
+      const std::string payload_key = as_string(row.value("payload_hash", payload_path), payload_path);
+      if (!feature_cache.count(payload_key)) continue;
+      json payload;
+      try {
+        payload = read_json_file(payload_path);
+      } catch (...) {
+        continue;
+      }
+      std::vector<std::string> negatives = sampled_negative_action_ids(payload, selected, args.action_ranking_max_negatives);
+      if (negatives.empty()) continue;
+      std::vector<std::string> ids = negatives;
+      ids.push_back(selected);
+      for (const std::string& action_id : ids) {
+        const std::string key = payload_key + "\n" + action_id;
+        if (seen_action_requests.insert(key).second) requests.push_back(ActionRequest{key, payload_path, action_id});
+      }
+      row_pair_specs.emplace_back(payload_key, selected, std::move(negatives), game_key_for_row(row));
+    }
+
+    std::vector<FeatureTuple> action_computed(requests.size());
+    std::vector<bool> action_ok(requests.size(), false);
+    std::atomic<size_t> next_action_index{0};
+    std::atomic<size_t> action_errors{0};
+    std::string first_action_error;
+    std::mutex action_error_mutex;
+    auto action_worker = [&]() {
+      while (true) {
+        const size_t index = next_action_index.fetch_add(1);
+        if (index >= requests.size()) break;
+        try {
+          json payload = read_json_file(requests[index].payload_path);
+          py::dict py_payload(payload);
+          json out = py::to_json(tribes::native::evaluate_action_breakdown(py_payload, requests[index].action_id, args.max_actions));
+          if (!out.is_object() || !out.contains("value_breakdown") || out["value_breakdown"].is_null()) continue;
+          FeatureTuple aggregate = aggregate_features(out["value_breakdown"], whitelist);
+          if (std::get<1>(aggregate).empty()) continue;
+          action_computed[index] = std::move(aggregate);
+          action_ok[index] = true;
+        } catch (const std::exception& exc) {
+          action_errors.fetch_add(1);
+          std::lock_guard<std::mutex> lock(action_error_mutex);
+          if (first_action_error.empty()) first_action_error = exc.what();
+        }
+      }
+    };
+    workers.clear();
+    workers.reserve(thread_count);
+    for (int i = 0; i < thread_count; ++i) workers.emplace_back(action_worker);
+    for (std::thread& thread : workers) thread.join();
+    if (action_errors.load() > 0) {
+      std::cerr << "warning: skipped " << action_errors.load() << " action-breakdown payloads";
+      if (!first_action_error.empty()) std::cerr << "; first error: " << first_action_error;
+      std::cerr << "\n";
+    }
+    std::unordered_map<std::string, FeatureTuple> action_cache;
+    action_cache.reserve(requests.size());
+    for (size_t i = 0; i < requests.size(); ++i) {
+      if (action_ok[i]) action_cache.emplace(requests[i].key, std::move(action_computed[i]));
+    }
+
+    data.action_pairs.reserve(row_pair_specs.size() * static_cast<size_t>(std::max(1, args.action_ranking_max_negatives)));
+    for (const auto& spec : row_pair_specs) {
+      const std::string& payload_key = std::get<0>(spec);
+      const std::string& selected = std::get<1>(spec);
+      const std::vector<std::string>& negatives = std::get<2>(spec);
+      const std::string& game_key = std::get<3>(spec);
+      auto good_found = action_cache.find(payload_key + "\n" + selected);
+      if (good_found == action_cache.end()) continue;
+      const auto& [good_fixed, good_features, good_initial] = good_found->second;
+      for (const std::string& negative : negatives) {
+        auto bad_found = action_cache.find(payload_key + "\n" + negative);
+        if (bad_found == action_cache.end()) continue;
+        const auto& [bad_fixed, bad_features, bad_initial] = bad_found->second;
+        ActionPairExample pair;
+        pair.good_fixed_raw = good_fixed;
+        pair.good_features = good_features;
+        pair.bad_fixed_raw = bad_fixed;
+        pair.bad_features = bad_features;
+        pair.initial_weights = good_initial;
+        for (const auto& [term, value] : bad_initial) {
+          if (!pair.initial_weights.count(term)) pair.initial_weights[term] = value;
+        }
+        pair.game_key = game_key;
+        data.action_pairs.push_back(std::move(pair));
+      }
+    }
+    std::unordered_map<std::string, int> pair_counts;
+    for (const ActionPairExample& pair : data.action_pairs) pair_counts[pair.game_key] += 1;
+    for (ActionPairExample& pair : data.action_pairs) pair.sample_weight = 1.0 / std::max(1, pair_counts[pair.game_key]);
+  }
+  return data;
 }
 
 std::pair<double, double> bounds_for(double initial, const Args& args) {
@@ -570,10 +739,16 @@ std::string override_string(const std::vector<json>& changes) {
   return out.str();
 }
 
-DenseSplit make_dense_split(const std::vector<Example>& examples, const Args& args) {
+DenseSplit make_dense_split(const TrainingData& data, const Args& args) {
   std::unordered_map<std::string, double> initial_map;
+  const std::vector<Example>& examples = data.examples;
   for (const Example& example : examples) {
     for (const auto& [term, value] : example.initial_weights) {
+      if (!initial_map.count(term)) initial_map[term] = value;
+    }
+  }
+  for (const ActionPairExample& pair : data.action_pairs) {
+    for (const auto& [term, value] : pair.initial_weights) {
       if (!initial_map.count(term)) initial_map[term] = value;
     }
   }
@@ -630,16 +805,67 @@ DenseSplit make_dense_split(const std::vector<Example>& examples, const Args& ar
     }
     (val_keys.count(example.game_key) ? split.val : split.train).push_back(std::move(dense));
   }
+  split.action_pair_train.reserve(data.action_pairs.size());
+  split.action_pair_val.reserve(val_count == 0 ? 0 : data.action_pairs.size());
+  for (const ActionPairExample& pair : data.action_pairs) {
+    DenseActionPairExample dense;
+    dense.good_fixed_raw = pair.good_fixed_raw;
+    dense.bad_fixed_raw = pair.bad_fixed_raw;
+    dense.sample_weight = pair.sample_weight;
+    dense.good_features.assign(split.terms.size(), 0.0);
+    dense.bad_features.assign(split.terms.size(), 0.0);
+    for (const auto& [term, value] : pair.good_features) {
+      auto found = term_index.find(term);
+      if (found != term_index.end()) {
+        const size_t index = found->second;
+        dense.good_features[index] = value * split.feature_scales[index];
+      }
+    }
+    for (const auto& [term, value] : pair.bad_features) {
+      auto found = term_index.find(term);
+      if (found != term_index.end()) {
+        const size_t index = found->second;
+        dense.bad_features[index] = value * split.feature_scales[index];
+      }
+    }
+    (val_keys.count(pair.game_key) ? split.action_pair_val : split.action_pair_train).push_back(std::move(dense));
+  }
   if (split.train.empty() && !split.val.empty()) std::swap(split.train, split.val);
+  if (split.action_pair_train.empty() && !split.action_pair_val.empty()) std::swap(split.action_pair_train, split.action_pair_val);
   split.train_weight_sum = 0.0;
   for (const DenseExample& example : split.train) split.train_weight_sum += example.sample_weight;
   if (split.train_weight_sum <= 0.0) split.train_weight_sum = 1.0;
+  split.action_pair_train_weight_sum = 0.0;
+  for (const DenseActionPairExample& pair : split.action_pair_train) split.action_pair_train_weight_sum += pair.sample_weight;
+  if (split.action_pair_train_weight_sum <= 0.0) split.action_pair_train_weight_sum = 1.0;
   return split;
 }
 
-json optimize(const std::vector<Example>& examples, const Args& args) {
-  if (examples.empty()) throw std::runtime_error("no training examples available");
-  DenseSplit split = make_dense_split(examples, args);
+double raw_for_dense(const std::vector<double>& weights, double fixed_raw, const std::vector<double>& features) {
+  double raw = fixed_raw;
+  const size_t n = std::min(weights.size(), features.size());
+  for (size_t i = 0; i < n; ++i) raw += weights[i] * features[i];
+  return raw;
+}
+
+double action_ranking_loss_for_dense(const std::vector<double>& weights, const std::vector<DenseActionPairExample>& pairs, const Args& args) {
+  if (pairs.empty() || args.action_ranking_weight <= 0.0) return 0.0;
+  double weight_sum = 0.0;
+  double loss = 0.0;
+  const double temperature = std::max(1e-6, args.action_ranking_temperature);
+  for (const DenseActionPairExample& pair : pairs) {
+    const double good_pred = std::tanh(raw_for_dense(weights, pair.good_fixed_raw, pair.good_features) / kValueScale);
+    const double bad_pred = std::tanh(raw_for_dense(weights, pair.bad_fixed_raw, pair.bad_features) / kValueScale);
+    const double z = (good_pred - bad_pred) / temperature;
+    loss += pair.sample_weight * std::log1p(std::exp(-std::max(-60.0, std::min(60.0, z))));
+    weight_sum += pair.sample_weight;
+  }
+  return loss / std::max(1e-12, weight_sum);
+}
+
+json optimize(const TrainingData& data, const Args& args) {
+  if (data.examples.empty()) throw std::runtime_error("no training examples available");
+  DenseSplit split = make_dense_split(data, args);
   std::vector<double> weights = split.initial;
 
   json history = json::array();
@@ -661,6 +887,24 @@ json optimize(const std::vector<Example>& examples, const Args& args) {
       const double scale = 2.0 * example.sample_weight * (pred - example.target) * (1.0 - pred * pred) / kValueScale / split.train_weight_sum;
       for (size_t i = 0; i < weights.size(); ++i) grad[i] += scale * example.features[i];
     }
+    if (args.action_ranking_weight > 0.0 && !split.action_pair_train.empty()) {
+      const double temperature = std::max(1e-6, args.action_ranking_temperature);
+      for (const DenseActionPairExample& pair : split.action_pair_train) {
+        const double good_raw = raw_for_dense(weights, pair.good_fixed_raw, pair.good_features);
+        const double bad_raw = raw_for_dense(weights, pair.bad_fixed_raw, pair.bad_features);
+        const double good_pred = std::tanh(good_raw / kValueScale);
+        const double bad_pred = std::tanh(bad_raw / kValueScale);
+        const double z = (good_pred - bad_pred) / temperature;
+        const double clipped = std::max(-60.0, std::min(60.0, z));
+        const double logistic = 1.0 / (1.0 + std::exp(clipped));
+        const double base = args.action_ranking_weight * pair.sample_weight * logistic / temperature / split.action_pair_train_weight_sum;
+        const double good_scale = -base * (1.0 - good_pred * good_pred) / kValueScale;
+        const double bad_scale = base * (1.0 - bad_pred * bad_pred) / kValueScale;
+        for (size_t i = 0; i < weights.size(); ++i) {
+          grad[i] += good_scale * pair.good_features[i] + bad_scale * pair.bad_features[i];
+        }
+      }
+    }
     for (size_t i = 0; i < weights.size(); ++i) {
       double next = weights[i] - args.learning_rate * grad[i];
       if (!std::isfinite(next)) next = split.initial[i];
@@ -668,7 +912,12 @@ json optimize(const std::vector<Example>& examples, const Args& args) {
       weights[i] = std::min(upper, std::max(lower, next));
     }
     if (step == 0 || step == steps - 1 || (step + 1) % std::max(1, steps / 10) == 0) {
-      history.push_back(json{{"step", step + 1}, {"train", metrics_json(metrics_for_dense(weights, split.train))}, {"validation", metrics_json(metrics_for_dense(weights, split.val))}});
+      history.push_back(json{
+          {"step", step + 1},
+          {"train", metrics_json(metrics_for_dense(weights, split.train))},
+          {"validation", metrics_json(metrics_for_dense(weights, split.val))},
+          {"action_ranking_train_loss", action_ranking_loss_for_dense(weights, split.action_pair_train, args)},
+          {"action_ranking_validation_loss", action_ranking_loss_for_dense(weights, split.action_pair_val, args)}});
     }
   }
 
@@ -707,6 +956,11 @@ json optimize(const std::vector<Example>& examples, const Args& args) {
   out["changed_override_env"] = override_string(changes);
   out["train_metrics"] = metrics_json(metrics_for_dense(weights, split.train));
   out["validation_metrics"] = metrics_json(metrics_for_dense(weights, split.val));
+  out["action_pair_examples"] = split.action_pair_train.size() + split.action_pair_val.size();
+  out["action_pair_train_examples"] = split.action_pair_train.size();
+  out["action_pair_validation_examples"] = split.action_pair_val.size();
+  out["action_ranking_train_loss"] = action_ranking_loss_for_dense(weights, split.action_pair_train, args);
+  out["action_ranking_validation_loss"] = action_ranking_loss_for_dense(weights, split.action_pair_val, args);
   out["history"] = history;
   out["optimizer"] = {
       {"steps", args.steps},
@@ -718,6 +972,9 @@ json optimize(const std::vector<Example>& examples, const Args& args) {
       {"preserve_sign", args.preserve_sign},
       {"feature_threads", args.feature_threads},
       {"validation_fraction", args.validation_fraction},
+      {"action_ranking_weight", args.action_ranking_weight},
+      {"action_ranking_temperature", args.action_ranking_temperature},
+      {"action_ranking_max_negatives", args.action_ranking_max_negatives},
       {"feature_scales", args.feature_scales},
       {"seed", args.seed}};
   return out;
@@ -738,7 +995,7 @@ void write_csv(const fs::path& path, const json& rows) {
 
 void write_metrics_csv(const fs::path& path, const json& history) {
   std::ofstream out(path);
-  out << "step,split,count,mse,mae,sign_accuracy\n";
+  out << "step,split,count,mse,mae,sign_accuracy,action_ranking_train_loss,action_ranking_validation_loss\n";
   for (const json& item : history) {
     for (const std::string split : {"train", "validation"}) {
       const json& m = item[split];
@@ -746,7 +1003,9 @@ void write_metrics_csv(const fs::path& path, const json& history) {
           << m["count"].get<double>() << ","
           << m["mse"].get<double>() << ","
           << m["mae"].get<double>() << ","
-          << m["sign_accuracy"].get<double>() << "\n";
+          << m["sign_accuracy"].get<double>() << ","
+          << item.value("action_ranking_train_loss", 0.0) << ","
+          << item.value("action_ranking_validation_loss", 0.0) << "\n";
     }
   }
 }
@@ -772,6 +1031,9 @@ void apply_config(Args& args, const json& cfg) {
   if (cfg.contains("max_relative_delta")) args.max_relative_delta = as_double(cfg["max_relative_delta"], args.max_relative_delta);
   if (cfg.contains("preserve_sign")) args.preserve_sign = as_bool(cfg["preserve_sign"], args.preserve_sign);
   if (cfg.contains("feature_threads")) args.feature_threads = as_int(cfg["feature_threads"], args.feature_threads);
+  if (cfg.contains("action_ranking_weight")) args.action_ranking_weight = as_double(cfg["action_ranking_weight"], args.action_ranking_weight);
+  if (cfg.contains("action_ranking_temperature")) args.action_ranking_temperature = as_double(cfg["action_ranking_temperature"], args.action_ranking_temperature);
+  if (cfg.contains("action_ranking_max_negatives")) args.action_ranking_max_negatives = as_int(cfg["action_ranking_max_negatives"], args.action_ranking_max_negatives);
   if (cfg.contains("feature_scales") && cfg["feature_scales"].is_object()) {
     for (auto it = cfg["feature_scales"].begin(); it != cfg["feature_scales"].end(); ++it) {
       args.feature_scales[it.key()] = as_double(it.value(), 1.0);
@@ -819,6 +1081,12 @@ Args parse_args(int argc, char** argv) {
       args.preserve_sign = true;
     } else if (arg == "--feature-threads") {
       args.feature_threads = std::stoi(next());
+    } else if (arg == "--action-ranking-weight") {
+      args.action_ranking_weight = std::stod(next());
+    } else if (arg == "--action-ranking-temperature") {
+      args.action_ranking_temperature = std::stod(next());
+    } else if (arg == "--action-ranking-max-negatives") {
+      args.action_ranking_max_negatives = std::stoi(next());
     } else if (arg == "--feature-scale") {
       const std::string raw = next();
       const size_t pos = raw.find('=');
@@ -842,9 +1110,9 @@ int main(int argc, char** argv) {
     std::vector<json> rows = load_record_rows(args.records);
     const auto t_rows = std::chrono::steady_clock::now();
     if (rows.empty()) throw std::runtime_error("no result records found");
-    std::vector<Example> examples = build_examples(rows, args);
+    TrainingData data = build_examples(rows, args);
     const auto t_examples = std::chrono::steady_clock::now();
-    json result = optimize(examples, args);
+    json result = optimize(data, args);
     const auto t_optimize = std::chrono::steady_clock::now();
     auto seconds_between = [](auto start, auto end) {
       return std::chrono::duration<double>(end - start).count();
@@ -855,7 +1123,8 @@ int main(int argc, char** argv) {
         {"optimize_sec", seconds_between(t_examples, t_optimize)},
         {"total_sec", seconds_between(t0, t_optimize)}};
     result["records"] = rows.size();
-    result["examples"] = examples.size();
+    result["examples"] = data.examples.size();
+    result["action_pair_examples"] = data.action_pairs.size();
     result["whitelist"] = args.whitelist;
     result["static_eval_variant"] = args.static_eval_variant;
     result["timings"] = timings;
@@ -864,11 +1133,14 @@ int main(int argc, char** argv) {
     write_metrics_csv(output_dir / "training_metrics.csv", result["history"]);
     json summary = {
         {"records", rows.size()},
-        {"examples", examples.size()},
+        {"examples", data.examples.size()},
+        {"action_pair_examples", data.action_pairs.size()},
         {"changed_override_env", result["changed_override_env"]},
         {"feature_stats", result["feature_stats"]},
         {"train_metrics", result["train_metrics"]},
         {"validation_metrics", result["validation_metrics"]},
+        {"action_ranking_train_loss", result.value("action_ranking_train_loss", 0.0)},
+        {"action_ranking_validation_loss", result.value("action_ranking_validation_loss", 0.0)},
         {"timings", timings}};
     std::ofstream(output_dir / "summary.json") << summary.dump(2) << "\n";
     std::cout << "wrote " << output_dir.string() << "\n";

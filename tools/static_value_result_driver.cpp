@@ -62,6 +62,9 @@ struct Args {
   int max_actions_per_game = 1024;
   int external_action_timeout_ms = 120000;
   int feature_threads = 0;
+  double action_ranking_weight = 0.25;
+  double action_ranking_temperature = 0.25;
+  int action_ranking_max_negatives = 8;
   double learning_rate = 0.05;
   double l2 = 0.01;
   double l1 = 0.0;
@@ -437,6 +440,9 @@ json run_native_fit(const Args& args, const fs::path& output_dir, const std::vec
   cfg["validation_fraction"] = args.validation_fraction;
   cfg["seed"] = args.seed;
   cfg["feature_threads"] = args.feature_threads;
+  cfg["action_ranking_weight"] = args.action_ranking_weight;
+  cfg["action_ranking_temperature"] = args.action_ranking_temperature;
+  cfg["action_ranking_max_negatives"] = args.action_ranking_max_negatives;
   cfg["feature_scales"] = args.feature_scales;
   cfg["output_dir"] = output_dir.parent_path().string();
   cfg["run_id"] = output_dir.filename().string();
@@ -527,6 +533,9 @@ json summary_for_result(const Args& args, const json& result, const json& valida
       {"feature_stats", result.value("feature_stats", json::array())},
       {"train_metrics", result.value("train_metrics", json::object())},
       {"validation_metrics", result.value("validation_metrics", json::object())},
+      {"action_pair_examples", result.value("action_pair_examples", 0)},
+      {"action_ranking_train_loss", result.value("action_ranking_train_loss", 0.0)},
+      {"action_ranking_validation_loss", result.value("action_ranking_validation_loss", 0.0)},
       {"validation", validation},
       {"timings", result.value("timings", json::object())},
       {"native_tuner_exe", repo_path(args.native_tuner_exe).string()},
@@ -613,6 +622,9 @@ json run_training_loop(const Args& args, const fs::path& output_dir) {
         {"merged_override_env", next_overrides},
         {"train_metrics", result.value("train_metrics", json::object())},
         {"validation_metrics", result.value("validation_metrics", json::object())},
+        {"action_pair_examples", result.value("action_pair_examples", 0)},
+        {"action_ranking_train_loss", result.value("action_ranking_train_loss", 0.0)},
+        {"action_ranking_validation_loss", result.value("action_ranking_validation_loss", 0.0)},
         {"validation", validation},
         {"timings", result.value("timings", json::object())},
     });
@@ -693,6 +705,9 @@ void apply_config(Args& args, const json& cfg) {
   if (cfg.contains("max_actions_per_game")) args.max_actions_per_game = as_int(cfg["max_actions_per_game"], args.max_actions_per_game);
   if (cfg.contains("external_action_timeout_ms")) args.external_action_timeout_ms = as_int(cfg["external_action_timeout_ms"], args.external_action_timeout_ms);
   if (cfg.contains("feature_threads")) args.feature_threads = as_int(cfg["feature_threads"], args.feature_threads);
+  if (cfg.contains("action_ranking_weight")) args.action_ranking_weight = as_double(cfg["action_ranking_weight"], args.action_ranking_weight);
+  if (cfg.contains("action_ranking_temperature")) args.action_ranking_temperature = as_double(cfg["action_ranking_temperature"], args.action_ranking_temperature);
+  if (cfg.contains("action_ranking_max_negatives")) args.action_ranking_max_negatives = as_int(cfg["action_ranking_max_negatives"], args.action_ranking_max_negatives);
   if (cfg.contains("feature_scales") && cfg["feature_scales"].is_object()) {
     for (auto it = cfg["feature_scales"].begin(); it != cfg["feature_scales"].end(); ++it) {
       args.feature_scales[it.key()] = as_double(it.value(), 1.0);
@@ -787,6 +802,12 @@ Args parse_args(int argc, char** argv) {
       args.l2 = std::stod(next());
     } else if (arg == "--steps") {
       args.steps = std::stoi(next());
+    } else if (arg == "--action-ranking-weight") {
+      args.action_ranking_weight = std::stod(next());
+    } else if (arg == "--action-ranking-temperature") {
+      args.action_ranking_temperature = std::stod(next());
+    } else if (arg == "--action-ranking-max-negatives") {
+      args.action_ranking_max_negatives = std::stoi(next());
     }
   }
   if (args.run_id.empty()) args.run_id = "native-driver-" + std::to_string(std::time(nullptr));
