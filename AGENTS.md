@@ -38,6 +38,16 @@ Common Java entrypoints:
 & "$env:JAVA_HOME\bin\java.exe" -cp "out;lib/json.jar" Tournament tournament.json
 ```
 
+Head-to-head static bot tournaments:
+
+- Use the Java `Tournament` runner for bot-vs-bot checks, not the profiler or `HeadlessPlay`, because it reports winners, scores, failed matches, and supports `Parallel Games`.
+- Generate a temporary tournament config under `debug-logs/` with `Balance Seats: true`, `Parallel Games: 8`, `Match Retry Limit: 0`, and a high per-participant `External Action Timeout Ms` such as `120000`.
+- For wall-clock comparisons, pass `--wall-clock-per-action-seconds 1` to each `out/native/static_mcts_bot.exe` command instead of fixed `--simulations`; keep `--search-batch-size`, `--top-k-actions`, `--max-actions`, and `--deterministic` explicit.
+- For quick failure scans, use a small deterministic seed range and a short `Turn Limit` such as `8`; larger turn caps can take many minutes even with `Parallel Games: 8` because the game can request many primitive actions per turn.
+- After a run, inspect the tournament summary and external bot stderr logs:
+  - `Get-Content debug-logs\...\summary.log -Tail 120`
+  - `Get-ChildItem debug-logs\...\external_logs -Recurse -Filter *.stderr.log | Where-Object Length -gt 0`
+
 Common Python entrypoints:
 
 ```powershell
