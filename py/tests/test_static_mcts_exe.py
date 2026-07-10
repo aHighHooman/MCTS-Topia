@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from test_mcts import _message_with_capital_capture, _message_with_simple_unit_action_reuse
+from test_mcts import _message_with_capital_capture, _message_with_end_turn, _message_with_simple_unit_action_reuse
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -571,6 +571,38 @@ def test_static_mcts_exe_turn_macro_exp_wall_clock_returns_legal_root_action() -
     assert int(response["_profile"]["inner_simulations"]) >= 8
     assert int(response["_profile"]["greedy_static_child_eval_limit"]) == 4
     assert "greedy_static_child_evals" in response["_profile"]
+
+
+def test_static_mcts_exe_primitive_wall_clock_single_legal_action_fast_path() -> None:
+    message = _message_with_end_turn()
+    message["type"] = "action_request"
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode",
+            "primitive",
+            "--wall-clock-per-action-seconds",
+            "1",
+            "--search-batch-size",
+            "64",
+            "--deterministic",
+            "--profile-json",
+            "--seed",
+            "13",
+        ],
+        input=json.dumps(message) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+
+    response = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert response["actionId"] == "end"
+    assert response["i"] == 0
+    assert response["_profile"]["search_mode"] == "primitive"
+    assert response["_profile"]["single_legal_action_fast_path"] is True
 
 
 @pytest.mark.parametrize("mode", ["root-adversarial", "root-max"])

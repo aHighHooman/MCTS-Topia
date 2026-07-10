@@ -30,7 +30,7 @@ struct TurnMacroExpConfig {
   int max_actions = 512;
   // A non-positive value means no primitive-action limit per macro turn.
   int max_primitives_per_turn = 0;
-  int max_new_edges_per_node = 4;
+  int max_new_edges_per_node = 8;
   int progressive_base = 1;
   double progressive_scale = 1.0;
   double outer_c = 1.4;

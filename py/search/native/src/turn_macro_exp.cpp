@@ -1291,10 +1291,11 @@ py::dict TurnMacroExpMCTS::result_py(double temperature, bool sample_action) {
   std::sort(ids.begin(), ids.end(), [&](const std::string& left, const std::string& right) {
     const int lv = visits_by_id[left];
     const int rv = visits_by_id[right];
-    if (lv != rv) return lv > rv;
     const double lq = lv > 0 ? value_by_id[left] / static_cast<double>(lv) : 0.0;
     const double rq = rv > 0 ? value_by_id[right] / static_cast<double>(rv) : 0.0;
-    return lq > rq;
+    if (lv != rv) return lv > rv;
+    if (lq != rq) return lq > rq;
+    return left < right;
   });
 
   std::unordered_set<std::string> legal_root_ids;

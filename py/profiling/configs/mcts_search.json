@@ -27,7 +27,7 @@
   "build_native_static_exe": true,
   "turn_macro_simulations": null,
   "turn_macro_max_primitives_per_turn": 0,
-  "turn_macro_max_edges_per_node": 4,
+  "turn_macro_max_edges_per_node": 8,
   "turn_macro_outer_c": 1.4,
   "turn_macro_c": 1.0,
   "turn_macro_prior_weight": 0.35,

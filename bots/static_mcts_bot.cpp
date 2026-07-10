@@ -917,6 +917,21 @@ std::vector<double> coerce_priors(py::handle raw_priors, int action_count) {
 json choose_action_with_native_tree(const json& message, const CliConfig& cfg, std::mt19937_64& rng) {
   std::vector<json> root_actions = json_actions(message, cfg.max_actions);
   if (root_actions.empty()) return json{{"actionId", nullptr}, {"rankedActionIds", json::array()}, {"i", nullptr}, {"rankedActionIndexes", json::array()}};
+  if (root_actions.size() == 1) {
+    const std::string id = cli_action_id(root_actions.front(), 0);
+    json response{{"actionId", id}, {"rankedActionIds", json::array({id})}};
+    if (cfg.profile_json) {
+      response["_profile"] = {
+          {"search_mode", "primitive"},
+          {"single_legal_action_fast_path", true},
+          {"simulations", 0},
+          {"selected_paths", 0},
+          {"completed_paths", 0},
+      };
+    }
+    attach_wire_indexes(response, root_actions);
+    return response;
+  }
 
   const bool collect_timing = cfg.profile_json || cfg.profile_timing;
   json timing_ms = {

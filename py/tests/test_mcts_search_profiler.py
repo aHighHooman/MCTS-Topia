@@ -141,7 +141,7 @@ def test_turn_macro_exp_config_and_static_exe_command() -> None:
     assert command[command.index("--search-mode") + 1] == "turn-macro-exp"
     assert "--turn-macro-max-turn-depth" not in command
     assert command[command.index("--turn-macro-max-primitives-per-turn") + 1] == "0"
-    assert command[command.index("--turn-macro-max-edges-per-node") + 1] == "4"
+    assert command[command.index("--turn-macro-max-edges-per-node") + 1] == "8"
     assert command[command.index("--turn-macro-inner-simulations") + 1] == "128"
     assert command[command.index("--turn-macro-inner-c-puct") + 1] == "1.5"
     assert command[command.index("--turn-macro-greedy-eval-top-k") + 1] == "1"
