@@ -25,6 +25,7 @@ map_elites_*
 debug-logs/
 logs/
 *.log
+*.pdb
 tmp/
 rl/
 tempEmail/

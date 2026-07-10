@@ -63,6 +63,8 @@ python -m training.checkpoint_tournament
 - Native extension sources are in `py/search/native/`; `load_native_mcts_extension()` auto-builds with PyTorch C++ extension tooling.
 - Shared native C++ files live in `py/search/native/src/`: `rules.cpp`, `static_eval.cpp`, `mcts.cpp`.
 - The standalone full static-eval protocol bot lives in `bots/static_mcts_bot.cpp`; build it with `scripts/build_static_bot.ps1`.
+- `scripts/build_java.ps1` recreates `out/`; if a workflow needs both Java classes and `out/native/static_mcts_bot.exe`, run `build_java.ps1` first and `build_static_bot.ps1` second.
+- `scripts/build_static_bot.ps1` default `Release` intentionally avoids MSVC `/GL`/`/LTCG`; use `-Configuration ReleaseLtcg` only when explicitly investigating link-time optimizer behavior, because that profile has reproduced `turn-macro-exp` native crashes.
 - Parity/debug entrypoint: `python -m search.native.parity_runner --fixture debug-logs\some-fixture\game.json --depth 1`.
 - Java parity oracle: `py/search/native/java/core/game/NativeParityOracle.java`.
 

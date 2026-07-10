@@ -49,6 +49,7 @@ $exe = Join-Path $outDirPath "static_mcts_bot.exe"
 $obj = Join-Path $outDirPath "static_mcts_bot.obj"
 $rulesObj = Join-Path $outDirPath "native_rules.obj"
 $staticEvalObj = Join-Path $outDirPath "native_static_eval.obj"
+$pdb = Join-Path $outDirPath "static_mcts_bot.pdb"
 
 $includeFlags = @(
     "/I$nativeRoot",
@@ -60,7 +61,9 @@ $commonCompileFlags = @(
     "/EHsc",
     "/DTRIBES_NATIVE_MCTS_STANDALONE",
     "/std:c++17",
-    "/bigobj"
+    "/bigobj",
+    "/FS",
+    "/Fd$pdb"
 ) + $includeFlags
 
 $linkFlags = @()
@@ -70,10 +73,16 @@ if ($Configuration -ieq "Asan") {
         "/Zi",
         "/fsanitize=address"
     )
-} else {
+} elseif ($Configuration -ieq "Debug") {
+    $commonCompileFlags += @(
+        "/Od",
+        "/Zi",
+        "/RTC1"
+    )
+} elseif ($Configuration -ieq "ReleaseLtcg") {
     $commonCompileFlags += @(
         "/O2",
-        "/Ob3",
+        "/Ob2",
         "/Oi",
         "/Ot",
         "/fp:fast",
@@ -82,6 +91,29 @@ if ($Configuration -ieq "Asan") {
         "/DNDEBUG"
     )
     $linkFlags += "/LTCG"
+} elseif ($Configuration -ieq "ReleasePrecise") {
+    $commonCompileFlags += @(
+        "/O2",
+        "/Ob3",
+        "/Oi",
+        "/Ot",
+        "/fp:precise",
+        "/arch:AVX2",
+        "/DNDEBUG"
+    )
+} else {
+    if ($Configuration -ine "Release" -and $Configuration -ine "ReleaseNoLtcg") {
+        throw "Unsupported configuration '$Configuration'. Use Release, ReleaseNoLtcg, ReleaseLtcg, ReleasePrecise, Debug, or Asan."
+    }
+    $commonCompileFlags += @(
+        "/O2",
+        "/Ob3",
+        "/Oi",
+        "/Ot",
+        "/fp:precise",
+        "/arch:AVX2",
+        "/DNDEBUG"
+    )
 }
 
 & cl.exe @commonCompileFlags "/Fo$rulesObj" "/c" $rulesSource
