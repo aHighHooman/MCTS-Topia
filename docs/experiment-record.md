@@ -157,7 +157,7 @@ Source:
 
 ### Current Shape
 
-`turn-macro-exp` runs one 128-simulation inner primitive MCTS exactly once at each turn node and crystallizes up to 4 complete first-action-diverse turn plans. Progressive widening controls only how many crystallized edges the outer search may select; exposing another edge never reruns inner MCTS or regenerates plans. It has no configured turn-depth or primitive-actions-per-turn cap by default (`max_primitives_per_turn <= 0` means unlimited). Forced actions and `END_TURN` complete the plan at the natural turn boundary.
+`turn-macro-exp` runs one 128-simulation inner primitive MCTS exactly once at each turn node and crystallizes up to the configured number of complete first-action-diverse turn plans (8 by default). Progressive widening controls only how many crystallized edges the outer search may select; exposing another edge never reruns inner MCTS or regenerates plans. It has no configured turn-depth or primitive-actions-per-turn cap by default (`max_primitives_per_turn <= 0` means unlimited). Forced actions and `END_TURN` complete the plan at the natural turn boundary.
 
 ### Full Profiler Snapshot
 
@@ -318,6 +318,63 @@ Implications:
 - The macro approach is now doing what it was meant to do on depth: roughly `9.5x` the primitive turn-depth average on the profiling corpus.
 - It is still evaluation/work hungry: only ~215 outer paths/s because each useful macro edge pays for inner primitive MCTS.
 - Static eval is not the current macro bottleneck in this profile. The next likely high-leverage direction is reducing repeated inner-search work, e.g. reusing inner tree statistics for sibling plan extraction or making extracted K plans more diverse/useful per inner search.
+
+### 2026-07-10 Macro Breadth Tournament Series
+
+Objective:
+
+- Improve `turn-macro-exp` against primitive MCTS using reproducible, balanced-seat tournaments.
+- Keep primitive and macro search budgets approximately equal in action time rather than equalizing raw simulation counts, because one macro outer simulation can invoke inner primitive search and complete a whole turn plan.
+
+Tournament protocol:
+
+- Java `Tournament`, `Balance Seats: true`, `Parallel Games: 8`, fixed seeds 300 onward, deterministic bot seeds, no wall-clock flag in the tournament commands.
+- Initial calibration on `debug-logs/repro_tournament_seed302_player0_request6.json` used three one-second wall-clock probes only to choose fixed budgets for later tournaments.
+- The calibrated one-second-equivalent budgets were approximately primitive `27000` simulations and macro `320` outer simulations with inner `128` simulations.
+- For normal-objective validation, the shorter fixed target used primitive `4500` and macro `46`/`54` simulations, approximating 0.15 seconds per action.
+
+Important protocol correction:
+
+- The first short tournament series used `Turn Limit: 8`. This is not a neutral observation cutoff: `GameState.gameOver()` assigns `WIN` to the top-ranked tribe and `LOSS` to the rest when the finite limit is reached; ranking uses score, then researched techs, cities, and production.
+- Those 8-turn results are retained as exploratory evidence only and must not be used as final strength claims.
+- Valid normal-objective runs use `Turn Limit: 0`, which disables the tournament override. MIGHT then ends through its capital-control objective. A normal smoke completed games at turns 10–24 without ties.
+
+Isolated hypotheses:
+
+| Direction | Change | Valid result | Decision |
+| --- | --- | --- | --- |
+| Greedy completion | Enable the existing greedy continuation phase in `complete_plan` | 1/16 macro wins, same as the calibrated 4-plan baseline; static scores moved slightly but win rate did not | Rejected and reverted |
+| Inner/outer allocation | Inner `128 -> 64`, calibrated outer `370` | 1/16 macro wins, below the baseline in score quality | Rejected |
+| Plan breadth | Expose `8` macro edges per node instead of `4`, calibrated outer `240` | Exploratory 8-turn run: 3/16 vs baseline 1/16; not treated as final evidence because of the cutoff | Promising |
+| Plan breadth, normal objective | `Turn Limit: 0`, primitive `4500`, macro inner `128`, macro outer `46`, 4 seeds with mirrored seats | 3/8 macro wins (37.5%) versus 1/8 (12.5%) for the matched 4-edge baseline; all 16 games completed normally, no failures or ties | Keep and promote |
+| Macro static evaluation | Macro-only `threat.capital_threat=-4.5`, otherwise same as 8-edge breadth | 3/8 macro wins versus 5/8 for primitive; all games completed through the normal objective | Rejected; keep baseline static evaluation |
+
+Longer normal-objective confirmation with the same fixed seeds 300–307 and the same 0.15-second-equivalent budgets:
+
+| Variant | Games | Macro wins | Result |
+| --- | ---: | ---: | --- |
+| 4-edge baseline | 16 | 3 (18.75%) | All games reached native capital-control completion |
+| 8-edge breadth | 16 | 4 (25.00%) | All games reached native capital-control completion |
+
+No match in either valid run was decided by the disabled turn-limit override; no failures or ties were reported.
+
+The recommended-size 10-seed confirmation was neutral: both the 4-edge baseline and 8-edge breadth scored 5/20 macro wins (25.00%) over seeds 300–309, with all games reaching normal capital-control completion. The 8-edge setting remains the best non-regressive breadth setting, but this sample does not establish a decisive general win-rate improvement.
+
+Additional normal-objective smoke experiments were rejected:
+
+- macro-only `experimental` static evaluation: 4/20 macro wins versus 5/20 for baseline at 10 seeds;
+- root result selection ordered by average value before visits: 2/8 macro wins;
+- four-primitive-action macro-plan cap: 2/8 macro wins;
+- lower outer exploration (`outer-c = 0.5`): 2/8 macro wins.
+- initializing an unvisited outer edge from the inner root utility: 2/8 macro wins versus 6/8 for primitive; all 8 games completed normally at turns 15–21.
+
+Implementation decision:
+
+- `TurnMacroExpConfig.max_new_edges_per_node` is now `8` by default.
+- Profiling defaults and `mcts_search` command construction were updated to use `8` as the default, while the explicit CLI flag remains available for controlled ablations.
+- The isolated greedy and inner-64 changes were not retained.
+
+The normal-objective comparisons are the current strength evidence. The older 8-turn logs are useful for search-shape exploration, but should not be cited as proof of win rate. The current implementation is a calibrated, non-regressive breadth improvement candidate; more validation is needed before claiming a broad strength gain.
 
 ## What Seems Worth Avoiding
 

@@ -10,6 +10,7 @@ The goal is practical: make the current behavior readable, record what has alrea
 - [Static Evaluation](static-eval.md) explains static priors, value terms, variants, weight overrides, breakdown output, and important caveats.
 - [Experiment Record](experiment-record.md) summarizes the visible profiling/tuning experiments, saved payload corpus, branch comparisons, value breakdowns, and validation outcomes.
 - [Analysis Tooling](analysis-tooling.md) is a compact runbook for the scripts and configs used to reproduce or extend the experiments.
+- [Tournament Evaluation](tournament-evaluation.md) defines the valid bot-vs-bot objective, seat balancing, completion checks, and wall-clock calibration procedure.
 
 ## Main Source Files
 

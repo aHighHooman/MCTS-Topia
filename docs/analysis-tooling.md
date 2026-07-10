@@ -276,3 +276,5 @@ Overlay is correlation over a recorded match timeline. Counterfactual replay is 
 5. Propose a small targeted override or code change.
 6. Validate through balanced games on held-out seeds.
 7. Record the run in `docs/experiment-record.md` if it changes the decision history.
+
+For the exact tournament protocol, especially the requirement to use `Turn Limit: 0` and to calibrate primitive and macro budgets by action time rather than raw simulation count, see [Tournament Evaluation](tournament-evaluation.md).
