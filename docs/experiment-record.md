@@ -157,7 +157,7 @@ Source:
 
 ### Current Shape
 
-`turn-macro-exp` runs one inner primitive MCTS at a turn node, extracts up to 4 complete first-action-diverse turn plans, and lets the outer tree search over those turn edges. It no longer uses a configured max turn-depth cap. If `max_primitives_per_turn` is reached while still on the same player's turn, the next primitive is forced to `END_TURN`.
+`turn-macro-exp` runs one 128-simulation inner primitive MCTS exactly once at each turn node and crystallizes up to 4 complete first-action-diverse turn plans. Progressive widening controls only how many crystallized edges the outer search may select; exposing another edge never reruns inner MCTS or regenerates plans. It has no configured turn-depth or primitive-actions-per-turn cap by default (`max_primitives_per_turn <= 0` means unlimited). Forced actions and `END_TURN` complete the plan at the natural turn boundary.
 
 ### Full Profiler Snapshot
 
@@ -225,19 +225,19 @@ Changes tested:
   - if no more unique macro plans can be generated, the node is marked expansion-exhausted and existing edges are reused instead of stalling.
 - Forced/tactical actions stop greedy continuation and fall through to forced `END_TURN`; this avoids unstable chains such as resource -> level-up -> move -> speculative post-move child evaluation.
 - Opponent turn nodes currently use a single forced/pass-style plan, preferring `END_TURN`, instead of running inner MCTS on opponent states.
-- Wall-clock macro search now checks time every outer sim and also caps wall-clock actions at 16 outer sims. This is a temporary stability guard; deeper wall-clock traversal still exposes native crashes.
+- Wall-clock macro search checks time every outer sim with `tree.run(1)`. There is no fixed outer-sim ceiling in the current bot path.
 
 Unsafe findings:
 
 - `turn_macro_inner_simulations = 1024` can crash tournament replay payloads with native access violation `-1073741819`.
 - The same game-2 replay stayed clean at inner sims 32, 64, and 128 with greedy top-k 1, but crashed at 256+.
-- A 3s/profile position wall-clock run still reached unsafe deep traversal before the 16-outer-sim wall-clock ceiling was added.
+- A 3s/profile position wall-clock run reached unsafe deep traversal before the native build stability issue was isolated.
 
 Stable profiler snapshot after the safety pass:
 
 | Config | Positions | Outer paths | Inner sims | Static eval calls | Greedy child evals/skips | Avg turn depth | Max turn depth | Root searched |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `turn-macro-exp`, 1s/position, inner=128, greedy top-k=1, wall-clock outer cap=16 | 36 | 560 | 5,248 | 1,794 | 231 / 8,928 | 1.70 | 2 | 3.75 |
+| `turn-macro-exp`, 1s/position, inner=128, greedy top-k=1, old capped run | 36 | 560 | 5,248 | 1,794 | 231 / 8,928 | 1.70 | 2 | 3.75 |
 
 Timing:
 
@@ -250,13 +250,74 @@ Tournament smoke:
 
 | Run | Shape | Result |
 | --- | --- | --- |
-| `headtohead_wallclock_safe128_smoke` | 1 seed, balanced seats, 2 games, `Parallel Games: 8`, 1s/action, turn limit 4, inner=128, wall-clock outer cap=16 | Completed. Primitive 2/2, macro 0/2. External stderr empty. |
+| `headtohead_wallclock_safe128_smoke` | 1 seed, balanced seats, 2 games, `Parallel Games: 8`, 1s/action, turn limit 4, inner=128, old capped run | Completed. Primitive 2/2, macro 0/2. External stderr empty. |
 
 Interpretation:
 
-- The current safe version is much cheaper and stable under the small smoke, but it gives back a lot of the intended depth: max turn depth is only 2 under the capped profiler.
+- The old capped version was much cheaper and stable under the small smoke, but gave back a lot of the intended depth: max turn depth was only 2 under that capped profiler.
 - The next real search-quality direction is not more greedy child evals; those were mostly skipped and can trigger unsafe speculative transitions.
-- The next useful engineering direction is to isolate the native crash in deeper turn-node/inner-MCTS traversal, then remove or raise the 16-outer-sim wall-clock cap.
+- The next useful engineering direction is to keep deep traversal stable under tournament wall-clock conditions, then measure whether the extra turn depth converts to wins.
+
+### 2026-07-06 Native Build Stability Pass
+
+Hypothesis tested:
+
+- The deeper `turn-macro-exp` crashes were not caused by simulation count itself. They reproduced only in the standalone bot built with MSVC `/GL` plus link-time code generation.
+
+Changes:
+
+- `scripts/build_static_bot.ps1` now makes `Release` / `ReleaseNoLtcg` the default optimized build without `/GL` or `/LTCG`.
+- The old link-time optimized profile remains available explicitly as `-Configuration ReleaseLtcg`.
+- Added `Debug`, `Asan`, and `ReleasePrecise` build profiles, and put compiler PDBs under the output directory with `/Fd` plus `/FS` so parallel builds do not fight over `vc140.pdb`.
+
+Evidence on `debug-logs/repro_tournament_seed302_player0_request6.json`, using `turn-macro-exp`, inner sims 128, max 4 macro plans, deterministic seed 4002:
+
+| Build | Sims | Runs | Result |
+| --- | ---: | ---: | --- |
+| old full `ReleaseLtcg` shape | 256 / 512 / 1024 | repeated | Native heap/access crashes such as `-1073741819` and `-1073740940` |
+| default no-LTCG `Release` | 1024 | 3 | 3/3 clean |
+| default no-LTCG `Release` | 2048 | 3 | 3/3 clean |
+| default no-LTCG `Release` | 4096 | 3 | 3/3 clean |
+| default no-LTCG `Release`, 1s wall-clock | 5 | 5/5 clean |
+
+Focused validation:
+
+- `python -m pytest py/tests/test_static_mcts_exe.py::test_static_mcts_exe_turn_macro_exp_returns_legal_root_action py/tests/test_static_mcts_exe.py::test_static_mcts_exe_turn_macro_exp_wall_clock_returns_legal_root_action py/tests/test_mcts_search_profiler.py::test_turn_macro_exp_config_and_static_exe_command`
+
+Tournament smoke:
+
+| Run | Shape | Result |
+| --- | --- | --- |
+| `headtohead_wallclock_noltcg_1s_parallel8_macro_k4` | 4 seeds, balanced seats, 8 games, `Parallel Games: 8`, 1s/action, turn limit 8, no macro sim ceiling | Completed. Primitive 5/8, macro 3/8. No failed matches; external stderr logs empty. |
+
+Interpretation:
+
+- Do not spend more time tuning around lower sim counts for this crash. The failure boundary is the standalone build profile, not the requested search budget.
+- Use the default non-LTCG static bot build for profiler and tournament measurements until there is a specific reason to investigate MSVC LTCG miscompilation/UB further.
+- If both Java classes and the static bot are needed, build Java first. `scripts/build_java.ps1` recreates `out/` and will remove `out/native/static_mcts_bot.exe`; rebuild the static bot second.
+
+Fresh profiler comparison with the default non-LTCG static bot:
+
+| Mode | Wall time / pos | Positions | Work | Rate | Avg turn depth | Max turn depth | Root searched |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| primitive | 3s | 36 | 1,171,584 paths | 9,616 paths/s | 0.59 | 7 | 31.78 |
+| turn-macro-exp | 1s | 36 | 9,347 outer paths | 215 outer paths/s | 5.63 | 14 | 3.47 |
+
+Macro timing split:
+
+| Phase | Share |
+| --- | ---: |
+| inner primitive MCTS searches | 55.8% |
+| search-loop unattributed | 23.5% |
+| process overhead | 16.6% |
+| apply action | 3.5% |
+| static eval | 0.4% |
+
+Implications:
+
+- The macro approach is now doing what it was meant to do on depth: roughly `9.5x` the primitive turn-depth average on the profiling corpus.
+- It is still evaluation/work hungry: only ~215 outer paths/s because each useful macro edge pays for inner primitive MCTS.
+- Static eval is not the current macro bottleneck in this profile. The next likely high-leverage direction is reducing repeated inner-search work, e.g. reusing inner tree statistics for sibling plan extraction or making extracted K plans more diverse/useful per inner search.
 
 ## What Seems Worth Avoiding
 

@@ -61,7 +61,7 @@ _MCTS_SEARCH_DEFAULTS: dict[str, Any] = {
     "native_static_exe": "out/native/static_mcts_bot.exe",
     "build_native_static_exe": True,
     "turn_macro_simulations": None,
-    "turn_macro_max_primitives_per_turn": 4,
+    "turn_macro_max_primitives_per_turn": 0,
     "turn_macro_max_edges_per_node": 4,
     "turn_macro_outer_c": 1.4,
     "turn_macro_c": 1.0,
@@ -70,7 +70,7 @@ _MCTS_SEARCH_DEFAULTS: dict[str, Any] = {
     "turn_macro_inner_simulations": 128,
     "turn_macro_inner_c_puct": 1.5,
     "turn_macro_greedy_eval_top_k": 1,
-    "turn_macro_opponent_mode": "root-adversarial",
+    "turn_macro_opponent_mode": "maximalist",
     "device": None,
     "simulations": None,
     "wall_time_sec": 10.0,
@@ -1551,8 +1551,8 @@ def _load_mcts_search_config(path: Path = DEFAULT_MCTS_SEARCH_CONFIG) -> argpars
         raise ValueError("mcts_search config static_eval_variant must be one of: baseline, experimental, experimental-2, experimental-training")
     if str(values.get("native_static_search_mode")) not in {"primitive", "turn-macro-exp"}:
         raise ValueError("mcts_search config native_static_search_mode must be one of: primitive, turn-macro-exp")
-    if str(values.get("turn_macro_opponent_mode")) not in {"root-max", "root-adversarial"}:
-        raise ValueError("mcts_search config turn_macro_opponent_mode must be one of: root-max, root-adversarial")
+    if str(values.get("turn_macro_opponent_mode")) not in {"root-max", "maximalist"}:
+        raise ValueError("mcts_search config turn_macro_opponent_mode must be one of: root-max, maximalist")
     for key in _PATH_CONFIG_KEYS:
         value = values.get(key)
         if isinstance(value, str) and value:
@@ -2025,7 +2025,7 @@ def _native_static_exe_command(exe: Path, cfg: HybridAgentConfig, args: argparse
         command.extend(
             [
                 "--turn-macro-max-primitives-per-turn",
-                str(int(getattr(args, "turn_macro_max_primitives_per_turn", 4))),
+                str(int(getattr(args, "turn_macro_max_primitives_per_turn", 0))),
                 "--turn-macro-max-edges-per-node",
                 str(int(getattr(args, "turn_macro_max_edges_per_node", 4))),
                 "--turn-macro-outer-c",
@@ -2043,7 +2043,7 @@ def _native_static_exe_command(exe: Path, cfg: HybridAgentConfig, args: argparse
                 "--turn-macro-greedy-eval-top-k",
                 str(int(getattr(args, "turn_macro_greedy_eval_top_k", 1))),
                 "--turn-macro-opponent-mode",
-                str(getattr(args, "turn_macro_opponent_mode", "root-adversarial")),
+                str(getattr(args, "turn_macro_opponent_mode", "maximalist")),
             ]
         )
     if bool(args.no_dirichlet):

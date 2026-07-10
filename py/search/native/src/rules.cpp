@@ -3110,6 +3110,7 @@ std::pair<int, int> infer_hidden_enemy_capital_spawn_xy(const NativeGameState& s
   int latest_root_city_x = 0;
   int latest_root_city_y = 0;
   int root_city_count = 0;
+  bool root_capital_at_board_center = false;
   for (const NativeCity& city : state.cities) {
     max_visible_city_id = std::max(max_visible_city_id, city.id);
     if (city.tribe_id == state.root_player_id) {
@@ -3118,6 +3119,9 @@ std::pair<int, int> infer_hidden_enemy_capital_spawn_xy(const NativeGameState& s
         latest_root_city_id = city.id;
         latest_root_city_x = city.x;
         latest_root_city_y = city.y;
+      }
+      if (city.capital && city.x == state.board_size / 2 && city.y == state.board_size / 2) {
+        root_capital_at_board_center = true;
       }
     }
   }
@@ -3263,6 +3267,14 @@ std::pair<int, int> infer_hidden_enemy_capital_spawn_xy(const NativeGameState& s
       best_full_y = tile.y;
     }
   }
+  // A hidden capital on the board edge has no complete 3x3 city radius. When
+  // the observed capital occupies the board center, prefer the farthest hidden
+  // tile over the otherwise-preferred complete-radius candidate so we do not
+  // systematically place the unseen capital one tile too far inward.
+  if (hidden_capital_id > 0 && root_city_count == 1 && root_capital_at_board_center &&
+      best_any_distance > best_full_distance) {
+    return {best_any_x, best_any_y};
+  }
   if (best_full_distance >= 0) {
     return {best_full_x, best_full_y};
   }
@@ -3270,40 +3282,6 @@ std::pair<int, int> infer_hidden_enemy_capital_spawn_xy(const NativeGameState& s
 }
 
 NativeCity* capital_city_for_tribe(NativeGameState& state, int tribe_id);
-
-void append_hidden_enemy_capital_spawn_action(NativeGameState& state, std::vector<NativeAction>& actions, int max_actions) {
-  if (state.active_player_id == state.root_player_id) {
-    return;
-  }
-  NativeTribe* active_tribe = tribe_by_id(state, state.active_player_id);
-  if (active_tribe == nullptr || active_tribe->capital_id <= 0 ||
-      city_by_id(state, active_tribe->capital_id) != nullptr) {
-    return;
-  }
-  if (NativeCity* capital = capital_city_for_tribe(state, state.active_player_id); capital != nullptr) {
-    if (relationship_between(state, state.active_player_id, state.root_player_id) == "WAR") {
-      for (const std::string& tech : {"ROADS", "STRATEGY"}) {
-        if (!has_tech(*active_tribe, tech)) {
-          active_tribe->researched_tech_ids.push_back(tech);
-        }
-      }
-      active_tribe->stars = std::max(active_tribe->stars, 5);
-    }
-    (void)capital;
-    return;
-  }
-  if (active_tribe->stars < unit_cost("WARRIOR") || !unit_unlocked(*active_tribe, "WARRIOR")) {
-    return;
-  }
-  const auto [x, y] = infer_hidden_enemy_capital_spawn_xy(state);
-  NativeAction spawn;
-  spawn.type = "SPAWN";
-  spawn.city_id = active_tribe->capital_id;
-  init_generated_payload(spawn);
-  set_generated_xy(spawn, x, y);
-  set_generated_unit_type(spawn, "WARRIOR");
-  append_generated_action(state, actions, max_actions, std::move(spawn));
-}
 
 NativeCity* ensure_hidden_active_enemy_capital_city(NativeGameState& state) {
   if (state.active_player_id == state.root_player_id) {
@@ -3329,6 +3307,7 @@ NativeCity* ensure_hidden_active_enemy_capital_city(NativeGameState& state) {
         active_tribe->researched_tech_ids.push_back(tech);
       }
     }
+    active_tribe->stars = std::max(active_tribe->stars, 5);
   }
   const int x = capital->x;
   const int y = capital->y;
@@ -4094,7 +4073,6 @@ void regenerate_actions(NativeGameState& state, std::vector<NativeAction>& actio
   const bool allow_hidden_capital_bootstrap = state.transition_kind == "END_TURN";
   if (allow_hidden_capital_bootstrap) {
     ensure_hidden_active_enemy_capital_city(state);
-    append_hidden_enemy_capital_spawn_action(state, actions, max_actions);
   }
   regenerate_tribe_actions(state, actions, max_actions);
   for (int city_id : active_tribe->city_ids) {
@@ -4147,6 +4125,9 @@ bool try_reuse_legal_actions_after_simple_unit_update(
       continue;
     }
     next.legal_action_indexes.push_back(action_index);
+  }
+  if (next.legal_action_indexes.empty()) {
+    return false;
   }
   sync_observation_turn_flags(next);
   return true;
@@ -6514,6 +6495,9 @@ NativeCity* capital_city_for_tribe(NativeGameState& state, int tribe_id) {
   if (capital != nullptr) {
     capital->tribe_id = tribe_id;
     capital->capital = true;
+    if (std::find(tribe->city_ids.begin(), tribe->city_ids.end(), capital->id) == tribe->city_ids.end()) {
+      tribe->city_ids.push_back(capital->id);
+    }
     return capital;
   }
   const auto [x, y] = infer_hidden_enemy_capital_spawn_xy(state);
@@ -6535,6 +6519,7 @@ NativeCity* capital_city_for_tribe(NativeGameState& state, int tribe_id) {
   city.bound = 0;
   city.points_worth = inferred_hidden_capital_points_worth(state, city.id, city.x, city.y);
   state.cities.push_back(city);
+  tribe->city_ids.push_back(city.id);
   for (int dy = -1; dy <= 1; ++dy) {
     for (int dx = -1; dx <= 1; ++dx) {
       NativeTile* tile = tile_at(state, x + dx, y + dy);

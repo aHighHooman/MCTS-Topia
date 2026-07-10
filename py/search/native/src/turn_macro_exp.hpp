@@ -22,17 +22,17 @@ namespace tribes::native {
 
 enum class TurnMacroExpOpponentMode {
   RootMax,
-  RootAdversarial,
-  ActiveSelfish,
+  Maximalist,
 };
 
 struct TurnMacroExpConfig {
   int simulations = 256;
   int max_actions = 512;
-  int max_primitives_per_turn = 4;
+  // A non-positive value means no primitive-action limit per macro turn.
+  int max_primitives_per_turn = 0;
   int max_new_edges_per_node = 4;
-  int progressive_base = 4;
-  double progressive_scale = 1.5;
+  int progressive_base = 1;
+  double progressive_scale = 1.0;
   double outer_c = 1.4;
   double macro_exp_c = 1.0;
   double macro_exp_prior_weight = 0.35;
@@ -47,7 +47,7 @@ struct TurnMacroExpConfig {
   int max_unit_choices = 8;
   bool deterministic = false;
   bool profile_json = false;
-  TurnMacroExpOpponentMode opponent_mode = TurnMacroExpOpponentMode::RootAdversarial;
+  TurnMacroExpOpponentMode opponent_mode = TurnMacroExpOpponentMode::Maximalist;
 };
 
 enum class MacroExpStage {
@@ -121,6 +121,7 @@ struct MacroExpTurnPlan {
   bool terminal = false;
   int primitives_executed = 0;
   double value_root = 0.0;
+  double value_actor = 0.0;
 };
 
 std::string macro_exp_action_signature(const NativeAction& action);
@@ -183,13 +184,13 @@ class TurnMacroExpMCTS {
   TurnEdge sample_new_turn_edge(int node_id);
   std::vector<TurnEdge> generate_turn_edges(int node_id, int max_edges);
   int select_existing_turn_edge(const TurnNode& node) const;
-  int progressive_edge_limit(const TurnNode& node) const;
+  int visible_edge_limit(const TurnNode& node) const;
   void backup_turn_path(
       const std::vector<int>& node_ids,
       const std::vector<int>& edge_ids,
       double value_root);
+  double evaluate_state_for_player(const NativeGameState& state, int player_id);
   double evaluate_state_root_perspective(const NativeGameState& state);
-  double player_sign_for_state(const NativeGameState& state) const;
 };
 
 }  // namespace tribes::native

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from test_mcts import _message_with_capital_capture
+from test_mcts import _message_with_capital_capture, _message_with_simple_unit_action_reuse
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -448,6 +448,89 @@ def test_static_mcts_exe_turn_macro_exp_returns_legal_root_action() -> None:
     assert response["actionId"] in legal_ids
     assert response["rankedActionIds"][0] in legal_ids
     assert response["_profile"]["search_mode"] == "turn-macro-exp"
+
+
+def test_static_mcts_exe_turn_macro_exp_applies_inner_continuation() -> None:
+    message = _message_with_simple_unit_action_reuse("RECOVER")
+    message["type"] = "action_request"
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode",
+            "turn-macro-exp",
+            "--simulations",
+            "8",
+            "--turn-macro-inner-simulations",
+            "16",
+            "--turn-macro-max-primitives-per-turn",
+            "8",
+            "--deterministic",
+            "--profile-json",
+            "--seed",
+            "13",
+        ],
+        input=json.dumps(message) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+
+    response = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert response["actionId"] in {"recover-u1", "recover-u2", "move-u1"}
+    assert int(response["_profile"]["max_primitives_per_turn_sample"]) >= 3
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_action"),
+    [("maximalist", "capture"), ("root-max", None)],
+)
+def test_static_mcts_exe_turn_macro_exp_opponent_mode_uses_expected_utility(
+    mode: str,
+    expected_action: str | None,
+) -> None:
+    message = _message_with_capital_capture(
+        root_player=0,
+        capturer=1,
+        target_city_id=10,
+        second_action={"id": "end", "type": "END_TURN", "tribe_id": 1, "p": 1},
+    )
+    message["actions"][0]["tribe_id"] = 1
+    message["actions"][0]["p"] = 1
+    message["type"] = "action_request"
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode",
+            "turn-macro-exp",
+            "--simulations",
+            "8",
+            "--turn-macro-inner-simulations",
+            "32",
+            "--turn-macro-max-primitives-per-turn",
+            "8",
+            "--turn-macro-opponent-mode",
+            mode,
+            "--deterministic",
+            "--profile-json",
+            "--seed",
+            "13",
+        ],
+        input=json.dumps(message) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+
+    response = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    if expected_action is not None:
+        assert response["actionId"] == expected_action
+        assert response["rankedActionIds"][0] == expected_action
+    assert int(response["_profile"]["inner_searches"]) > 0
+    assert int(response["_profile"]["root_turn_edges"]) >= 2
 
 
 def test_static_mcts_exe_turn_macro_exp_wall_clock_returns_legal_root_action() -> None:

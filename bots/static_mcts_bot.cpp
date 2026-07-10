@@ -1137,15 +1137,71 @@ json choose_action_with_turn_macro_exp_tree(const json& message, const CliConfig
   }
   json response = json_from_py(tree.result_py(cfg.root_temperature, cfg.sample_action));
   if (!response.contains("actionId") || response["actionId"].is_null() || tree.root_edge_count() <= 0) {
-    json fallback = choose_action_with_native_tree(message, cfg, rng);
-    if (cfg.profile_json) {
-      json profile = response.value("_profile", json::object());
-      if (!profile.is_object()) profile = json::object();
-      profile["search_mode"] = "turn-macro-exp";
-      profile["fallback_used"] = true;
-      fallback["_profile"] = profile;
-    }
-    return fallback;
+    throw std::runtime_error(
+        "Turn-macro MCTS failed to produce a legal turn edge. "
+        "The search must not fall back to primitive MCTS. "
+        "root_edges=" + std::to_string(tree.root_edge_count()));
+  }
+  attach_wire_indexes(response, root_actions);
+  return response;
+}
+
+json choose_action_with_turn_macro_inner_probe(const json& message, const CliConfig& cfg) {
+  tribes::native::TurnMacroExpConfig macro_cfg = cfg.turn_macro;
+  macro_cfg.max_actions = cfg.max_actions;
+  std::vector<json> root_actions = json_actions(message, cfg.max_actions);
+  if (root_actions.empty()) {
+    return json{{"actionId", nullptr}, {"rankedActionIds", json::array()}, {"i", nullptr}, {"rankedActionIndexes", json::array()}};
+  }
+
+  py::dict root_payload = py::reinterpret_borrow<py::dict>(py_from_json(message));
+  tribes::native::NativeRoot root = tribes::native::parse_root_payload(root_payload, macro_cfg.max_actions);
+  const int root_player_id = root.state.root_player_id;
+  const int owner_player_id = root.state.active_player_id;
+  const int utility_player_id = macro_cfg.opponent_mode == tribes::native::TurnMacroExpOpponentMode::Maximalist
+      ? owner_player_id
+      : root_player_id;
+  std::vector<tribes::native::NativeAction> inner_actions = root.actions;
+  tribes::native::MacroExpInnerPrimitiveMCTS inner(
+      std::move(root.state),
+      inner_actions,
+      root_player_id,
+      owner_player_id,
+      utility_player_id,
+      macro_cfg.max_actions,
+      macro_cfg.inner_c_puct);
+  const int simulations = std::max(1, macro_cfg.inner_simulations);
+  inner.run(simulations);
+  const std::vector<tribes::native::MacroExpInnerActionCandidate> candidates = inner.root_candidates();
+  json ranked = json::array();
+  json candidate_stats = json::array();
+  std::string action_id;
+  for (const tribes::native::MacroExpInnerActionCandidate& candidate : candidates) {
+    if (candidate.global_action_index < 0 || candidate.global_action_index >= static_cast<int>(inner_actions.size())) continue;
+    const std::string& id = inner_actions[candidate.global_action_index].id;
+    if (action_id.empty()) action_id = id;
+    ranked.push_back(id);
+    candidate_stats.push_back({
+        {"actionId", id},
+        {"visits", candidate.visits},
+        {"q_utility", candidate.q_utility},
+        {"prior", candidate.prior},
+        {"score", candidate.score},
+        {"plan", candidate.action_signatures},
+    });
+  }
+  if (action_id.empty()) {
+    throw std::runtime_error("Turn-macro inner probe produced no plausible root action.");
+  }
+  json response{{"actionId", action_id}, {"rankedActionIds", ranked}};
+  if (cfg.profile_json) {
+    response["_profile"] = {
+        {"search_mode", "turn-macro-inner-probe"},
+        {"inner_simulations", simulations},
+        {"inner_searches", 1},
+        {"inner_nodes_expanded", inner.expanded_nodes()},
+        {"inner_candidates", candidate_stats},
+    };
   }
   attach_wire_indexes(response, root_actions);
   return response;
@@ -1161,7 +1217,7 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
     if (arg == "--simulations") cfg.simulations = std::stoi(next());
     else if (arg == "--search-mode") {
       cfg.search_mode = next();
-      if (cfg.search_mode != "primitive" && cfg.search_mode != "turn-macro-exp") {
+      if (cfg.search_mode != "primitive" && cfg.search_mode != "turn-macro-exp" && cfg.search_mode != "turn-macro-inner-probe") {
         throw std::runtime_error("Unsupported --search-mode: " + cfg.search_mode);
       }
     }
@@ -1220,14 +1276,14 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
       const std::string mode = next();
       if (mode == "root-max") {
         cfg.turn_macro.opponent_mode = tribes::native::TurnMacroExpOpponentMode::RootMax;
-      } else if (mode == "root-adversarial") {
-        cfg.turn_macro.opponent_mode = tribes::native::TurnMacroExpOpponentMode::RootAdversarial;
+      } else if (mode == "maximalist") {
+        cfg.turn_macro.opponent_mode = tribes::native::TurnMacroExpOpponentMode::Maximalist;
       } else {
         throw std::runtime_error("Unsupported --turn-macro-opponent-mode: " + mode);
       }
     } else if (arg == "--help" || arg == "-h") {
       std::cout
-          << "static_mcts_bot.exe [--search-mode primitive|turn-macro-exp] [--simulations N]\n"
+          << "static_mcts_bot.exe [--search-mode primitive|turn-macro-exp|turn-macro-inner-probe] [--simulations N]\n"
           << "  [--wall-clock-per-action-seconds SEC]\n"
           << "  [--top-k-actions N] [--max-actions N] [--search-batch-size N] [--c-puct X]\n"
           << "  [--static-eval-variant baseline|experimental|experimental-2|experimental-training] [--static-eval-weight-overrides SPEC]\n"
@@ -1240,7 +1296,7 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
           << "  [--turn-macro-outer-c X] [--turn-macro-c X] [--turn-macro-prior-weight X]\n"
           << "  [--turn-macro-temperature X] [--turn-macro-inner-simulations N] [--turn-macro-inner-c-puct X]\n"
           << "  [--turn-macro-greedy-eval-top-k N]\n"
-          << "  [--turn-macro-opponent-mode root-max|root-adversarial]\n";
+           << "  [--turn-macro-opponent-mode root-max|maximalist]\n";
       std::exit(0);
     }
   }
@@ -1282,6 +1338,8 @@ int main(int argc, char** argv) {
         message = normalize_cli_message(message);
         if (cfg.search_mode == "turn-macro-exp") {
           std::cout << choose_action_with_turn_macro_exp_tree(message, cfg, rng).dump() << std::endl;
+        } else if (cfg.search_mode == "turn-macro-inner-probe") {
+          std::cout << choose_action_with_turn_macro_inner_probe(message, cfg).dump() << std::endl;
         } else {
           std::cout << choose_action_with_native_tree(message, cfg, rng).dump() << std::endl;
         }

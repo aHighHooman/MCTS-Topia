@@ -1,0 +1,23 @@
+{
+  "payload_dir": "debug-logs/mcts-profile-payloads",
+  "max_positions": 0,
+  "baseline_inner_simulations": 7500,
+  "inner_budgets": [32, 64, 128, 256, 512, 1024, 2048],
+  "plan_count": 4,
+  "max_depth": 4,
+  "max_primitives": 0,
+  "inner_c_puct": 1.5,
+  "outer_c": 1.4,
+  "macro_c": 1.0,
+  "prior_weight": 0.35,
+  "temperature": 1.0,
+  "greedy_eval_top_k": 1,
+  "opponent_mode": "maximalist",
+  "max_actions": 512,
+  "seed": 13,
+  "static_eval_variant": "baseline",
+  "native_static_exe": "out/native/static_mcts_bot.exe",
+  "build_native_static_exe": true,
+  "timeout_sec": 180,
+  "output_dir": "debug-logs/analysis/turn-macro-plan-alignment"
+}
