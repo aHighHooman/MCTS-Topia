@@ -895,6 +895,136 @@ void attach_wire_indexes(json& response, const std::vector<json>& root_actions) 
   response["rankedActionIndexes"] = std::move(ranked_indexes);
 }
 
+struct MacroContinuationState {
+  std::vector<std::string> action_signatures;
+  std::vector<std::string> state_fingerprints;
+  size_t next_index = 0;
+  int root_player_id = -1;
+  bool reaches_turn_boundary = false;
+  std::string last_clear_reason;
+
+  void clear(const std::string& reason = {}) {
+    action_signatures.clear();
+    state_fingerprints.clear();
+    next_index = 0;
+    root_player_id = -1;
+    reaches_turn_boundary = false;
+    last_clear_reason = reason;
+  }
+
+  bool active() const {
+    return next_index < action_signatures.size();
+  }
+};
+
+bool cli_is_forced_macro_type(const std::string& type) {
+  return type == "LEVEL_UP" || type == "MAKE_VETERAN" || type == "CAPTURE" || type == "EXAMINE";
+}
+
+void attach_macro_profile_event(json& response, const CliConfig& cfg, const std::string& event, int remaining) {
+  if (!cfg.profile_json) return;
+  if (!response.contains("_profile") || !response["_profile"].is_object()) response["_profile"] = json::object();
+  response["_profile"]["continuation_event"] = event;
+  response["_profile"]["continuation_remaining"] = remaining;
+}
+
+json direct_action_response(
+    const std::vector<json>& root_actions,
+    int action_index,
+    const CliConfig& cfg,
+    const std::string& event) {
+  if (action_index < 0 || action_index >= static_cast<int>(root_actions.size())) {
+    throw std::runtime_error("Macro continuation selected an invalid current action index.");
+  }
+  const std::string id = cli_action_id(root_actions[action_index], action_index);
+  json response{{"actionId", id}, {"rankedActionIds", json::array({id})}};
+  attach_macro_profile_event(response, cfg, event, 0);
+  attach_wire_indexes(response, root_actions);
+  return response;
+}
+
+void capture_macro_continuation(json& response, MacroContinuationState& continuation) {
+  continuation.clear();
+  if (!response.contains("_macro_continuation") || !response["_macro_continuation"].is_object()) return;
+  const json& payload = response["_macro_continuation"];
+  if (!payload.contains("action_signatures") || !payload["action_signatures"].is_array() ||
+      !payload.contains("state_fingerprints") || !payload["state_fingerprints"].is_array() ||
+      payload["action_signatures"].size() != payload["state_fingerprints"].size()) {
+    throw std::runtime_error("Turn-macro search returned malformed continuation metadata.");
+  }
+  for (const json& value : payload["action_signatures"]) {
+    if (!value.is_string()) throw std::runtime_error("Turn-macro continuation signature is not a string.");
+    continuation.action_signatures.push_back(value.get<std::string>());
+  }
+  for (const json& value : payload["state_fingerprints"]) {
+    if (!value.is_string()) throw std::runtime_error("Turn-macro continuation fingerprint is not a string.");
+    continuation.state_fingerprints.push_back(value.get<std::string>());
+  }
+  continuation.root_player_id = json_int(payload, "root_player_id", -1);
+  continuation.reaches_turn_boundary = json_truthy(value_or(payload, "reaches_turn_boundary", false));
+  response.erase("_macro_continuation");
+}
+
+bool try_macro_continuation(
+    const json& message,
+    const CliConfig& cfg,
+    const std::vector<json>& root_actions,
+    MacroContinuationState& continuation,
+    json& response) {
+  if (!continuation.active()) return false;
+
+  py::dict payload = py::reinterpret_borrow<py::dict>(py_from_json(message));
+  tribes::native::NativeRoot root = tribes::native::parse_root_payload(payload, cfg.max_actions);
+
+  for (int action_index : root.state.legal_action_indexes) {
+    if (action_index >= 0 && action_index < static_cast<int>(root.actions.size()) &&
+        cli_is_forced_macro_type(root.actions[action_index].type)) {
+      continuation.clear("forced_action");
+      response = direct_action_response(root_actions, action_index, cfg, "forced_action");
+      return true;
+    }
+  }
+
+  if (root.state.terminal || root.state.active_player_id != continuation.root_player_id) {
+    continuation.clear(root.state.terminal ? "terminal" : "actor_changed");
+    return false;
+  }
+  if (continuation.next_index >= continuation.state_fingerprints.size()) {
+    throw std::runtime_error("Turn-macro continuation cursor exceeded its state fingerprint sequence.");
+  }
+  const std::string observed = tribes::native::macro_exp_state_fingerprint(root.state, root.actions);
+  if (observed != continuation.state_fingerprints[continuation.next_index]) {
+    continuation.clear("state_mismatch");
+    return false;
+  }
+
+  const std::string& signature = continuation.action_signatures[continuation.next_index];
+  int matched_index = -1;
+  int match_count = 0;
+  for (int action_index : root.state.legal_action_indexes) {
+    if (action_index < 0 || action_index >= static_cast<int>(root.actions.size())) continue;
+    if (tribes::native::macro_exp_action_signature(root.actions[action_index]) != signature) continue;
+    matched_index = action_index;
+    match_count += 1;
+  }
+  if (match_count > 1) {
+    throw std::runtime_error("Turn-macro continuation signature matched multiple current legal actions: " + signature);
+  }
+  if (match_count == 0) {
+    continuation.clear("planned_action_illegal");
+    return false;
+  }
+
+  continuation.next_index += 1;
+  const int remaining = static_cast<int>(continuation.action_signatures.size() - continuation.next_index);
+  response = direct_action_response(root_actions, matched_index, cfg, "continued");
+  attach_macro_profile_event(response, cfg, "continued", remaining);
+  if (remaining == 0 || tribes::native::macro_exp_is_end_turn_signature(signature)) {
+    continuation.clear(remaining == 0 ? "plan_exhausted" : "turn_boundary");
+  }
+  return true;
+}
+
 std::vector<double> coerce_priors(py::handle raw_priors, int action_count) {
   std::vector<double> priors;
   if (py::isinstance<py::list>(raw_priors) || py::isinstance<py::tuple>(raw_priors)) {
@@ -1111,7 +1241,11 @@ json choose_action_with_native_tree(const json& message, const CliConfig& cfg, s
   return response;
 }
 
-json choose_action_with_turn_macro_exp_tree(const json& message, const CliConfig& cfg, std::mt19937_64& rng) {
+json choose_action_with_turn_macro_exp_tree(
+    const json& message,
+    const CliConfig& cfg,
+    std::mt19937_64& rng,
+    MacroContinuationState& continuation) {
   tribes::native::TurnMacroExpConfig macro_cfg = cfg.turn_macro;
   macro_cfg.max_actions = cfg.max_actions;
   macro_cfg.simulations = cfg.turn_macro_simulations_set ? cfg.turn_macro.simulations : cfg.simulations;
@@ -1120,8 +1254,16 @@ json choose_action_with_turn_macro_exp_tree(const json& message, const CliConfig
 
   std::vector<json> root_actions = json_actions(message, cfg.max_actions);
   if (root_actions.empty()) {
+    continuation.clear("no_legal_actions");
     return json{{"actionId", nullptr}, {"rankedActionIds", json::array()}, {"i", nullptr}, {"rankedActionIndexes", json::array()}};
   }
+  json continuation_response;
+  if (try_macro_continuation(message, cfg, root_actions, continuation, continuation_response)) {
+    continuation.last_clear_reason.clear();
+    return continuation_response;
+  }
+  const std::string clear_reason = continuation.last_clear_reason;
+  continuation.last_clear_reason.clear();
   if (root_actions.size() == 1) {
     const std::string id = cli_action_id(root_actions.front(), 0);
     json response{{"actionId", id}, {"rankedActionIds", json::array({id})}};
@@ -1136,6 +1278,7 @@ json choose_action_with_turn_macro_exp_tree(const json& message, const CliConfig
           {"outer_simulations", 0},
       };
     }
+    if (!clear_reason.empty()) attach_macro_profile_event(response, cfg, "replanned:" + clear_reason, 0);
     attach_wire_indexes(response, root_actions);
     return response;
   }
@@ -1157,6 +1300,9 @@ json choose_action_with_turn_macro_exp_tree(const json& message, const CliConfig
         "The search must not fall back to primitive MCTS. "
         "root_edges=" + std::to_string(tree.root_edge_count()));
   }
+  capture_macro_continuation(response, continuation);
+  if (!clear_reason.empty()) attach_macro_profile_event(response, cfg, "replanned:" + clear_reason,
+      static_cast<int>(continuation.action_signatures.size()));
   attach_wire_indexes(response, root_actions);
   return response;
 }
@@ -1191,17 +1337,20 @@ json choose_action_with_turn_macro_inner_probe(const json& message, const CliCon
   json ranked = json::array();
   json candidate_stats = json::array();
   std::string action_id;
+  std::unordered_set<std::string> ranked_ids;
   for (const tribes::native::MacroExpInnerActionCandidate& candidate : candidates) {
     if (candidate.global_action_index < 0 || candidate.global_action_index >= static_cast<int>(inner_actions.size())) continue;
     const std::string& id = inner_actions[candidate.global_action_index].id;
     if (action_id.empty()) action_id = id;
-    ranked.push_back(id);
+    if (ranked_ids.insert(id).second) ranked.push_back(id);
     candidate_stats.push_back({
         {"actionId", id},
         {"visits", candidate.visits},
         {"q_utility", candidate.q_utility},
         {"prior", candidate.prior},
         {"score", candidate.score},
+        {"log_confidence", candidate.log_confidence},
+        {"conditional_visit_shares", candidate.conditional_visit_shares},
         {"plan", candidate.action_signatures},
     });
   }
@@ -1343,6 +1492,7 @@ int main(int argc, char** argv) {
     set_static_eval_variant_env(cfg.static_eval_variant);
     set_static_eval_weight_overrides_env(cfg.static_eval_weight_overrides);
     std::mt19937_64 rng(cfg.seed);
+    MacroContinuationState continuation;
     std::string line;
     while (std::getline(std::cin, line)) {
       if (line.empty()) continue;
@@ -1352,13 +1502,14 @@ int main(int argc, char** argv) {
       if (type == "action_request") {
         message = normalize_cli_message(message);
         if (cfg.search_mode == "turn-macro-exp") {
-          std::cout << choose_action_with_turn_macro_exp_tree(message, cfg, rng).dump() << std::endl;
+          std::cout << choose_action_with_turn_macro_exp_tree(message, cfg, rng, continuation).dump() << std::endl;
         } else if (cfg.search_mode == "turn-macro-inner-probe") {
           std::cout << choose_action_with_turn_macro_inner_probe(message, cfg).dump() << std::endl;
         } else {
           std::cout << choose_action_with_native_tree(message, cfg, rng).dump() << std::endl;
         }
       } else if (type == "game_over") {
+        continuation.clear("game_over");
         break;
       }
     }

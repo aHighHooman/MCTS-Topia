@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from test_mcts import _message_with_capital_capture, _message_with_end_turn, _message_with_simple_unit_action_reuse
+from test_mcts import _message, _message_with_capital_capture, _message_with_end_turn, _message_with_simple_unit_action_reuse
+from search.native.cpp_extension import load_native_mcts_extension
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -482,6 +484,237 @@ def test_static_mcts_exe_turn_macro_exp_applies_inner_continuation() -> None:
     assert int(response["_profile"]["max_primitives_per_turn_sample"]) >= 3
 
 
+def test_static_mcts_exe_turn_macro_inner_confidence_matches_conditional_visit_product() -> None:
+    message = _message_with_simple_unit_action_reuse("RECOVER")
+    message["type"] = "action_request"
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode",
+            "turn-macro-inner-probe",
+            "--turn-macro-inner-simulations",
+            "64",
+            "--deterministic",
+            "--profile-json",
+            "--seed",
+            "13",
+        ],
+        input=json.dumps(message) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+
+    response = json.loads(completed.stdout.strip().splitlines()[-1])
+    candidates = response["_profile"]["inner_candidates"]
+
+    assert candidates
+    for candidate in candidates:
+        shares = [float(value) for value in candidate["conditional_visit_shares"]]
+        assert shares
+        assert all(0.0 < value <= 1.0 for value in shares)
+        assert float(candidate["log_confidence"]) == pytest.approx(sum(math.log(value) for value in shares))
+
+
+def test_static_mcts_exe_turn_macro_exp_inner_stops_at_turn_boundary() -> None:
+    message = _message()
+    message["type"] = "action_request"
+    message["actions"] = [
+        {"id": "end-a", "type": "END_TURN"},
+        {"id": "end-b", "type": "END_TURN"},
+    ]
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode",
+            "turn-macro-exp",
+            "--simulations",
+            "1",
+            "--turn-macro-inner-simulations",
+            "8",
+            "--turn-macro-max-primitives-per-turn",
+            "8",
+            "--deterministic",
+            "--profile-json",
+            "--seed",
+            "13",
+        ],
+        input=json.dumps(message) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+
+    response = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert response["actionId"] in {"end-a", "end-b"}
+    assert int(response["_profile"]["inner_nodes_expanded"]) == 0
+
+
+def _request_after_first_recover_action(first_action_index: int = 0) -> dict:
+    message = _message_with_simple_unit_action_reuse("RECOVER")
+    extension = load_native_mcts_extension()
+    assert extension is not None
+    priors = [0.0, 0.0, 0.0, 0.0]
+    priors[first_action_index] = 1.0
+    tree = extension.NativeMCTS(message, [0, 1, 2, 3], priors, 0.1, False, 7, 64)
+    selection = dict(tree.select_leaf(1.5))
+    payload = dict(selection["leaf_payload"])
+    for key in ("_native_board_tensor", "_native_explored_tiles", "_native_visible_tiles"):
+        payload.pop(key, None)
+    payload["type"] = "action_request"
+    payload["player_id"] = 0
+    for action in payload["actions"]:
+        action["id"] = "next-" + str(action["id"])
+    return payload
+
+
+def test_static_mcts_exe_turn_macro_exp_continues_selected_plan_across_requests() -> None:
+    first = _message_with_simple_unit_action_reuse("RECOVER")
+    first["type"] = "action_request"
+    second = _request_after_first_recover_action(2)
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode",
+            "turn-macro-exp",
+            "--simulations",
+            "8",
+            "--turn-macro-inner-simulations",
+            "16",
+            "--turn-macro-max-primitives-per-turn",
+            "8",
+            "--deterministic",
+            "--profile-json",
+            "--seed",
+            "13",
+        ],
+        input="\n".join((json.dumps(first), json.dumps(second), json.dumps({"type": "game_over"}))) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+
+    responses = [json.loads(line) for line in completed.stdout.splitlines()]
+    assert responses[0]["actionId"] == "recover-u2"
+    assert responses[1]["actionId"] == "next-recover-u1"
+    assert responses[1]["_profile"]["continuation_event"] == "continued"
+
+
+def test_static_mcts_exe_turn_macro_exp_replans_after_state_invalidation() -> None:
+    first = _message_with_simple_unit_action_reuse("RECOVER")
+    first["type"] = "action_request"
+    second = _request_after_first_recover_action(2)
+    second["observation"]["tribes"][0]["stars"] += 1
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode",
+            "turn-macro-exp",
+            "--simulations",
+            "8",
+            "--turn-macro-inner-simulations",
+            "16",
+            "--deterministic",
+            "--profile-json",
+            "--seed",
+            "13",
+        ],
+        input="\n".join((json.dumps(first), json.dumps(second), json.dumps({"type": "game_over"}))) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+
+    responses = [json.loads(line) for line in completed.stdout.splitlines()]
+    assert responses[1]["_profile"]["continuation_event"] == "replanned:state_mismatch"
+
+
+def test_static_mcts_exe_turn_macro_exp_exposes_confidence_metadata() -> None:
+    message = _message()
+    message["type"] = "action_request"
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode",
+            "turn-macro-exp",
+            "--simulations",
+            "16",
+            "--turn-macro-inner-simulations",
+            "16",
+            "--turn-macro-max-edges-per-node",
+            "8",
+            "--deterministic",
+            "--profile-json",
+            "--seed",
+            "13",
+        ],
+        input=json.dumps(message) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+
+    response = json.loads(completed.stdout.strip().splitlines()[-1])
+    profile = response["_profile"]
+    plans = profile["root_turn_plans"]
+
+    assert plans
+    assert len({plan["diversity_key"] for plan in plans}) == len(plans)
+    assert all(plan["selection_reasons"] == ["confidence"] for plan in plans)
+    assert all(float(plan["log_confidence"]) <= 0.0 for plan in plans)
+    assert [float(plan["log_confidence"]) for plan in plans] == sorted(
+        (float(plan["log_confidence"]) for plan in plans), reverse=True
+    )
+    assert sum(float(plan["edge_prior"]) for plan in plans) == pytest.approx(1.0)
+    assert all(float(plan["edge_prior"]) >= 0.0 for plan in plans)
+    assert int(profile["macro_exp_raw_candidates"]) >= len(plans)
+    assert "macro_exp_exact_duplicates_removed" in profile
+    assert "macro_exp_material_duplicates_removed" in profile
+
+
+def test_static_mcts_exe_turn_macro_exp_keeps_distinct_unit_commitments() -> None:
+    message = _message_with_simple_unit_action_reuse("RECOVER")
+    message["type"] = "action_request"
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode",
+            "turn-macro-exp",
+            "--simulations",
+            "8",
+            "--turn-macro-inner-simulations",
+            "16",
+            "--turn-macro-max-edges-per-node",
+            "8",
+            "--turn-macro-max-primitives-per-turn",
+            "8",
+            "--deterministic",
+            "--profile-json",
+            "--seed",
+            "13",
+        ],
+        input=json.dumps(message) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+
+    response = json.loads(completed.stdout.strip().splitlines()[-1])
+    plans = response["_profile"]["root_turn_plans"]
+    first_actions = {plan["first_action_id"] for plan in plans}
+
+    assert {"recover-u1", "recover-u2"}.issubset(first_actions)
+    assert sum(plan["first_action_id"] == "recover-u2" for plan in plans) >= 2
+    assert len({plan["diversity_key"] for plan in plans}) == len(plans)
+
+
 @pytest.mark.parametrize(
     ("mode", "expected_action"),
     [("maximalist", "capture"), ("root-max", None)],
@@ -530,7 +763,7 @@ def test_static_mcts_exe_turn_macro_exp_opponent_mode_uses_expected_utility(
         assert response["actionId"] == expected_action
         assert response["rankedActionIds"][0] == expected_action
     assert int(response["_profile"]["inner_searches"]) > 0
-    assert int(response["_profile"]["root_turn_edges"]) >= 2
+    assert int(response["_profile"]["root_turn_edges"]) >= 1
 
 
 def test_static_mcts_exe_turn_macro_exp_wall_clock_returns_legal_root_action() -> None:

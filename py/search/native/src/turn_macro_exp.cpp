@@ -6,9 +6,11 @@
 #include <chrono>
 #include <cstdlib>
 #include <cmath>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_set>
@@ -175,9 +177,28 @@ void macro_exp_record_choice(MacroExpTurnPlan& plan, const MacroExpChoice& choic
   plan.choices.push_back(std::move(selected));
 }
 
+std::string macro_exp_commitment_signature(const NativeAction& action) {
+  std::ostringstream out;
+  out << action.type;
+  if (action.unit_id > 0) out << ":u=" << action.unit_id;
+  if (action.city_id > 0) out << ":c=" << action.city_id;
+  if (action.target_unit_id > 0) out << ":tu=" << action.target_unit_id;
+  if (action.target_city_id > 0) out << ":tc=" << action.target_city_id;
+  if (action.target_player_id >= 0) out << ":tp=" << action.target_player_id;
+  if (action.has_xy) out << ":x=" << action.x << ":y=" << action.y;
+  if (!action.unit_type.empty()) out << ":unit=" << action.unit_type;
+  if (!action.building_type.empty()) out << ":building=" << action.building_type;
+  if (!action.resource_type.empty()) out << ":resource=" << action.resource_type;
+  if (!action.capture_type.empty()) out << ":capture=" << action.capture_type;
+  if (!action.bonus.empty()) out << ":bonus=" << action.bonus;
+  if (!action.tech.empty()) out << ":tech=" << action.tech;
+  return out.str();
+}
+
 void macro_exp_record_execution(MacroExpTurnPlan& plan, const NativeAction& action) {
   const std::string signature = macro_exp_action_signature(action);
   plan.executed_macro_exp_action_signatures.push_back(signature);
+  plan.commitment_signatures.push_back(macro_exp_commitment_signature(action));
   plan.executed_action_ids.push_back(action.id);
   if (plan.first_action_id.empty()) {
     plan.first_action_id = action.id;
@@ -211,6 +232,9 @@ struct TurnMacroExpMCTS::TurnEdge {
   double value_sum_root = 0.0;
   double value_sum_actor = 0.0;
   double prior = 0.0;
+  double log_confidence = -std::numeric_limits<double>::infinity();
+  std::string diversity_key;
+  std::vector<std::string> selection_reasons;
 };
 
 struct TurnMacroExpMCTS::TurnNode {
@@ -240,6 +264,109 @@ std::string macro_exp_action_signature(const NativeAction& action) {
   if (!action.bonus.empty()) out << ":bonus=" << action.bonus;
   if (!action.tech.empty()) out << ":tech=" << action.tech;
   return out.str();
+}
+
+std::string macro_exp_state_fingerprint(
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions) {
+  std::ostringstream out;
+  out << "board_size=" << state.board_size << "|root=" << state.root_player_id
+      << "|active=" << state.active_player_id
+      << "|tick=" << state.tick
+      << "|terminal=" << state.terminal
+      << "|leveling_up=" << state.leveling_up
+      << "|can_end_turn=" << state.can_end_turn
+      << "|winner=" << state.winner_id
+      << "|tiles=";
+  for (const NativeTile& tile : state.tiles) {
+    out << tile.x << ',' << tile.y << ',' << tile.visible << ',' << tile.explored << ',' << tile.road << ','
+        << tile.terrain << ',' << tile.resource << ',' << tile.building << ',' << std::max(0, tile.city_id) << ','
+        << std::max(0, tile.unit_id)
+        << '[';
+    for (int id : tile.hidden_explored_by_tribes) out << id << ',';
+    out << "];";
+  }
+  out << "|units=";
+  for (const NativeUnit& unit : state.units) {
+    out << unit.id << ',' << unit.tribe_id << ',' << unit.city_id << ',' << unit.x << ',' << unit.y << ','
+        << unit.current_hp << ',' << unit.current_hp_exact << ',' << unit.max_hp << ',' << unit.kills << ','
+        << unit.veteran << ',' << unit.hidden << ',' << unit.hidden_at_turn_start << ',' << unit.hidden_enemy_hint
+        << ',' << unit.attack << ',' << unit.defence << ',' << unit.movement << ',' << unit.range << ',' << unit.cost
+        << ',' << unit.type << ',' << unit.status << ';';
+  }
+  out << "|cities=";
+  for (const NativeCity& city : state.cities) {
+    out << city.id << ',' << city.tribe_id << ',' << city.x << ',' << city.y << ',' << city.level << ','
+        << city.population << ',' << city.population_need << ',' << city.production << ',' << city.bound << ','
+        << city.points_worth << ',' << city.capital << ',' << city.walls << ',' << city.infiltrated << '[';
+    for (int id : city.unit_ids) out << id << ',';
+    out << "]{";
+    for (const NativeBuilding& building : city.buildings) {
+      out << building.type << ',' << building.x << ',' << building.y << ',' << building.city_id << ','
+          << building.owner_tribe_id << ',' << building.level << ',' << building.turns_to_score << ';';
+    }
+    out << "};";
+  }
+  out << "|tribes=";
+  for (const NativeTribe& tribe : state.tribes) {
+    out << tribe.id << ',' << tribe.stars << ',' << tribe.score << ',' << tribe.capital_id << ',' << tribe.kills << ','
+        << tribe.pacifist_count << ',' << tribe.units_disabled_next_turn << ',' << tribe.result << ',' << tribe.tribe_type
+        << "{tech=";
+    for (const std::string& tech : tribe.researched_tech_ids) out << tech << ',';
+    out << ";cities=";
+    for (int id : tribe.city_ids) out << id << ',';
+    out << ";extra=";
+    for (int id : tribe.extra_unit_ids) out << id << ',';
+    out << ";connected=";
+    for (int id : tribe.connected_city_ids) out << id << ',';
+    out << ";met=";
+    for (int id : tribe.met_tribe_ids) out << id << ',';
+    out << ";capitals=";
+    for (int id : tribe.known_capital_tribe_ids) out << id << ',';
+    out << ";lighthouses=";
+    for (int id : tribe.discovered_lighthouses) out << id << ',';
+    out << ";monuments=";
+    for (const auto& monument : tribe.monuments) out << monument.first << ':' << monument.second << ',';
+    out << "};";
+  }
+  out << "|relationships=";
+  for (const auto& row : state.relationships) {
+    out << '[';
+    for (const std::string& value : row) out << value << ',';
+    out << "]";
+  }
+  out << "|offers=";
+  for (const auto& row : state.pending_offer_from) {
+    out << '[';
+    for (int value : row) out << value << ',';
+    out << "]";
+  }
+  for (const auto& row : state.pending_offer_types) {
+    out << '[';
+    for (const std::string& value : row) out << value << ',';
+    out << "]";
+  }
+  out
+      << "|legal=";
+  for (int index : state.legal_action_indexes) {
+    if (index < 0 || index >= static_cast<int>(actions.size())) continue;
+    out << macro_exp_action_signature(actions[index]) << ';';
+  }
+  return out.str();
+}
+
+std::string macro_exp_plan_diversity_key(const MacroExpTurnPlan& plan) {
+  if (plan.executed_macro_exp_action_signatures.empty()) return {};
+  std::ostringstream key;
+  key << plan.executed_macro_exp_action_signatures.front() << "\n";
+  std::set<std::string> continuation_commitments;
+  for (size_t index = 1; index < plan.commitment_signatures.size(); ++index) {
+    continuation_commitments.insert(plan.commitment_signatures[index]);
+  }
+  for (const std::string& commitment : continuation_commitments) {
+    key << commitment << "\n";
+  }
+  return key.str();
 }
 
 void macro_exp_require_finite_evaluation(const StaticEvaluation& evaluation, const char* context) {
@@ -347,9 +474,175 @@ struct MacroExpInnerActionCandidate {
   double q_utility = 0.0;
   double prior = 0.0;
   double score = 0.0;
+  double log_confidence = -std::numeric_limits<double>::infinity();
   std::vector<std::string> action_signatures;
   std::vector<double> action_priors;
+  std::vector<double> conditional_visit_shares;
 };
+
+struct MacroExpCandidateSelection {
+  int candidate_index = -1;
+  std::vector<std::string> reasons;
+};
+
+std::string macro_exp_function_class(const NativeAction& action) {
+  if (macro_exp_is_forced_type(action.type)) return "forced";
+  if (macro_exp_is_tactical_type(action.type)) return "tactical";
+  if (action.type == "RESEARCH_TECH") return "research";
+  if (action.type == "SPAWN") return "city";
+  if (macro_exp_is_resource_build_type(action.type)) return "resource_build";
+  if (action.type == "BUILD_ROAD") return "road";
+  if (macro_exp_is_diplomacy_type(action.type)) return "diplomacy";
+  if (action.type == "END_TURN") return "end_turn";
+  return "cleanup";
+}
+
+std::string macro_exp_unit_dimension(const NativeAction& action) {
+  return action.unit_id > 0 ? "unit:" + std::to_string(action.unit_id) : std::string();
+}
+
+std::string macro_exp_city_dimension(const NativeAction& action) {
+  return action.city_id > 0 ? "city:" + std::to_string(action.city_id) : std::string();
+}
+
+std::string macro_exp_resource_dimension(const NativeAction& action) {
+  if (!action.resource_type.empty()) return "resource:" + action.resource_type;
+  if (!action.building_type.empty()) return "resource:building:" + action.building_type;
+  if (!action.unit_type.empty()) return "resource:unit:" + action.unit_type;
+  if (!action.tech.empty()) return "resource:tech:" + action.tech;
+  return std::string();
+}
+
+std::vector<MacroExpCandidateSelection> macro_exp_select_diverse_candidates(
+    const std::vector<MacroExpInnerActionCandidate>& candidates,
+    const std::vector<NativeAction>& actions,
+    const NativeGameState& state,
+    int max_edges) {
+  std::vector<int> eligible;
+  for (int index = 0; index < static_cast<int>(candidates.size()); ++index) {
+    const int action_index = candidates[index].global_action_index;
+    if (action_index < 0 || action_index >= static_cast<int>(actions.size())) continue;
+    if (!macro_exp_is_plausible_action(state, actions[action_index])) continue;
+    eligible.push_back(index);
+  }
+  const int target = std::min(std::max(0, max_edges), static_cast<int>(eligible.size()));
+  if (target <= 0) return {};
+
+  auto ranking = [&](auto metric, auto tie_break) {
+    std::vector<int> ranked = eligible;
+    std::stable_sort(ranked.begin(), ranked.end(), [&](int left, int right) {
+      const double left_metric = metric(candidates[left]);
+      const double right_metric = metric(candidates[right]);
+      if (left_metric != right_metric) return left_metric > right_metric;
+      const double left_tie = tie_break(candidates[left]);
+      const double right_tie = tie_break(candidates[right]);
+      if (left_tie != right_tie) return left_tie > right_tie;
+      return left < right;
+    });
+    return ranked;
+  };
+
+  const std::vector<int> visit_rank = ranking(
+      [](const MacroExpInnerActionCandidate& candidate) { return static_cast<double>(candidate.visits); },
+      [](const MacroExpInnerActionCandidate& candidate) { return candidate.q_utility; });
+  const std::vector<int> value_rank = ranking(
+      [](const MacroExpInnerActionCandidate& candidate) { return candidate.q_utility; },
+      [](const MacroExpInnerActionCandidate& candidate) { return static_cast<double>(candidate.visits); });
+  const std::vector<int> prior_rank = ranking(
+      [](const MacroExpInnerActionCandidate& candidate) { return candidate.prior; },
+      [](const MacroExpInnerActionCandidate& candidate) { return candidate.score; });
+
+  std::unordered_map<int, std::set<std::string>> reasons;
+  const int signal_width = std::min(target, static_cast<int>(eligible.size()));
+  auto mark_signal = [&](const std::vector<int>& ranked, const char* reason) {
+    for (int position = 0; position < signal_width; ++position) {
+      reasons[ranked[position]].insert(reason);
+    }
+  };
+  mark_signal(visit_rank, "visited");
+  mark_signal(value_rank, "value");
+  mark_signal(prior_rank, "prior");
+
+  std::vector<bool> selected(candidates.size(), false);
+  std::vector<int> selected_indices;
+  selected_indices.reserve(target);
+  auto add_anchor = [&](const std::vector<int>& ranked) {
+    for (int index : ranked) {
+      if (selected[index]) continue;
+      selected[index] = true;
+      selected_indices.push_back(index);
+      return;
+    }
+  };
+  add_anchor(visit_rank);
+  if (static_cast<int>(selected_indices.size()) < target) add_anchor(value_rank);
+  if (static_cast<int>(selected_indices.size()) < target) add_anchor(prior_rank);
+
+  std::set<std::string> used_functions;
+  std::set<std::string> used_units;
+  std::set<std::string> used_cities;
+  std::set<std::string> used_resources;
+  auto record_dimensions = [&](int index) {
+    const NativeAction& action = actions[candidates[index].global_action_index];
+    used_functions.insert(macro_exp_function_class(action));
+    const std::string unit = macro_exp_unit_dimension(action);
+    const std::string city = macro_exp_city_dimension(action);
+    const std::string resource = macro_exp_resource_dimension(action);
+    if (!unit.empty()) used_units.insert(unit);
+    if (!city.empty()) used_cities.insert(city);
+    if (!resource.empty()) used_resources.insert(resource);
+  };
+  for (int index : selected_indices) record_dimensions(index);
+
+  while (static_cast<int>(selected_indices.size()) < target) {
+    int best_index = -1;
+    int best_novelty = std::numeric_limits<int>::min();
+    double best_score = -std::numeric_limits<double>::infinity();
+    for (int index : eligible) {
+      if (selected[index]) continue;
+      const NativeAction& action = actions[candidates[index].global_action_index];
+      const std::string function = macro_exp_function_class(action);
+      const std::string unit = macro_exp_unit_dimension(action);
+      const std::string city = macro_exp_city_dimension(action);
+      const std::string resource = macro_exp_resource_dimension(action);
+      int novelty = 0;
+      if (!used_functions.count(function)) novelty += 1000;
+      if (!unit.empty() && !used_units.count(unit)) novelty += 100;
+      if (!city.empty() && !used_cities.count(city)) novelty += 100;
+      if (!resource.empty() && !used_resources.count(resource)) novelty += 100;
+      if (best_index < 0 || novelty > best_novelty ||
+          (novelty == best_novelty && candidates[index].score > best_score) ||
+          (novelty == best_novelty && candidates[index].score == best_score && index < best_index)) {
+        best_index = index;
+        best_novelty = novelty;
+        best_score = candidates[index].score;
+      }
+    }
+    if (best_index < 0) break;
+    selected[best_index] = true;
+    selected_indices.push_back(best_index);
+    const NativeAction& action = actions[candidates[best_index].global_action_index];
+    const std::string function = macro_exp_function_class(action);
+    const std::string unit = macro_exp_unit_dimension(action);
+    const std::string city = macro_exp_city_dimension(action);
+    const std::string resource = macro_exp_resource_dimension(action);
+    if (!used_functions.count(function)) reasons[best_index].insert("new_function");
+    if (!unit.empty() && !used_units.count(unit)) reasons[best_index].insert("new_unit");
+    if (!city.empty() && !used_cities.count(city)) reasons[best_index].insert("new_city");
+    if (!resource.empty() && !used_resources.count(resource)) reasons[best_index].insert("new_resource");
+    record_dimensions(best_index);
+  }
+
+  std::vector<MacroExpCandidateSelection> out;
+  out.reserve(selected_indices.size());
+  for (int index : selected_indices) {
+    MacroExpCandidateSelection selection;
+    selection.candidate_index = index;
+    selection.reasons.assign(reasons[index].begin(), reasons[index].end());
+    out.push_back(std::move(selection));
+  }
+  return out;
+}
 
 class MacroExpInnerPrimitiveMCTS {
  public:
@@ -379,76 +672,101 @@ class MacroExpInnerPrimitiveMCTS {
   std::vector<MacroExpInnerActionCandidate> root_candidates() const {
     std::vector<MacroExpInnerActionCandidate> out;
     if (nodes_.empty()) return out;
-    const InnerNode& root = nodes_[0];
-    const NativeGameState& root_state = states_[root.state_index];
-    out.reserve(root_state.legal_action_indexes.size());
-    auto best_continuation_local = [&](const InnerNode& node, const NativeGameState& state) {
-      double best_score = -std::numeric_limits<double>::infinity();
-      int best = -1;
+    std::vector<std::string> signatures;
+    std::vector<double> priors;
+    std::vector<double> visit_shares;
+    std::function<void(int, double)> enumerate = [&](int node_id, double log_confidence) {
+      if (node_id < 0 || node_id >= static_cast<int>(nodes_.size())) return;
+      const InnerNode& node = nodes_[node_id];
+      const NativeGameState& state = states_[node.state_index];
+      int total_positive_visits = 0;
       for (int local = 0; local < static_cast<int>(state.legal_action_indexes.size()); ++local) {
-        const int global_action_index = state.legal_action_indexes[local];
-        if (global_action_index < 0 || global_action_index >= static_cast<int>(actions_.size()) ||
-            !macro_exp_is_plausible_action(state, actions_[global_action_index])) {
-          continue;
-        }
-        const int visits = local < static_cast<int>(node.visits.size()) ? node.visits[local] : 0;
-        const double q = visits > 0 && local < static_cast<int>(node.value_sums_utility.size())
-            ? node.value_sums_utility[local] / static_cast<double>(visits)
-            : node.value_estimate_utility;
-        const double prior = local < static_cast<int>(node.priors.size()) ? node.priors[local] : 0.0;
-        const double score = static_cast<double>(visits) + 0.10 * q + 0.01 * prior;
-        if (score > best_score) {
-          best_score = score;
-          best = local;
-        }
-      }
-      return best;
-    };
-    auto fill_plan = [&](MacroExpInnerActionCandidate& candidate, int root_local) {
-      int node_id = 0;
-      int local = root_local;
-      for (size_t depth = 0; depth <= nodes_.size(); ++depth) {
-        if (node_id < 0 || node_id >= static_cast<int>(nodes_.size())) break;
-        const InnerNode& node = nodes_[node_id];
-        const NativeGameState& state = states_[node.state_index];
-        if (node.terminal || state.terminal || state.legal_action_indexes.empty()) break;
-        if (local < 0 || local >= static_cast<int>(state.legal_action_indexes.size())) break;
         const int action_index = state.legal_action_indexes[local];
-        if (action_index < 0 || action_index >= static_cast<int>(actions_.size())) break;
-        candidate.action_signatures.push_back(macro_exp_action_signature(actions_[action_index]));
-        candidate.action_priors.push_back(local < static_cast<int>(node.priors.size()) ? node.priors[local] : 0.0);
-        const int child_id = local < static_cast<int>(node.child_node_ids.size()) ? node.child_node_ids[local] : -1;
-        if (child_id < 0 || child_id >= static_cast<int>(nodes_.size())) break;
-        const NativeGameState& child_state = states_[nodes_[child_id].state_index];
-        if (child_state.terminal || child_state.active_player_id != owner_player_id_) break;
-        node_id = child_id;
-        local = best_continuation_local(nodes_[node_id], child_state);
+        if (action_index < 0 || action_index >= static_cast<int>(actions_.size()) ||
+            !macro_exp_is_plausible_action(state, actions_[action_index])) continue;
+        if (local < static_cast<int>(node.visits.size()) && node.visits[local] > 0) {
+          total_positive_visits += node.visits[local];
+        }
+      }
+
+      // A searched prefix with no positively visited continuation is maximal.
+      // The outer completion step will perform forced actions and end the turn.
+      if (node.terminal || state.terminal || total_positive_visits <= 0) {
+        if (!signatures.empty()) {
+          MacroExpInnerActionCandidate candidate;
+          candidate.action_signatures = signatures;
+          candidate.action_priors = priors;
+          candidate.conditional_visit_shares = visit_shares;
+          candidate.log_confidence = log_confidence;
+          candidate.score = log_confidence;
+          const NativeGameState& root_state = states_[nodes_[0].state_index];
+          candidate.global_action_index = macro_exp_find_legal_action_by_signature(
+              root_state, actions_, signatures.front());
+          if (candidate.global_action_index >= 0) {
+            for (size_t local = 0; local < root_state.legal_action_indexes.size(); ++local) {
+              if (root_state.legal_action_indexes[local] != candidate.global_action_index) continue;
+              candidate.visits = nodes_[0].visits[local];
+              candidate.prior = nodes_[0].priors[local];
+              candidate.q_utility = candidate.visits > 0
+                  ? nodes_[0].value_sums_utility[local] / static_cast<double>(candidate.visits)
+                  : nodes_[0].value_estimate_utility;
+              break;
+            }
+            out.push_back(std::move(candidate));
+          }
+        }
+        return;
+      }
+
+      for (int local = 0; local < static_cast<int>(state.legal_action_indexes.size()); ++local) {
+        const int visits = local < static_cast<int>(node.visits.size()) ? node.visits[local] : 0;
+        if (visits <= 0) continue;
+        const int action_index = state.legal_action_indexes[local];
+        if (action_index < 0 || action_index >= static_cast<int>(actions_.size()) ||
+            !macro_exp_is_plausible_action(state, actions_[action_index])) continue;
+        signatures.push_back(macro_exp_action_signature(actions_[action_index]));
+        priors.push_back(local < static_cast<int>(node.priors.size()) ? node.priors[local] : 0.0);
+        const double conditional_visit_share =
+            static_cast<double>(visits) / static_cast<double>(total_positive_visits);
+        visit_shares.push_back(conditional_visit_share);
+        const double next_log_confidence = log_confidence + std::log(conditional_visit_share);
+        const int child_id = local < static_cast<int>(node.child_node_ids.size())
+            ? node.child_node_ids[local]
+            : -1;
+        if (child_id >= 0 && child_id < static_cast<int>(nodes_.size())) {
+          enumerate(child_id, next_log_confidence);
+        } else {
+          MacroExpInnerActionCandidate candidate;
+          candidate.action_signatures = signatures;
+          candidate.action_priors = priors;
+          candidate.conditional_visit_shares = visit_shares;
+          candidate.log_confidence = next_log_confidence;
+          candidate.score = next_log_confidence;
+          const NativeGameState& root_state = states_[nodes_[0].state_index];
+          candidate.global_action_index = macro_exp_find_legal_action_by_signature(
+              root_state, actions_, signatures.front());
+          if (candidate.global_action_index >= 0) {
+            for (size_t root_local = 0; root_local < root_state.legal_action_indexes.size(); ++root_local) {
+              if (root_state.legal_action_indexes[root_local] != candidate.global_action_index) continue;
+              candidate.visits = nodes_[0].visits[root_local];
+              candidate.prior = nodes_[0].priors[root_local];
+              candidate.q_utility = candidate.visits > 0
+                  ? nodes_[0].value_sums_utility[root_local] / static_cast<double>(candidate.visits)
+                  : nodes_[0].value_estimate_utility;
+              break;
+            }
+            out.push_back(std::move(candidate));
+          }
+        }
+        signatures.pop_back();
+        priors.pop_back();
+        visit_shares.pop_back();
       }
     };
-    for (size_t local = 0; local < root_state.legal_action_indexes.size(); ++local) {
-      const int global_action_index = root_state.legal_action_indexes[local];
-      if (global_action_index < 0 || global_action_index >= static_cast<int>(actions_.size()) ||
-          !macro_exp_is_plausible_action(root_state, actions_[global_action_index])) {
-        continue;
-      }
-      const int visits = root.visits[local];
-      const double q = visits > 0
-          ? root.value_sums_utility[local] / static_cast<double>(visits)
-          : root.value_estimate_utility;
-      const double prior = local < root.priors.size() ? root.priors[local] : 0.0;
-      MacroExpInnerActionCandidate candidate;
-      candidate.global_action_index = global_action_index;
-      candidate.visits = visits;
-      candidate.q_utility = q;
-      candidate.prior = prior;
-      candidate.score = q + 0.05 * prior + 0.002 * std::log1p(static_cast<double>(visits));
-      fill_plan(candidate, static_cast<int>(local));
-      out.push_back(candidate);
-    }
+    enumerate(0, 0.0);
     std::sort(out.begin(), out.end(), [](const MacroExpInnerActionCandidate& left, const MacroExpInnerActionCandidate& right) {
-      if (left.score != right.score) return left.score > right.score;
-      if (left.visits != right.visits) return left.visits > right.visits;
-      return left.prior > right.prior;
+      if (left.log_confidence != right.log_confidence) return left.log_confidence > right.log_confidence;
+      return left.action_signatures < right.action_signatures;
     });
     return out;
   }
@@ -598,6 +916,16 @@ class MacroExpInnerPrimitiveMCTS {
             state.legal_action_indexes[local_action],
             max_actions_);
         leaf_value_utility = evaluate_utility(child);
+
+        // The inner search is only meant to choose the current turn owner's
+        // primitive sequence.  Do not expand the next player's turn into the
+        // same tree: doing so would select that player's actions using the
+        // fixed utility_player_id_ and therefore model them as cooperative
+        // with the current turn owner.
+        if (!child.terminal && child.active_player_id != owner_player_id_) {
+          break;
+        }
+
         const int child_id = make_node(std::move(child));
         nodes_[node_id].child_node_ids[local_action] = child_id;
         break;
@@ -713,12 +1041,17 @@ std::vector<TurnMacroExpMCTS::TurnEdge> TurnMacroExpMCTS::generate_turn_edges(in
   const NativeGameState root_state = states_[state_index];
   const int starting_player = root_state.active_player_id;
   std::unordered_set<std::string> used_plan_keys;
+  std::unordered_set<std::string> used_diversity_keys;
   for (const TurnEdge& edge : nodes_[node_id].edges) {
     std::ostringstream key;
     for (const std::string& signature : edge.plan.executed_macro_exp_action_signatures) {
       key << signature << "\n";
     }
     used_plan_keys.insert(key.str());
+    const std::string diversity_key = edge.diversity_key.empty()
+        ? macro_exp_plan_diversity_key(edge.plan)
+        : edge.diversity_key;
+    if (!diversity_key.empty()) used_diversity_keys.insert(diversity_key);
   }
   std::vector<TurnEdge> out;
   if (max_edges <= 0 || root_state.terminal || root_state.legal_action_indexes.empty()) return out;
@@ -908,6 +1241,7 @@ std::vector<TurnMacroExpMCTS::TurnEdge> TurnMacroExpMCTS::generate_turn_edges(in
     }
     plan.primitives_executed += 1;
     primitive_actions_executed_ += 1;
+    plan.prefix_state_fingerprints.push_back(macro_exp_state_fingerprint(current, actions_));
     if (is_end_turn || current.active_player_id != starting_player) {
       plan.reached_turn_boundary = true;
     }
@@ -917,6 +1251,7 @@ std::vector<TurnMacroExpMCTS::TurnEdge> TurnMacroExpMCTS::generate_turn_edges(in
   auto complete_plan = [&](const std::vector<std::string>& forced_action_signatures, const std::vector<double>& forced_priors) {
     NativeGameState current = root_state;
     MacroExpTurnPlan plan;
+    plan.prefix_state_fingerprints.push_back(macro_exp_state_fingerprint(current, actions_));
     double prior_sum = 0.0;
     int prior_count = 0;
     bool tactical_used = false;
@@ -1019,6 +1354,59 @@ std::vector<TurnMacroExpMCTS::TurnEdge> TurnMacroExpMCTS::generate_turn_edges(in
     return edge;
   };
 
+  auto accept_edge = [&](TurnEdge&& edge, const std::vector<std::string>& reasons) {
+    if (edge.plan.executed_macro_exp_action_signatures.empty()) return false;
+    const std::string exact_key = plan_key(edge.plan);
+    if (exact_key.empty() || !used_plan_keys.insert(exact_key).second) {
+      macro_exp_exact_duplicates_removed_ += 1;
+      return false;
+    }
+    edge.diversity_key = macro_exp_plan_diversity_key(edge.plan);
+    if (edge.diversity_key.empty() || !used_diversity_keys.insert(edge.diversity_key).second) {
+      macro_exp_material_duplicates_removed_ += 1;
+      return false;
+    }
+    edge.selection_reasons = reasons;
+    return true;
+  };
+
+  auto build_confident_edges = [&](const std::vector<MacroExpInnerActionCandidate>& inner_candidates) {
+    std::vector<TurnEdge> edges;
+    edges.reserve(static_cast<size_t>(std::max(1, max_edges)));
+    for (const MacroExpInnerActionCandidate& candidate : inner_candidates) {
+      if (static_cast<int>(edges.size()) >= max_edges) break;
+      if (candidate.global_action_index < 0 ||
+          candidate.global_action_index >= static_cast<int>(actions_.size()) ||
+          !macro_exp_is_plausible_action(root_state, actions_[candidate.global_action_index]) ||
+          !std::isfinite(candidate.log_confidence)) {
+        continue;
+      }
+      TurnEdge edge = complete_plan(candidate.action_signatures, candidate.action_priors);
+      edge.log_confidence = candidate.log_confidence;
+      if (accept_edge(std::move(edge), {"confidence"})) {
+        edges.push_back(std::move(edge));
+      }
+    }
+    if (!edges.empty()) {
+      const double max_log_confidence = std::max_element(
+          edges.begin(), edges.end(), [](const TurnEdge& left, const TurnEdge& right) {
+            return left.log_confidence < right.log_confidence;
+          })->log_confidence;
+      double confidence_sum = 0.0;
+      for (TurnEdge& edge : edges) {
+        edge.prior = std::exp(edge.log_confidence - max_log_confidence);
+        confidence_sum += edge.prior;
+      }
+      if (confidence_sum > 0.0 && std::isfinite(confidence_sum)) {
+        for (TurnEdge& edge : edges) edge.prior /= confidence_sum;
+      } else {
+        const double uniform = 1.0 / static_cast<double>(edges.size());
+        for (TurnEdge& edge : edges) edge.prior = uniform;
+      }
+    }
+    return edges;
+  };
+
   if (root_state.active_player_id != root_player_id_) {
     std::vector<MacroExpInnerActionCandidate> opponent_candidates = run_inner_candidates(root_state);
     if (opponent_candidates.empty()) {
@@ -1026,52 +1414,10 @@ std::vector<TurnMacroExpMCTS::TurnEdge> TurnMacroExpMCTS::generate_turn_edges(in
           "Turn-macro inner search produced no plausible opponent action for active player " +
           std::to_string(root_state.active_player_id));
     }
-    std::vector<TurnEdge> opponent_plans;
-    opponent_plans.reserve(static_cast<size_t>(std::max(1, max_edges)));
-    // Existing opponent plans occupy some of the requested edge slots.  Scan
-    // all ranked candidates so duplicate early candidates do not prevent a
-    // later, genuinely different response from being added.
-    const int max_checked = static_cast<int>(opponent_candidates.size());
-    for (int option_index = 0; option_index < max_checked; ++option_index) {
-      const MacroExpInnerActionCandidate& candidate = opponent_candidates[option_index];
-      if (candidate.global_action_index < 0 || candidate.global_action_index >= static_cast<int>(actions_.size())) continue;
-      if (!macro_exp_is_plausible_action(root_state, actions_[candidate.global_action_index])) continue;
+    macro_exp_raw_candidates_ += static_cast<int>(opponent_candidates.size());
+    std::vector<TurnEdge> opponent_plans = build_confident_edges(opponent_candidates);
 
-      std::vector<std::string> action_signatures = candidate.action_signatures;
-      std::vector<double> action_priors = candidate.action_priors;
-      if (action_signatures.empty()) {
-        action_signatures.push_back(macro_exp_action_signature(actions_[candidate.global_action_index]));
-        action_priors.push_back(std::max(0.0, candidate.prior));
-      }
-      TurnEdge edge = complete_plan(action_signatures, action_priors);
-      if (!edge.plan.executed_macro_exp_action_signatures.empty()) {
-        opponent_plans.push_back(std::move(edge));
-      }
-    }
-
-    std::unordered_set<std::string> seen_plan_keys = used_plan_keys;
-    std::vector<TurnEdge> unique_opponent_plans;
-    unique_opponent_plans.reserve(opponent_plans.size());
     for (TurnEdge& edge : opponent_plans) {
-      const std::string key = plan_key(edge.plan);
-      if (key.empty() || !seen_plan_keys.insert(key).second) continue;
-      unique_opponent_plans.push_back(std::move(edge));
-    }
-
-    const bool use_actor_value = config_.opponent_mode == TurnMacroExpOpponentMode::Maximalist;
-    std::sort(unique_opponent_plans.begin(), unique_opponent_plans.end(), [&](const TurnEdge& left, const TurnEdge& right) {
-      const double left_value = use_actor_value ? left.plan.value_actor : left.plan.value_root;
-      const double right_value = use_actor_value ? right.plan.value_actor : right.plan.value_root;
-      const double left_score = left_value + config_.macro_exp_prior_weight * left.prior;
-      const double right_score = right_value + config_.macro_exp_prior_weight * right.prior;
-      if (left_score != right_score) return left_score > right_score;
-      if (left.plan.primitives_executed != right.plan.primitives_executed) {
-        return left.plan.primitives_executed > right.plan.primitives_executed;
-      }
-      return left.prior > right.prior;
-    });
-
-    for (TurnEdge& edge : unique_opponent_plans) {
       if (static_cast<int>(out.size()) >= max_edges) break;
       out.push_back(std::move(edge));
     }
@@ -1082,62 +1428,10 @@ std::vector<TurnMacroExpMCTS::TurnEdge> TurnMacroExpMCTS::generate_turn_edges(in
   std::vector<MacroExpInnerActionCandidate> root_candidates = run_inner_candidates(root_state);
   if (root_candidates.empty()) return out;
 
-  std::vector<TurnEdge> candidates;
-  candidates.reserve(static_cast<size_t>(std::max(1, max_edges)) * 2);
+  macro_exp_raw_candidates_ += static_cast<int>(root_candidates.size());
+  std::vector<TurnEdge> candidates = build_confident_edges(root_candidates);
 
-  const int sims = std::max(1, config_.inner_simulations);
-  const int visit_floor = std::max(1, sims / 128);
-  const double best_score = root_candidates.empty() ? 0.0 : root_candidates.front().score;
-  int accepted_candidates = 0;
-  for (int option_index = 0;
-       option_index < static_cast<int>(root_candidates.size()) && accepted_candidates < max_edges;
-       ++option_index) {
-    const MacroExpInnerActionCandidate& candidate = root_candidates[option_index];
-    if (candidate.global_action_index < 0 || candidate.global_action_index >= static_cast<int>(actions_.size())) continue;
-    if (!macro_exp_is_plausible_action(root_state, actions_[candidate.global_action_index])) continue;
-    if (option_index > 0) {
-      const double score_gap = best_score - candidate.score;
-      const bool has_search_signal = candidate.visits >= visit_floor || candidate.prior >= 0.02 || score_gap <= 0.25;
-      const bool not_hopeless = score_gap <= 0.75 || candidate.prior >= 0.08 || candidate.visits >= std::max(1, sims / 32);
-      if (!has_search_signal || !not_hopeless) continue;
-    }
-    std::vector<std::string> action_signatures = candidate.action_signatures;
-    std::vector<double> action_priors = candidate.action_priors;
-    if (action_signatures.empty()) {
-      action_signatures.push_back(macro_exp_action_signature(actions_[candidate.global_action_index]));
-      action_priors.push_back(std::max(0.0, candidate.prior));
-    }
-    TurnEdge edge = complete_plan(action_signatures, action_priors);
-    if (edge.plan.executed_macro_exp_action_signatures.empty()) continue;
-    candidates.push_back(std::move(edge));
-    accepted_candidates += 1;
-  }
-
-  std::unordered_set<std::string> seen_plan_keys = used_plan_keys;
-  std::vector<TurnEdge> unique_candidates;
-  unique_candidates.reserve(candidates.size());
   for (TurnEdge& edge : candidates) {
-    const std::string key = plan_key(edge.plan);
-    if (key.empty() || !seen_plan_keys.insert(key).second) continue;
-    unique_candidates.push_back(std::move(edge));
-  }
-
-  const bool use_actor_value =
-      config_.opponent_mode == TurnMacroExpOpponentMode::Maximalist &&
-      root_state.active_player_id != root_player_id_;
-  std::sort(unique_candidates.begin(), unique_candidates.end(), [&](const TurnEdge& left, const TurnEdge& right) {
-    const double left_value = use_actor_value ? left.plan.value_actor : left.plan.value_root;
-    const double right_value = use_actor_value ? right.plan.value_actor : right.plan.value_root;
-    const double left_score = left_value + config_.macro_exp_prior_weight * left.prior;
-    const double right_score = right_value + config_.macro_exp_prior_weight * right.prior;
-    if (left_score != right_score) return left_score > right_score;
-    if (left.plan.primitives_executed != right.plan.primitives_executed) {
-      return left.plan.primitives_executed > right.plan.primitives_executed;
-    }
-    return left.prior > right.prior;
-  });
-
-  for (TurnEdge& edge : unique_candidates) {
     if (static_cast<int>(out.size()) >= max_edges) break;
     out.push_back(std::move(edge));
   }
@@ -1339,8 +1633,33 @@ py::dict TurnMacroExpMCTS::result_py(double temperature, bool sample_action) {
     if (selected_id.empty()) selected_id = id;
   }
 
+  const TurnEdge* selected_edge = nullptr;
+  for (const TurnEdge& edge : root.edges) {
+    if (edge.plan.first_action_id != selected_id) continue;
+    if (selected_edge == nullptr || edge.visits > selected_edge->visits ||
+        (edge.visits == selected_edge->visits && edge.plan.value_root > selected_edge->plan.value_root)) {
+      selected_edge = &edge;
+    }
+  }
+
   response["actionId"] = selected_id.empty() ? py::none() : py::str(selected_id);
   response["rankedActionIds"] = ranked;
+  if (selected_edge != nullptr && selected_edge->plan.executed_macro_exp_action_signatures.size() > 1 &&
+      selected_edge->plan.prefix_state_fingerprints.size() ==
+          selected_edge->plan.executed_macro_exp_action_signatures.size() + 1) {
+    py::dict continuation;
+    py::list signatures;
+    py::list fingerprints;
+    for (size_t index = 1; index < selected_edge->plan.executed_macro_exp_action_signatures.size(); ++index) {
+      signatures.append(selected_edge->plan.executed_macro_exp_action_signatures[index]);
+      fingerprints.append(selected_edge->plan.prefix_state_fingerprints[index]);
+    }
+    continuation["action_signatures"] = signatures;
+    continuation["state_fingerprints"] = fingerprints;
+    continuation["root_player_id"] = root_player_id_;
+    continuation["reaches_turn_boundary"] = selected_edge->plan.reached_turn_boundary;
+    response["_macro_continuation"] = continuation;
+  }
   if (config_.profile_json) {
     response["_profile"] = profile_py();
   }
@@ -1367,8 +1686,16 @@ py::dict TurnMacroExpMCTS::profile_py() const {
       plan["action_signatures"] = signatures;
       plan["first_action_id"] = edge.plan.first_action_id;
       plan["prior"] = edge.prior;
+      plan["edge_prior"] = edge.prior;
+      plan["log_confidence"] = edge.log_confidence;
       plan["value_root"] = edge.plan.value_root;
       plan["primitives_executed"] = edge.plan.primitives_executed;
+      plan["diversity_key"] = edge.diversity_key;
+      py::list selection_reasons;
+      for (const std::string& reason : edge.selection_reasons) {
+        selection_reasons.append(reason);
+      }
+      plan["selection_reasons"] = selection_reasons;
       root_turn_plans.append(plan);
       if (edge.plan.first_action_id.empty()) continue;
       int current = 0;
@@ -1410,6 +1737,12 @@ py::dict TurnMacroExpMCTS::profile_py() const {
   profile["inner_simulations_per_search"] = inner_searches_ > 0
       ? static_cast<double>(inner_simulations_executed_) / static_cast<double>(inner_searches_)
       : 0.0;
+  profile["macro_exp_raw_candidates"] = macro_exp_raw_candidates_;
+  profile["macro_exp_visited_candidates"] = macro_exp_visited_candidates_;
+  profile["macro_exp_value_candidates"] = macro_exp_value_candidates_;
+  profile["macro_exp_prior_candidates"] = macro_exp_prior_candidates_;
+  profile["macro_exp_exact_duplicates_removed"] = macro_exp_exact_duplicates_removed_;
+  profile["macro_exp_material_duplicates_removed"] = macro_exp_material_duplicates_removed_;
   profile["static_eval_calls"] = static_eval_calls_;
   profile["greedy_static_calls"] = greedy_static_calls_;
   profile["greedy_static_candidates_considered"] = greedy_static_candidates_considered_;

@@ -112,6 +112,10 @@ struct MacroExpTurnPlanChoice {
 struct MacroExpTurnPlan {
   std::vector<MacroExpTurnPlanChoice> choices;
   std::vector<std::string> executed_macro_exp_action_signatures;
+  std::vector<std::string> commitment_signatures;
+  // State fingerprints are indexed by primitive-action prefix: element 0 is
+  // the root state, element N is the state after N planned actions.
+  std::vector<std::string> prefix_state_fingerprints;
   std::vector<std::string> executed_action_ids;
   std::string first_action_id;
   std::string first_macro_exp_action_signature;
@@ -125,6 +129,9 @@ struct MacroExpTurnPlan {
 };
 
 std::string macro_exp_action_signature(const NativeAction& action);
+std::string macro_exp_state_fingerprint(
+    const NativeGameState& state,
+    const std::vector<NativeAction>& actions);
 int macro_exp_find_legal_action_by_signature(
     const NativeGameState& state,
     const std::vector<NativeAction>& actions,
@@ -178,6 +185,12 @@ class TurnMacroExpMCTS {
   int inner_searches_ = 0;
   int inner_simulations_executed_ = 0;
   int inner_nodes_expanded_ = 0;
+  int macro_exp_raw_candidates_ = 0;
+  int macro_exp_visited_candidates_ = 0;
+  int macro_exp_value_candidates_ = 0;
+  int macro_exp_prior_candidates_ = 0;
+  int macro_exp_exact_duplicates_removed_ = 0;
+  int macro_exp_material_duplicates_removed_ = 0;
 
   int make_turn_node(NativeGameState state);
   int make_turn_node_with_value(NativeGameState state, double value_estimate_root);
