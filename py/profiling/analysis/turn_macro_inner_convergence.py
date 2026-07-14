@@ -54,8 +54,15 @@ def _response_features(response: dict[str, Any]) -> dict[str, float | int]:
     top_share = visit_counts[0] / total if total else 0.0
     second_share = visit_counts[1] / total if len(visit_counts) > 1 and total else 0.0
     candidates = profile.get("inner_candidates") if isinstance(profile.get("inner_candidates"), list) else []
-    candidate_visits = [max(0, int(item.get("visits", 0) or 0)) for item in candidates if isinstance(item, dict)]
-    candidate_scores = [float(item.get("score", 0.0) or 0.0) for item in candidates if isinstance(item, dict)]
+    visits_by_action: dict[str, int] = {}
+    candidate_scores: list[float] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        action_id = str(item.get("actionId") or "")
+        visits_by_action[action_id] = max(visits_by_action.get(action_id, 0), max(0, int(item.get("visits", 0) or 0)))
+        candidate_scores.append(float(item.get("log_confidence", item.get("score", 0.0)) or 0.0))
+    candidate_visits = sorted(visits_by_action.values(), reverse=True)
     inner_total = sum(candidate_visits)
     inner_top_share = candidate_visits[0] / inner_total if inner_total else 0.0
     inner_second_share = candidate_visits[1] / inner_total if len(candidate_visits) > 1 and inner_total else 0.0
