@@ -2386,6 +2386,59 @@ class NativeMCTSTest(unittest.TestCase):
 
         self.assertEqual(_canonical_state(java_state, 0), _canonical_state(cpp_state, 0))
 
+    def test_java_native_multi_step_partial_regeneration_corpus(self) -> None:
+        # Each case launches the Java oracle once, then replays several
+        # two/three-step paths through one persistent native tree. This is much
+        # cheaper than a separate Java process for every transition and, unlike
+        # ordinary parity checks, exercises native-generated legal actions on
+        # the second and later steps.
+        cases = [
+            (
+                "milestone4:units",
+                48,
+                16,
+                8,
+                "MOVE,ATTACK,BUILD,RESEARCH_TECH",
+            ),
+            (
+                "milestone3:city",
+                64,
+                24,
+                12,
+                "BUILD,BURN_FOREST,CLEAR_FOREST,GROW_FOREST,RESOURCE_GATHERING,DESTROY",
+            ),
+            (
+                "research:tower-unlock",
+                32,
+                24,
+                8,
+                "BUILD_ROAD,BUILD,BURN_FOREST,CLEAR_FOREST,GROW_FOREST,DESTROY",
+            ),
+        ]
+        for index, (fixture, max_states, max_actions_per_state, paths, required_types) in enumerate(cases):
+            argv = [
+                "--fixture",
+                fixture,
+                "--depth",
+                "3",
+                "--max-states",
+                str(max_states),
+                "--max-actions-per-state",
+                str(max_actions_per_state),
+                "--max-actions",
+                "768",
+                "--multi-step-paths",
+                str(paths),
+                "--multi-step-only",
+                "--keep-going",
+                "--require-multi-step-types",
+                required_types,
+            ]
+            if index > 0:
+                argv.append("--no-compile-java")
+            with self.subTest(fixture=fixture):
+                self.assertEqual(run_parity(parse_args(argv)), 0)
+
     def test_java_parity_superunit_attack_uses_authoritative_stats(self) -> None:
         status = run_parity(
             parse_args(

@@ -766,6 +766,41 @@ def run_parity(args: argparse.Namespace) -> int:
 
     failures = 0
     checked = 0
+    if args.multi_step_paths > 0:
+        paths = _select_multi_step_paths(nodes, int(args.multi_step_paths))
+        if not paths:
+            print("MULTI-STEP PARITY FAIL path=$.corpus reason=no_paths", file=sys.stderr)
+            return 1
+        required_types = {
+            value.strip().upper()
+            for value in str(args.require_multi_step_types or "").split(",")
+            if value.strip()
+        }
+        covered_types = {
+            _path_action_type(parent, child)
+            for path in paths
+            for parent, child in path[1:]
+        }
+        missing_types = sorted(required_types - covered_types)
+        if missing_types:
+            print(
+                f"MULTI-STEP PARITY FAIL path=$.corpus missing_types={','.join(missing_types)} "
+                f"covered_types={','.join(sorted(covered_types))}",
+                file=sys.stderr,
+            )
+            return 1
+        for path in paths:
+            checked += len(path)
+            failures += _check_multi_step_path(args, extension, player_id, path)
+            if failures and not args.keep_going:
+                return 1
+        print(
+            f"MULTI-STEP PARITY SUMMARY paths={len(paths)} transitions={sum(len(path) for path in paths)} "
+            f"failures={failures} depth={args.depth} states={len(nodes)}"
+        )
+        if args.multi_step_only:
+            return 1 if failures else 0
+
     for node in nodes:
         java_parent_state = dict(node["state"])
         java_parent = normalize_message({"player_id": player_id, **java_parent_state})
@@ -791,6 +826,185 @@ def run_parity(args: argparse.Namespace) -> int:
 
     print(f"PARITY SUMMARY checked={checked} failures={failures} depth={args.depth} states={len(nodes)}")
     return 1 if failures else 0
+
+
+_PARTIAL_REGEN_ACTION_TYPES = {
+    "MOVE",
+    "STEP_MOVE",
+    "ATTACK",
+    "RESEARCH_TECH",
+    "BUILD",
+    "RESOURCE_GATHERING",
+    "BUILD_ROAD",
+    "BURN_FOREST",
+    "CLEAR_FOREST",
+    "GROW_FOREST",
+    "DESTROY",
+}
+
+
+def _path_action_type(parent_state: dict[str, Any], child: dict[str, Any]) -> str:
+    actions = list(parent_state.get("actions", []) or [])
+    index = int(child.get("action_index", -1))
+    action = actions[index] if 0 <= index < len(actions) else {}
+    action_type = str(action.get("type", action.get("t", ""))).upper()
+    return "RESEARCH_TECH" if action_type == "RESEARCH" else action_type
+
+
+def _select_multi_step_paths(
+    nodes: list[dict[str, Any]],
+    max_paths: int,
+) -> list[list[tuple[dict[str, Any], dict[str, Any]]]]:
+    """Choose a small, diverse set of real Java paths that exercise native continuity."""
+    if max_paths <= 0 or not nodes:
+        return []
+    by_state_id = {str(node.get("state_id", "")): node for node in nodes}
+    candidates: list[list[tuple[dict[str, Any], dict[str, Any]]]] = []
+
+    def visit(node: dict[str, Any], path: list[tuple[dict[str, Any], dict[str, Any]]]) -> None:
+        parent_state = dict(node.get("state") or {})
+        for child in node.get("children", []) or []:
+            if not bool(child.get("ok", False)) or not isinstance(child.get("state"), dict):
+                continue
+            next_path = [*path, (parent_state, child)]
+            if len(next_path) >= 2:
+                candidates.append(next_path)
+            child_state_id = str(child["state"].get("state_id", ""))
+            child_node = by_state_id.get(child_state_id)
+            if child_node is not None and int(child_node.get("depth", 0) or 0) > int(node.get("depth", 0) or 0):
+                visit(child_node, next_path)
+
+    visit(nodes[0], [])
+    # Paths whose second or later transition can use partial regeneration are
+    # the main target. Keep other paths as fallback coverage for continuity.
+    candidates.sort(key=lambda path: (-len(path), tuple(_path_action_type(parent, child) for parent, child in path)))
+    selected: list[list[tuple[dict[str, Any], dict[str, Any]]]] = []
+    covered_types: set[str] = set()
+    while candidates and len(selected) < max_paths:
+        best_index = 0
+        best_score: tuple[int, int, int] | None = None
+        for index, path in enumerate(candidates):
+            continuation_types = {
+                _path_action_type(parent, child)
+                for parent, child in path[1:]
+            }
+            partial_types = continuation_types & _PARTIAL_REGEN_ACTION_TYPES
+            score = (
+                len(partial_types - covered_types),
+                len(partial_types),
+                len(path),
+            )
+            if best_score is None or score > best_score:
+                best_score = score
+                best_index = index
+        path = candidates.pop(best_index)
+        selected.append(path)
+        covered_types.update(
+            _path_action_type(parent, child)
+            for parent, child in path[1:]
+            if _path_action_type(parent, child) in _PARTIAL_REGEN_ACTION_TYPES
+        )
+    return selected
+
+
+def _find_matching_action_local(
+    native_actions: list[dict[str, Any]],
+    java_action: dict[str, Any],
+) -> int:
+    target = _canonical_action(java_action)
+    for index, action in enumerate(native_actions):
+        if _canonical_action(action) == target:
+            return index
+    return -1
+
+
+def _check_multi_step_path(
+    args: argparse.Namespace,
+    extension: Any,
+    player_id: int,
+    path: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> int:
+    if len(path) < 2:
+        return 0
+    first_parent, first_child = path[0]
+    root = normalize_message({"player_id": player_id, **copy.deepcopy(first_parent)})
+    first_index = int(first_child.get("action_index", -1))
+    if first_index < 0 or first_index >= len(root.get("actions", [])):
+        print("MULTI-STEP PARITY FAIL path=$.root_action_index", file=sys.stderr)
+        return 1
+    tree = extension.NativeMCTS(
+        root,
+        [first_index],
+        [1.0],
+        0.0,
+        bool(root.get("is_terminal", False)),
+        int(args.seed),
+        int(args.max_actions),
+        False,
+    )
+    action_types: list[str] = []
+    for step, (java_parent_state, java_child) in enumerate(path):
+        action_type = _path_action_type(java_parent_state, java_child)
+        action_types.append(action_type)
+        try:
+            selection = dict(tree.select_leaf(1.0))
+            cpp_payload = dict(selection.get("leaf_payload") or {})
+            java_canonical = _canonical_state(dict(java_child["state"]), player_id)
+            cpp_canonical = _canonical_state(cpp_payload, player_id)
+            diff = _first_diff(java_canonical, cpp_canonical)
+            if diff is not None:
+                diff_path, java_value, cpp_value = diff
+                raise ParityFailure(
+                    f"MULTI-STEP PARITY FAIL step={step + 1} types={'/'.join(action_types)} "
+                    f"path={diff_path} java={json.dumps(java_value, sort_keys=True)} "
+                    f"cpp={json.dumps(cpp_value, sort_keys=True)}"
+                )
+            if step + 1 >= len(path):
+                continue
+
+            next_parent, next_child = path[step + 1]
+            java_parent = normalize_message({"player_id": player_id, **copy.deepcopy(next_parent)})
+            java_actions = list(java_parent.get("actions", []) or [])
+            next_index = int(next_child.get("action_index", -1))
+            if next_index < 0 or next_index >= len(java_actions):
+                raise ParityFailure(
+                    f"MULTI-STEP PARITY FAIL step={step + 2} types={'/'.join(action_types)} "
+                    "path=$.java_action_index"
+                )
+            native_actions = list(cpp_payload.get("actions", []) or [])
+            local = _find_matching_action_local(native_actions, java_actions[next_index])
+            if local < 0:
+                raise ParityFailure(
+                    f"MULTI-STEP PARITY FAIL step={step + 2} types={'/'.join(action_types)} "
+                    f"path=$.actions missing={json.dumps(_canonical_action(java_actions[next_index]), sort_keys=True)}"
+                )
+            leaf_action_indexes = list(selection.get("leaf_action_indexes", []) or [])
+            priors = [0.0] * len(leaf_action_indexes)
+            if local >= len(priors):
+                raise ParityFailure(
+                    f"MULTI-STEP PARITY FAIL step={step + 2} types={'/'.join(action_types)} "
+                    "path=$.leaf_action_indexes"
+                )
+            priors[local] = 1.0
+            tree.expand(
+                int(selection["parent_node_id"]),
+                int(selection["parent_action_index"]),
+                priors,
+                0.0,
+                bool(selection.get("leaf_terminal", False)),
+            )
+        except Exception as exc:
+            if isinstance(exc, ParityFailure):
+                print(str(exc), file=sys.stderr)
+            else:
+                print(
+                    f"MULTI-STEP PARITY FAIL step={step + 1} types={'/'.join(action_types)} "
+                    f"path=$.cpp_exception cpp={exc}",
+                    file=sys.stderr,
+                )
+            return 1
+    print(f"MULTI-STEP PARITY OK steps={len(path)} types={'/'.join(action_types)}")
+    return 0
 
 
 def _check_child(
@@ -864,6 +1078,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--max-states", type=int, default=24, help="Maximum Java states to expand for deeper parity.")
     parser.add_argument("--max-actions-per-state", type=int, default=8, help="Maximum actions sampled from each Java state.")
     parser.add_argument("--keep-going", action="store_true", help="Continue after the first parity failure.")
+    parser.add_argument("--multi-step-paths", type=int, default=0, help="Check up to N diverse Java paths in one persistent native tree.")
+    parser.add_argument("--multi-step-only", action="store_true", help="Skip the ordinary one-transition checks.")
+    parser.add_argument("--require-multi-step-types", default="", help="Comma-separated action types required after the first step of the selected corpus.")
     parser.add_argument("--no-compile-java", action="store_true", help="Skip javac before running the Java oracle.")
     parser.add_argument("--seed", type=int, default=7, help="Native tree seed.")
     parser.add_argument("--max-actions", type=int, default=256, help="Native max action cap.")

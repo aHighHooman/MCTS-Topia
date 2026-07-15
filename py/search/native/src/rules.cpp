@@ -1,12 +1,14 @@
 #include "rules.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <cmath>
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace tribes::native {
 namespace {
@@ -264,6 +266,7 @@ NativeGameState copy_transition_state_without_observation(const NativeGameState&
   next.terminal = state.terminal;
   next.leveling_up = state.leveling_up;
   next.can_end_turn = state.can_end_turn;
+  next.legal_actions_native_generated = state.legal_actions_native_generated;
 #ifdef TRIBES_NATIVE_MCTS_STANDALONE
   next.generated_action_ids_enabled = false;
 #else
@@ -2481,8 +2484,16 @@ bool adjacent_visible_enemy_unit(const NativeGameState& state, const NativeUnit&
   return false;
 }
 
-std::vector<std::pair<int, int>> reachable_move_targets(const NativeGameState& state, const NativeUnit& unit) {
-  std::vector<std::pair<int, int>> targets;
+const std::vector<std::pair<int, int>>& reachable_move_targets(
+    const NativeGameState& state,
+    const NativeUnit& unit) {
+  // Action regeneration calls this once for every movable unit, often many
+  // thousands of times per search. Reuse the traversal buffers per thread;
+  // none of the callers retain the returned range or invoke this recursively.
+  thread_local std::vector<std::pair<int, int>> targets;
+  thread_local std::vector<double> best;
+  thread_local std::vector<std::pair<int, int>> frontier;
+  targets.clear();
   if (state.board_size <= 0 || water_unit_type(unit.type)) {
     return targets;
   }
@@ -2490,8 +2501,8 @@ std::vector<std::pair<int, int>> reachable_move_targets(const NativeGameState& s
   const int board_size = state.board_size;
   const int board_cells = board_size * board_size;
   targets.reserve(static_cast<size_t>(board_cells));
-  std::vector<double> best(static_cast<size_t>(board_cells), std::numeric_limits<double>::infinity());
-  std::vector<std::pair<int, int>> frontier;
+  best.assign(static_cast<size_t>(board_cells), std::numeric_limits<double>::infinity());
+  frontier.clear();
   frontier.reserve(static_cast<size_t>(board_cells));
   const std::pair<int, int> start{unit.x, unit.y};
   const auto board_index = [board_size](int x, int y) {
@@ -3689,8 +3700,8 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
   }
 
   if (unit_can_move(unit)) {
-    std::vector<std::pair<int, int>> java_priority_order;
-    java_priority_order.reserve(8);
+    std::array<std::pair<int, int>, 8> java_priority_order{};
+    size_t java_priority_count = 0;
     if (state.active_player_id == state.root_player_id) {
       static const int move_order[8][2] = {{-1, -1}, {1, 1}, {1, 0}, {1, -1}, {0, 1}, {0, -1}, {-1, 1}, {-1, 0}};
       for (const auto& delta : move_order) {
@@ -3701,12 +3712,12 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
         }
         NativeTile* tile = tile_at(state, x, y);
         if (tile != nullptr && passable_move_target(state, *tile)) {
-          java_priority_order.emplace_back(x, y);
+          java_priority_order[java_priority_count++] = {x, y};
         }
       }
     } else {
-      std::vector<std::pair<int, int>> move_targets;
-      move_targets.reserve(8);
+      std::array<std::pair<int, int>, 8> move_targets{};
+      size_t move_target_count = 0;
       for (int x = std::max(0, unit.x - 1); x <= std::min(state.board_size - 1, unit.x + 1); ++x) {
         for (int y = std::max(0, unit.y - 1); y <= std::min(state.board_size - 1, unit.y + 1); ++y) {
           if (x == unit.x && y == unit.y) {
@@ -3714,23 +3725,26 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
           }
           NativeTile* tile = tile_at(state, x, y);
           if (tile != nullptr && passable_move_target(state, *tile)) {
-            move_targets.emplace_back(x, y);
+            move_targets[move_target_count++] = {x, y};
           }
         }
       }
-      if (!move_targets.empty()) {
-        java_priority_order.push_back(move_targets.front());
-        for (auto it = move_targets.rbegin(); it != move_targets.rend(); ++it) {
-          if (*it != move_targets.front()) {
-            java_priority_order.push_back(*it);
+      if (move_target_count > 0) {
+        java_priority_order[java_priority_count++] = move_targets[0];
+        for (size_t offset = 0; offset < move_target_count; ++offset) {
+          const auto& target = move_targets[move_target_count - 1 - offset];
+          if (target != move_targets[0]) {
+            java_priority_order[java_priority_count++] = target;
           }
         }
       }
     }
-    if (!java_priority_order.empty()) {
-      std::set<std::pair<int, int>> emitted_moves;
-      for (const auto& target : java_priority_order) {
-        emitted_moves.insert(target);
+    if (java_priority_count > 0) {
+      std::array<std::pair<int, int>, 8> emitted_moves{};
+      size_t emitted_move_count = 0;
+      for (size_t priority_index = 0; priority_index < java_priority_count; ++priority_index) {
+        const auto& target = java_priority_order[priority_index];
+        emitted_moves[emitted_move_count++] = target;
         append_tile_action(
             state,
             actions,
@@ -3745,7 +3759,8 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
             "destination");
       }
       for (const auto& target : reachable_move_targets(state, unit)) {
-        if (emitted_moves.count(target) > 0) {
+        if (std::find(emitted_moves.begin(), emitted_moves.begin() + emitted_move_count, target) !=
+            emitted_moves.begin() + emitted_move_count) {
           continue;
         }
         append_tile_action(
@@ -3828,7 +3843,7 @@ void regenerate_city_actions(NativeGameState& state, std::vector<NativeAction>& 
 
   for (NativeTile* tile : tiles) {
     if (tile->terrain == "FOREST" && tile->building.empty() && tile_in_city_territory(*tile, city) &&
-        is_action_unlocked(*tribe, "BURN_FOREST") && stars >= 5) {
+        is_action_unlocked(*tribe, "BURN_FOREST") && stars >= 3) {
       NativeAction burn;
       burn.type = "BURN_FOREST";
       burn.city_id = city.id;
@@ -4035,6 +4050,7 @@ void regenerate_tribe_actions(NativeGameState& state, std::vector<NativeAction>&
 
 void regenerate_actions(NativeGameState& state, std::vector<NativeAction>& actions, int max_actions) {
   state.legal_action_indexes.clear();
+  state.legal_actions_native_generated = true;
   if (state.terminal) {
     return;
   }
@@ -4159,7 +4175,11 @@ int active_city_center_id_at(const NativeGameState& state, int x, int y) {
   return city->id;
 }
 
-void add_active_city_center_if_present(const NativeGameState& state, int x, int y, std::set<int>& city_ids) {
+void add_active_city_center_if_present(
+    const NativeGameState& state,
+    int x,
+    int y,
+    std::unordered_set<int>& city_ids) {
   const int city_id = active_city_center_id_at(state, x, y);
   if (city_id > 0) {
     city_ids.insert(city_id);
@@ -4194,174 +4214,151 @@ std::vector<int> regenerate_unit_action_indexes(
   return state.legal_action_indexes;
 }
 
-std::vector<int> regenerate_all_active_unit_action_indexes(
-    NativeGameState& state,
-    std::vector<NativeAction>& actions) {
-  std::vector<int> out;
-  for (const NativeUnit& unit : state.units) {
-    if (unit.tribe_id != state.active_player_id) {
-      continue;
-    }
-    state.legal_action_indexes.clear();
-    regenerate_unit_actions(state, actions, -1, unit);
-    out.insert(out.end(), state.legal_action_indexes.begin(), state.legal_action_indexes.end());
-  }
-  return out;
-}
-
-bool partially_regenerate_all_unit_actions(
+bool partially_regenerate_action_components(
     const NativeGameState& previous,
     NativeGameState& next,
     std::vector<NativeAction>& actions,
-    const std::set<int>& dirty_city_ids,
+    const std::unordered_set<int>& dirty_city_ids,
+    const std::unordered_set<int>& dirty_unit_ids,
+    bool regenerate_tribe,
+    bool regenerate_all_cities,
     int max_actions) {
   const NativeTribe* active_tribe = tribe_by_id(next, next.active_player_id);
-  if (active_tribe == nullptr || active_player_has_level_up_action(next)) {
+  if (!previous.legal_actions_native_generated || active_tribe == nullptr ||
+      active_player_has_level_up_action(next) ||
+      (max_actions >= 0 && static_cast<int>(previous.legal_action_indexes.size()) >= max_actions)) {
     return false;
   }
 
-  std::vector<int> tribe_action_indexes;
-  std::map<int, std::vector<int>> city_action_indexes;
-  for (int action_index : previous.legal_action_indexes) {
-    if (action_index < 0 || action_index >= static_cast<int>(actions.size())) {
-      continue;
-    }
-    const NativeAction& action = actions[static_cast<size_t>(action_index)];
-    const int unit_id = action_int(action, "unit_id", "u", 0);
-    if (unit_id > 0) {
-      continue;
-    }
-    const int city_id = action_int(action, "city_id", "c", 0);
-    if (city_id > 0) {
-      city_action_indexes[city_id].push_back(action_index);
-    } else {
-      tribe_action_indexes.push_back(action_index);
-    }
-  }
-
-  std::map<int, std::vector<int>> regenerated_city_action_indexes;
-  for (int city_id : dirty_city_ids) {
-    const NativeCity* city = city_by_id(next, city_id);
-    if (city != nullptr && city->tribe_id == next.active_player_id) {
-      regenerated_city_action_indexes[city_id] = regenerate_city_action_indexes(next, actions, *city);
-    }
-  }
-  const std::vector<int> regenerated_unit_action_indexes =
-      regenerate_all_active_unit_action_indexes(next, actions);
-
   std::vector<int> merged;
-  if (!append_legal_indexes_with_cap(merged, tribe_action_indexes, max_actions)) {
+  merged.reserve(previous.legal_action_indexes.size());
+  auto append_preserved_component = [&](int unit_id, int city_id) {
+    for (int action_index : previous.legal_action_indexes) {
+      if (action_index < 0 || action_index >= static_cast<int>(actions.size())) {
+        continue;
+      }
+      const NativeAction& action = actions[static_cast<size_t>(action_index)];
+      const bool matches = unit_id > 0
+          ? action.unit_id == unit_id
+          : city_id > 0
+              ? action.unit_id <= 0 && action.city_id == city_id
+              : action.unit_id <= 0 && action.city_id <= 0;
+      if (!matches) {
+        continue;
+      }
+      if (max_actions >= 0 && static_cast<int>(merged.size()) >= max_actions) {
+        return false;
+      }
+      merged.push_back(action_index);
+    }
+    return true;
+  };
+
+  if (regenerate_tribe) {
+    next.legal_action_indexes.clear();
+    regenerate_tribe_actions(next, actions, -1);
+    if (!append_legal_indexes_with_cap(merged, next.legal_action_indexes, max_actions)) {
+      next.legal_action_indexes = std::move(merged);
+      sync_observation_turn_flags(next);
+      return true;
+    }
+  } else if (!append_preserved_component(0, 0)) {
     next.legal_action_indexes = std::move(merged);
     sync_observation_turn_flags(next);
     return true;
   }
   for (int city_id : active_tribe->city_ids) {
-    const auto regenerated = regenerated_city_action_indexes.find(city_id);
-    if (regenerated != regenerated_city_action_indexes.end()) {
-      if (!append_legal_indexes_with_cap(merged, regenerated->second, max_actions)) {
+    const NativeCity* city = city_by_id(next, city_id);
+    if (city == nullptr || city->tribe_id != next.active_player_id) {
+      continue;
+    }
+    if (regenerate_all_cities || dirty_city_ids.count(city_id) > 0) {
+      const std::vector<int> regenerated = regenerate_city_action_indexes(next, actions, *city);
+      if (!append_legal_indexes_with_cap(merged, regenerated, max_actions)) {
         next.legal_action_indexes = std::move(merged);
         sync_observation_turn_flags(next);
         return true;
       }
       continue;
     }
-    const auto preserved = city_action_indexes.find(city_id);
-    if (preserved != city_action_indexes.end() &&
-        !append_legal_indexes_with_cap(merged, preserved->second, max_actions)) {
+    if (!append_preserved_component(0, city_id)) {
       next.legal_action_indexes = std::move(merged);
       sync_observation_turn_flags(next);
       return true;
     }
   }
-  append_legal_indexes_with_cap(merged, regenerated_unit_action_indexes, max_actions);
-  next.legal_action_indexes = std::move(merged);
-  sync_observation_turn_flags(next);
-  return true;
-}
-
-bool partially_regenerate_single_unit_actions(
-    const NativeGameState& previous,
-    NativeGameState& next,
-    std::vector<NativeAction>& actions,
-    int dirty_unit_id,
-    int max_actions) {
-  const NativeUnit* unit = unit_by_id(next, dirty_unit_id);
-  const std::vector<int> regenerated_unit_action_indexes =
-      unit == nullptr ? std::vector<int>{} : regenerate_unit_action_indexes(next, actions, *unit);
-
-  bool inserted_dirty_unit_actions = false;
-  std::vector<int> merged;
-  for (int action_index : previous.legal_action_indexes) {
-    if (action_index < 0 || action_index >= static_cast<int>(actions.size())) {
+  for (const NativeUnit& unit : next.units) {
+    if (unit.tribe_id != next.active_player_id || unit.current_hp == 0) {
       continue;
     }
-    const NativeAction& action = actions[static_cast<size_t>(action_index)];
-    const int unit_id = action_int(action, "unit_id", "u", 0);
-    if (unit_id == dirty_unit_id) {
-      if (!inserted_dirty_unit_actions) {
-        append_legal_indexes_with_cap(merged, regenerated_unit_action_indexes, max_actions);
-        inserted_dirty_unit_actions = true;
+    if (dirty_unit_ids.count(unit.id) > 0) {
+      const std::vector<int> regenerated = regenerate_unit_action_indexes(next, actions, unit);
+      if (!append_legal_indexes_with_cap(merged, regenerated, max_actions)) {
+        next.legal_action_indexes = std::move(merged);
+        sync_observation_turn_flags(next);
+        return true;
       }
       continue;
     }
-    if (max_actions >= 0 && static_cast<int>(merged.size()) >= max_actions) {
-      break;
+    if (!append_preserved_component(unit.id, 0)) {
+      next.legal_action_indexes = std::move(merged);
+      sync_observation_turn_flags(next);
+      return true;
     }
-    merged.push_back(action_index);
-  }
-  if (!inserted_dirty_unit_actions) {
-    append_legal_indexes_with_cap(merged, regenerated_unit_action_indexes, max_actions);
   }
   next.legal_action_indexes = std::move(merged);
+  next.legal_actions_native_generated = true;
   sync_observation_turn_flags(next);
   return true;
 }
 
-std::vector<int> regenerate_tribe_action_indexes(
-    NativeGameState& state,
-    std::vector<NativeAction>& actions) {
-  state.legal_action_indexes.clear();
-  regenerate_tribe_actions(state, actions, -1);
-  return state.legal_action_indexes;
-}
-
-std::vector<int> regenerate_all_active_city_action_indexes(
-    NativeGameState& state,
-    std::vector<NativeAction>& actions) {
-  std::vector<int> out;
-  const NativeTribe* active_tribe = tribe_by_id(state, state.active_player_id);
-  if (active_tribe == nullptr) {
-    return out;
-  }
-  for (int city_id : active_tribe->city_ids) {
-    const NativeCity* city = city_by_id(state, city_id);
-    if (city == nullptr || city->tribe_id != state.active_player_id) {
-      continue;
-    }
-    state.legal_action_indexes.clear();
-    regenerate_city_actions(state, actions, -1, *city);
-    out.insert(out.end(), state.legal_action_indexes.begin(), state.legal_action_indexes.end());
-  }
-  return out;
-}
-
-bool active_unit_actions_may_depend_on_research_or_stars(
+void add_star_sensitive_active_units(
     const NativeGameState& state,
-    const std::string& researched_tech) {
-  if (researched_tech == "FREE_SPIRIT" || researched_tech == "RAMMING" ||
-      researched_tech == "SAILING" || researched_tech == "NAVIGATION" ||
-      researched_tech == "DIPLOMACY") {
-    return true;
-  }
+    std::unordered_set<int>& dirty_unit_ids) {
   for (const NativeUnit& unit : state.units) {
-    if (unit.tribe_id != state.active_player_id || unit.current_hp <= 0) {
+    if (unit.tribe_id != state.active_player_id || unit.current_hp == 0) {
       continue;
     }
     if (unit.type == "RAFT" || unit.type == "SCOUT") {
-      return true;
+      dirty_unit_ids.insert(unit.id);
     }
   }
-  return false;
+}
+
+void add_active_units_depending_on_squares(
+    const NativeGameState& state,
+    const std::vector<std::pair<int, int>>& changed_squares,
+    std::unordered_set<int>& dirty_unit_ids,
+    bool combat_targets_changed,
+    bool friendly_positions_changed) {
+  for (const NativeUnit& unit : state.units) {
+    if (unit.tribe_id != state.active_player_id || unit.current_hp == 0) {
+      continue;
+    }
+    int dependency_radius = -1;
+    // Roads can halve movement cost, so 2 * movement is the maximum number
+    // of grid steps in which occupancy, terrain, roads, or zones of control
+    // can affect a unit that is currently allowed to move.
+    if (unit_can_move(unit)) {
+      dependency_radius = 2 * std::max(1, unit.movement);
+    }
+    if (combat_targets_changed && unit_can_attack(unit)) {
+      dependency_radius = std::max(dependency_radius, std::max(1, unit.range));
+    }
+    if (friendly_positions_changed && unit.type == "MIND_BENDER") {
+      dependency_radius = std::max(dependency_radius, 1);
+    }
+    if (dependency_radius < 0) {
+      continue;
+    }
+    for (const auto& square : changed_squares) {
+      if (std::max(std::abs(unit.x - square.first), std::abs(unit.y - square.second)) <=
+          dependency_radius) {
+        dirty_unit_ids.insert(unit.id);
+        break;
+      }
+    }
+  }
 }
 
 bool partially_regenerate_research_preserving_unit_actions(
@@ -4371,43 +4368,33 @@ bool partially_regenerate_research_preserving_unit_actions(
     const NativeAction& applied,
     int max_actions,
     int newly_explored) {
-  if (max_actions >= 0 && static_cast<int>(previous.legal_action_indexes.size()) >= max_actions) {
-    return false;
-  }
   if (newly_explored != 0 || previous.leveling_up || next.leveling_up ||
       active_player_has_level_up_action(next)) {
     return false;
   }
   const std::string researched_tech = action_string(applied, "tech");
-  if (researched_tech.empty() ||
-      active_unit_actions_may_depend_on_research_or_stars(previous, researched_tech)) {
+  if (researched_tech.empty() || researched_tech == "DIPLOMACY") {
     return false;
   }
 
-  const std::vector<int> regenerated_tribe_action_indexes = regenerate_tribe_action_indexes(next, actions);
-  const std::vector<int> regenerated_city_action_indexes = regenerate_all_active_city_action_indexes(next, actions);
-  std::vector<int> preserved_unit_action_indexes;
-  for (int action_index : previous.legal_action_indexes) {
-    if (action_index < 0 || action_index >= static_cast<int>(actions.size())) {
-      continue;
-    }
-    const NativeAction& action = actions[static_cast<size_t>(action_index)];
-    if (action_int(action, "unit_id", "u", 0) > 0) {
-      preserved_unit_action_indexes.push_back(action_index);
+  std::unordered_set<int> dirty_unit_ids;
+  add_star_sensitive_active_units(next, dirty_unit_ids);
+  if (researched_tech == "FREE_SPIRIT") {
+    for (const NativeUnit& unit : next.units) {
+      if (unit.tribe_id == next.active_player_id && unit.current_hp != 0) {
+        dirty_unit_ids.insert(unit.id);
+      }
     }
   }
-
-  std::vector<int> merged;
-  if (!append_legal_indexes_with_cap(merged, regenerated_tribe_action_indexes, max_actions) ||
-      !append_legal_indexes_with_cap(merged, regenerated_city_action_indexes, max_actions)) {
-    next.legal_action_indexes = std::move(merged);
-    sync_observation_turn_flags(next);
-    return true;
-  }
-  append_legal_indexes_with_cap(merged, preserved_unit_action_indexes, max_actions);
-  next.legal_action_indexes = std::move(merged);
-  sync_observation_turn_flags(next);
-  return true;
+  return partially_regenerate_action_components(
+      previous,
+      next,
+      actions,
+      {},
+      dirty_unit_ids,
+      true,
+      true,
+      max_actions);
 }
 
 bool try_partially_regenerate_actions_after_attack_or_move(
@@ -4418,7 +4405,8 @@ bool try_partially_regenerate_actions_after_attack_or_move(
     const std::string& type,
     int max_actions,
     int newly_explored) {
-  if (max_actions >= 0 && static_cast<int>(previous.legal_action_indexes.size()) >= max_actions) {
+  if (!previous.legal_actions_native_generated ||
+      (max_actions >= 0 && static_cast<int>(previous.legal_action_indexes.size()) >= max_actions)) {
     return false;
   }
   if (newly_explored != 0 || previous.leveling_up || next.leveling_up) {
@@ -4436,10 +4424,25 @@ bool try_partially_regenerate_actions_after_attack_or_move(
     if (destination_x == previous_unit->x && destination_y == previous_unit->y) {
       return false;
     }
-    std::set<int> dirty_city_ids;
+    std::unordered_set<int> dirty_city_ids;
     add_active_city_center_if_present(next, previous_unit->x, previous_unit->y, dirty_city_ids);
     add_active_city_center_if_present(next, destination_x, destination_y, dirty_city_ids);
-    return partially_regenerate_all_unit_actions(previous, next, actions, dirty_city_ids, max_actions);
+    std::unordered_set<int> dirty_unit_ids{unit_id};
+    add_active_units_depending_on_squares(
+        next,
+        {{previous_unit->x, previous_unit->y}, {destination_x, destination_y}},
+        dirty_unit_ids,
+        false,
+        true);
+    return partially_regenerate_action_components(
+        previous,
+        next,
+        actions,
+        dirty_city_ids,
+        dirty_unit_ids,
+        false,
+        false,
+        max_actions);
   }
 
   if (type != "ATTACK") {
@@ -4465,10 +4468,25 @@ bool try_partially_regenerate_actions_after_attack_or_move(
       next_attacker->x == previous_attacker->x &&
       next_attacker->y == previous_attacker->y;
   if (simple_nonlethal) {
-    return partially_regenerate_single_unit_actions(previous, next, actions, attacker_id, max_actions);
+    std::unordered_set<int> dirty_unit_ids{attacker_id};
+    add_active_units_depending_on_squares(
+        next,
+        {{previous_attacker->x, previous_attacker->y}, {previous_target->x, previous_target->y}},
+        dirty_unit_ids,
+        true,
+        false);
+    return partially_regenerate_action_components(
+        previous,
+        next,
+        actions,
+        {},
+        dirty_unit_ids,
+        false,
+        false,
+        max_actions);
   }
 
-  std::set<int> dirty_city_ids;
+  std::unordered_set<int> dirty_city_ids;
   add_active_city_center_if_present(next, previous_attacker->x, previous_attacker->y, dirty_city_ids);
   add_active_city_center_if_present(next, previous_target->x, previous_target->y, dirty_city_ids);
   if (next_attacker != nullptr) {
@@ -4477,7 +4495,95 @@ bool try_partially_regenerate_actions_after_attack_or_move(
   if (next_target != nullptr) {
     add_active_city_center_if_present(next, next_target->x, next_target->y, dirty_city_ids);
   }
-  return partially_regenerate_all_unit_actions(previous, next, actions, dirty_city_ids, max_actions);
+  std::vector<std::pair<int, int>> changed_squares = {
+      {previous_attacker->x, previous_attacker->y},
+      {previous_target->x, previous_target->y}};
+  if (next_attacker != nullptr) {
+    changed_squares.emplace_back(next_attacker->x, next_attacker->y);
+  }
+  if (next_target != nullptr) {
+    changed_squares.emplace_back(next_target->x, next_target->y);
+  }
+  std::unordered_set<int> dirty_unit_ids{attacker_id};
+  add_active_units_depending_on_squares(
+      next,
+      changed_squares,
+      dirty_unit_ids,
+      true,
+      false);
+  return partially_regenerate_action_components(
+      previous,
+      next,
+      actions,
+      dirty_city_ids,
+      dirty_unit_ids,
+      false,
+      false,
+      max_actions);
+}
+
+bool try_partially_regenerate_actions_after_economy_or_board_change(
+    const NativeGameState& previous,
+    NativeGameState& next,
+    std::vector<NativeAction>& actions,
+    const NativeAction& applied,
+    const std::string& type,
+    int max_actions,
+    int newly_explored) {
+  if (newly_explored != 0 || previous.leveling_up || next.leveling_up) {
+    return false;
+  }
+  const bool supported =
+      type == "BUILD" || type == "RESOURCE_GATHERING" || type == "BUILD_ROAD" ||
+      type == "BURN_FOREST" || type == "CLEAR_FOREST" || type == "GROW_FOREST" ||
+      type == "DESTROY";
+  if (!supported) {
+    return false;
+  }
+
+  const int city_id = action_int(applied, "city_id", "c", 0);
+  std::unordered_set<int> dirty_city_ids;
+  if (city_id > 0) {
+    dirty_city_ids.insert(city_id);
+  } else if (applied.has_xy) {
+    const NativeTile* tile = tile_at(const_cast<NativeGameState&>(next), applied.x, applied.y);
+    if (tile != nullptr && tile->city_id > 0) {
+      dirty_city_ids.insert(tile->city_id);
+    }
+  }
+
+  const bool stars_changed = type != "DESTROY";
+  std::unordered_set<int> dirty_unit_ids;
+  if (stars_changed) {
+    add_star_sensitive_active_units(next, dirty_unit_ids);
+  }
+
+  const std::string building = action_string(applied, "building_type", "bt");
+  const bool square_affects_units =
+      type == "BUILD_ROAD" || type == "BURN_FOREST" || type == "CLEAR_FOREST" ||
+      type == "GROW_FOREST" || (type == "BUILD" && building == "LUMBER_HUT");
+  if (square_affects_units) {
+    const int x = action_int(applied, "x", nullptr, -1);
+    const int y = action_int(applied, "y", nullptr, -1);
+    if (x >= 0 && y >= 0) {
+      add_active_units_depending_on_squares(
+          next,
+          {{x, y}},
+          dirty_unit_ids,
+          false,
+          false);
+    }
+  }
+
+  return partially_regenerate_action_components(
+      previous,
+      next,
+      actions,
+      dirty_city_ids,
+      dirty_unit_ids,
+      true,
+      stars_changed,
+      max_actions);
 }
 
 bool tile_visible_for_asset(const NativeGameState& state, int x, int y) {
@@ -5170,7 +5276,7 @@ bool apply_clear_or_burn_forest(NativeGameState& next, const NativeAction& actio
     tile->resource = "CROPS";
   }
   sync_tile_to_payload(next, *tile);
-  update_tribe_economy(next, tribe_id, burn ? -5 : 1, 0);
+  update_tribe_economy(next, tribe_id, burn ? -3 : 1, 0);
   return true;
 }
 
@@ -6910,6 +7016,7 @@ NativeGameState apply_action_strict(
     started_at = TimingClock::now();
     rebuild_state_indexes(next);
     regenerate_actions(next, actions, max_actions);
+    g_last_transition_timing.full_action_regenerations += 1;
     g_last_transition_timing.regenerate_actions_ms += elapsed_ms(started_at);
     next.terminal = next.legal_action_indexes.empty();
     if (next.terminal) {
@@ -7017,9 +7124,44 @@ NativeGameState apply_action_strict(
   g_last_transition_timing.reveal_sync_ms += elapsed_ms(started_at);
   next.transition_kind = type;
   started_at = TimingClock::now();
-  if (!try_reuse_legal_actions_after_simple_unit_update(state, next, actions, applied, type, max_actions)) {
-    rebuild_state_indexes(next);
+  bool regenerated = try_reuse_legal_actions_after_simple_unit_update(
+      state, next, actions, applied, type, max_actions);
+  const bool reused_action_set = regenerated;
+  bool partially_regenerated = false;
+  bool indexes_rebuilt = false;
+  if (!regenerated) {
+    // MOVE, research, and economy/board edits do not reorder actors or board
+    // storage, so the copied coordinate/id indexes remain valid. ATTACK can
+    // merge hidden-enemy state before this point and therefore keeps the
+    // conservative rebuild. A full fallback always rebuilds below.
+    if (type == "ATTACK") {
+      rebuild_state_indexes(next);
+      indexes_rebuilt = true;
+    }
+    if (type == "RESEARCH_TECH") {
+      regenerated = partially_regenerate_research_preserving_unit_actions(
+          state, next, actions, applied, max_actions, newly_explored);
+    } else if (type == "MOVE" || type == "STEP_MOVE" || type == "ATTACK") {
+      regenerated = try_partially_regenerate_actions_after_attack_or_move(
+          state, next, actions, applied, type, max_actions, newly_explored);
+    } else {
+      regenerated = try_partially_regenerate_actions_after_economy_or_board_change(
+          state, next, actions, applied, type, max_actions, newly_explored);
+    }
+    partially_regenerated = regenerated;
+  }
+  if (partially_regenerated) {
+    next.legal_actions_native_generated = true;
+    g_last_transition_timing.partial_action_regenerations += 1;
+  } else if (reused_action_set) {
+    g_last_transition_timing.reused_action_sets += 1;
+  }
+  if (!regenerated) {
+    if (!indexes_rebuilt) {
+      rebuild_state_indexes(next);
+    }
     regenerate_actions(next, actions, max_actions);
+    g_last_transition_timing.full_action_regenerations += 1;
   }
   g_last_transition_timing.regenerate_actions_ms += elapsed_ms(started_at);
   if (type == "ATTACK") {

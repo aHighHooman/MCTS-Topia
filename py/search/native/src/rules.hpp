@@ -156,6 +156,9 @@ struct NativeGameState {
   bool leveling_up = false;
   bool can_end_turn = true;
   bool generated_action_ids_enabled = true;
+  // True only when legal_action_indexes was produced by native regeneration,
+  // rather than supplied by the request-scoped Java action list.
+  bool legal_actions_native_generated = false;
 };
 
 struct NativeRoot {
@@ -170,6 +173,9 @@ struct NativeTransitionTiming {
   double reveal_sync_ms = 0.0;
   double regenerate_actions_ms = 0.0;
   double hidden_enemy_ms = 0.0;
+  int full_action_regenerations = 0;
+  int partial_action_regenerations = 0;
+  int reused_action_sets = 0;
 };
 
 NativeRoot parse_root_payload(const py::dict& payload, int max_actions);
