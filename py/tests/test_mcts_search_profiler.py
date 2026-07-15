@@ -8,7 +8,9 @@ import torch
 from nn.encoding import EncodedObservation
 from profiling.mcts_search import (
     BranchingCollector,
+    TimingCollector,
     _action_breadth_rows,
+    _add_native_static_exe_timing_rows,
     _branching_key_stats,
     _branching_pressure_rows,
     _load_mcts_search_config,
@@ -28,6 +30,53 @@ def _payload() -> dict:
             {"id": "d", "type": "END_TURN"},
         ],
     }
+
+
+def test_native_static_timing_splits_inner_search_containers() -> None:
+    collector = TimingCollector()
+    profile = {
+        "timing_ms": {
+            "search_loop_ms": 130.0,
+            "inner_search_ms": 100.0,
+            "inner_setup_ms": 10.0,
+            "inner_simulation_ms": 70.0,
+            "inner_candidate_ms": 15.0,
+            "inner_transition_ms": 50.0,
+            "inner_transition_state_copy_ms": 10.0,
+            "inner_transition_regenerate_actions_ms": 35.0,
+        }
+    }
+
+    _add_native_static_exe_timing_rows(collector, profile, selected_paths=4)
+    rows = collector.rows
+
+    assert rows["native_static_exe.turn_macro.inner_search.unattributed"].total_sec == 0.005
+    assert rows["native_static_exe.turn_macro.inner_simulation.unattributed"].total_sec == 0.020
+    assert rows["native_static_exe.turn_macro.inner_transition.unattributed"].total_sec == 0.005
+
+
+def test_native_static_timing_attributes_outer_edge_generation_overhead() -> None:
+    collector = TimingCollector()
+    profile = {
+        "timing_ms": {
+            "search_loop_ms": 150.0,
+            "edge_generation_ms": 120.0,
+            "edge_generation_static_eval_ms": 5.0,
+            "inner_search_ms": 80.0,
+            "apply_action_ms": 20.0,
+            "static_eval_ms": 5.0,
+            "backup_ms": 4.0,
+            "tree_policy_ms": 3.0,
+            "node_creation_ms": 2.0,
+            "edge_install_ms": 1.0,
+        }
+    }
+
+    _add_native_static_exe_timing_rows(collector, profile, selected_paths=4)
+    rows = collector.rows
+
+    assert rows["native_static_exe.turn_macro.edge_generation.unattributed"].total_sec == 0.015
+    assert rows["native_static_exe.search_loop.unattributed"].total_sec == 0.020
 
 
 def test_branching_collector_tracks_caps_search_and_action_rows() -> None:
@@ -144,5 +193,6 @@ def test_turn_macro_exp_config_and_static_exe_command() -> None:
     assert command[command.index("--turn-macro-max-edges-per-node") + 1] == "8"
     assert command[command.index("--turn-macro-inner-simulations") + 1] == "128"
     assert command[command.index("--turn-macro-inner-c-puct") + 1] == "1.5"
-    assert command[command.index("--turn-macro-greedy-eval-top-k") + 1] == "1"
+    assert "--turn-macro-greedy-eval-top-k" not in command
+    assert "--turn-macro-c" not in command
     assert command[command.index("--turn-macro-opponent-mode") + 1] == "maximalist"

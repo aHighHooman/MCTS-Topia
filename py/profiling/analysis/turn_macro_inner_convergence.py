@@ -128,10 +128,8 @@ def _run(
     max_primitives: int,
     inner_c_puct: float,
     outer_c: float,
-    macro_c: float,
     prior_weight: float,
     temperature: float,
-    greedy_eval_top_k: int,
     opponent_mode: str,
     max_actions: int,
     seed: int,
@@ -149,10 +147,8 @@ def _run(
         "--turn-macro-inner-simulations", str(inner_simulations),
         "--turn-macro-inner-c-puct", str(inner_c_puct),
         "--turn-macro-outer-c", str(outer_c),
-        "--turn-macro-c", str(macro_c),
         "--turn-macro-prior-weight", str(prior_weight),
         "--turn-macro-temperature", str(temperature),
-        "--turn-macro-greedy-eval-top-k", str(greedy_eval_top_k),
         "--turn-macro-opponent-mode", opponent_mode,
         "--profile-json", "--deterministic",
     ]
@@ -201,10 +197,8 @@ def main() -> int:
     parser.add_argument("--max-primitives", type=int, default=0)
     parser.add_argument("--inner-c-puct", type=float, default=1.5)
     parser.add_argument("--outer-c", type=float, default=1.4)
-    parser.add_argument("--macro-c", type=float, default=1.0)
     parser.add_argument("--prior-weight", type=float, default=0.35)
     parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--greedy-eval-top-k", type=int, default=1)
     parser.add_argument("--opponent-mode", choices=("root-max", "maximalist"), default="maximalist")
     parser.add_argument("--max-actions", type=int, default=512)
     parser.add_argument("--seed", type=int, default=13)
@@ -250,8 +244,8 @@ def main() -> int:
                 exe, payload, outer_simulations=args.outer_simulations, inner_simulations=inner_budget,
                 measurement_mode=args.measurement_mode,
                 max_edges=args.max_edges, max_primitives=args.max_primitives, inner_c_puct=args.inner_c_puct,
-                outer_c=args.outer_c, macro_c=args.macro_c, prior_weight=args.prior_weight,
-                temperature=args.temperature, greedy_eval_top_k=args.greedy_eval_top_k,
+                outer_c=args.outer_c, prior_weight=args.prior_weight,
+                temperature=args.temperature,
                 opponent_mode=args.opponent_mode, max_actions=args.max_actions, seed=args.seed,
                 static_eval_variant=args.static_eval_variant, timeout_sec=args.timeout_sec,
             )
