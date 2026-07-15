@@ -1249,7 +1249,6 @@ json choose_action_with_turn_macro_exp_tree(
   tribes::native::TurnMacroExpConfig macro_cfg = cfg.turn_macro;
   macro_cfg.max_actions = cfg.max_actions;
   macro_cfg.simulations = cfg.turn_macro_simulations_set ? cfg.turn_macro.simulations : cfg.simulations;
-  macro_cfg.deterministic = !cfg.sample_action;
   macro_cfg.profile_json = cfg.profile_json;
 
   std::vector<json> root_actions = json_actions(message, cfg.max_actions);
@@ -1286,10 +1285,7 @@ json choose_action_with_turn_macro_exp_tree(
   py::dict root_payload = py::reinterpret_borrow<py::dict>(py_from_json(message));
   tribes::native::TurnMacroExpMCTS tree(root_payload, macro_cfg, cfg.seed);
   if (cfg.wall_clock_seconds > 0.0) {
-    const auto started = std::chrono::steady_clock::now();
-    while (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() < cfg.wall_clock_seconds) {
-      tree.run(1);
-    }
+    tree.run_for(cfg.wall_clock_seconds);
   } else {
     tree.run(macro_cfg.simulations);
   }
@@ -1330,6 +1326,7 @@ json choose_action_with_turn_macro_inner_probe(const json& message, const CliCon
       owner_player_id,
       utility_player_id,
       macro_cfg.max_actions,
+      macro_cfg.max_primitives_per_turn,
       macro_cfg.inner_c_puct);
   const int simulations = std::max(1, macro_cfg.inner_simulations);
   inner.run(simulations);
@@ -1424,8 +1421,6 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
       cfg.turn_macro.max_new_edges_per_node = std::stoi(next());
     } else if (arg == "--turn-macro-outer-c") {
       cfg.turn_macro.outer_c = std::stod(next());
-    } else if (arg == "--turn-macro-c") {
-      cfg.turn_macro.macro_exp_c = std::stod(next());
     } else if (arg == "--turn-macro-prior-weight") {
       cfg.turn_macro.macro_exp_prior_weight = std::stod(next());
     } else if (arg == "--turn-macro-temperature") {
@@ -1434,8 +1429,6 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
       cfg.turn_macro.inner_simulations = std::stoi(next());
     } else if (arg == "--turn-macro-inner-c-puct") {
       cfg.turn_macro.inner_c_puct = std::stod(next());
-    } else if (arg == "--turn-macro-greedy-eval-top-k") {
-      cfg.turn_macro.greedy_eval_top_k = std::stoi(next());
     } else if (arg == "--turn-macro-opponent-mode") {
       const std::string mode = next();
       if (mode == "root-max") {
@@ -1457,9 +1450,8 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
           << "  [--native-opponent-mode root-adversarial|root-max]\n"
           << "  [--turn-macro-simulations N]\n"
           << "  [--turn-macro-max-primitives-per-turn N] [--turn-macro-max-edges-per-node N]\n"
-          << "  [--turn-macro-outer-c X] [--turn-macro-c X] [--turn-macro-prior-weight X]\n"
+          << "  [--turn-macro-outer-c X] [--turn-macro-prior-weight X]\n"
           << "  [--turn-macro-temperature X] [--turn-macro-inner-simulations N] [--turn-macro-inner-c-puct X]\n"
-          << "  [--turn-macro-greedy-eval-top-k N]\n"
            << "  [--turn-macro-opponent-mode root-max|maximalist]\n";
       std::exit(0);
     }

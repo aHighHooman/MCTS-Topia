@@ -24,6 +24,8 @@ struct StaticEvaluation {
 StaticEvaluation evaluate_static_state(
     const NativeGameState& state,
     const std::vector<NativeAction>& actions);
+double evaluate_static_value(const NativeGameState& state);
+double evaluate_static_value_for_player(const NativeGameState& state, int player_id);
 py::dict evaluate_static(const py::dict& payload, int max_actions);
 py::list evaluate_static_batch(const py::list& payloads, int max_actions);
 py::dict evaluate_static_breakdown(const py::dict& payload, int max_actions);

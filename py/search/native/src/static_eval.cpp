@@ -2541,8 +2541,8 @@ double state_raw_value(
     const NativeGameState& state,
     double power_weight,
     double city_capital_bonus,
+    int player_id,
     std::vector<StaticEvalTerm>* terms = nullptr) {
-  const int player_id = state.active_player_id;
   const NativeTribe* me = tribe_by_id(state, player_id);
   // Experimental currently changes lower-level feature calculations while the
   // default value-head weights stay baseline-compatible. Analysis overrides can
@@ -3213,14 +3213,16 @@ double state_raw_baseline(const NativeGameState& state) {
   return state_raw_value(
       state,
       1.810344827586,
-      0.0);
+      0.0,
+      state.active_player_id);
 }
 
 double state_raw_experimental(const NativeGameState& state) {
   return state_raw_value(
       state,
       0.905172413793,
-      0.0);
+      0.0,
+      state.active_player_id);
 }
 
 double state_raw_for_active_variant(
@@ -3229,7 +3231,16 @@ double state_raw_for_active_variant(
   const double power_weight = is_experimental_value_variant(static_eval_variant())
       ? 0.905172413793
       : 1.810344827586;
-  return state_raw_value(state, power_weight, 0.0, terms);
+  return state_raw_value(state, power_weight, 0.0, state.active_player_id, terms);
+}
+
+double state_value_for_player(const NativeGameState& state, int player_id) {
+  const double power_weight = is_experimental_value_variant(static_eval_variant())
+      ? 0.905172413793
+      : 1.810344827586;
+  return std::tanh(
+      state_raw_value(state, power_weight, 0.0, player_id) /
+      kValueTanhDenominatorStars);
 }
 
 double expected_incoming_damage_next_turn(
@@ -3395,6 +3406,18 @@ StaticEvaluation evaluate_static_state(
     const NativeGameState& state,
     const std::vector<NativeAction>& actions) {
   return static_evaluation_for_state(state, actions);
+}
+
+double evaluate_static_value(const NativeGameState& state) {
+  return is_experimental_value_variant(static_eval_variant())
+      ? state_value_experimental(state)
+      : state_value_baseline(state);
+}
+
+double evaluate_static_value_for_player(const NativeGameState& state, int player_id) {
+  return player_id == state.active_player_id
+      ? evaluate_static_value(state)
+      : state_value_for_player(state, player_id);
 }
 
 py::dict evaluate_static(const py::dict& payload, int max_actions) {
