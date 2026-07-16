@@ -1,10 +1,10 @@
-"""Measure stability of turn-macro decisions as the inner MCTS budget grows.
+"""Measure convergence of complete turn-macro plan sets as inner MCTS grows.
 
-The metric deliberately fixes the payload, outer turn-MCTS budget, evaluator, and
-seed.  For each requested inner budget N, it asks whether the final deterministic
-macro decision is unchanged at 2N and 5N.  This measures the practical effect of
-the inner planner on the action returned to the protocol, rather than only the
-inner tree's private ranking.
+For every position and candidate inner budget N, generate the actual root macro
+plans selected by the current visit/value policy. Compare those plans with 2N,
+5N, and a fixed high-budget reference. Exact ordered action sequences are the
+primary identity. An unordered continuation identity is also reported as a
+looser diagnostic. A shared first action alone is never a match.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ import json
 import math
 import subprocess
 import time
-from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +24,7 @@ from profiling.config import load_config_defaults
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG = PROJECT_ROOT / "py" / "profiling" / "configs" / "turn_macro_inner_convergence.json"
+Plan = tuple[str, ...]
 
 
 def _repo_path(value: Path | str) -> Path:
@@ -42,94 +42,109 @@ def _wilson_lower(successes: int, total: int, z: float = 1.959963984540054) -> f
     return max(0.0, (centre - spread) / denom)
 
 
-def _action_id(response: dict[str, Any]) -> str:
-    return str(response.get("actionId") or response.get("action_id") or "")
-
-
-def _response_features(response: dict[str, Any]) -> dict[str, float | int]:
+def _plans(response: dict[str, Any], plan_count: int, comparison_depth: int) -> list[Plan]:
     profile = response.get("_profile") if isinstance(response.get("_profile"), dict) else {}
-    visits = profile.get("root_first_action_visits") if isinstance(profile.get("root_first_action_visits"), dict) else {}
-    visit_counts = sorted((int(value) for value in visits.values()), reverse=True)
-    total = sum(visit_counts)
-    top_share = visit_counts[0] / total if total else 0.0
-    second_share = visit_counts[1] / total if len(visit_counts) > 1 and total else 0.0
-    candidates = profile.get("inner_candidates") if isinstance(profile.get("inner_candidates"), list) else []
-    visits_by_action: dict[str, int] = {}
-    candidate_scores: list[float] = []
-    for item in candidates:
-        if not isinstance(item, dict):
+    raw_plans = profile.get("root_turn_plans") if isinstance(profile.get("root_turn_plans"), list) else []
+    plans: list[Plan] = []
+    for item in raw_plans[:plan_count]:
+        if not isinstance(item, dict) or not isinstance(item.get("action_signatures"), list):
             continue
-        action_id = str(item.get("actionId") or "")
-        visits_by_action[action_id] = max(visits_by_action.get(action_id, 0), max(0, int(item.get("visits", 0) or 0)))
-        candidate_scores.append(float(item.get("log_confidence", item.get("score", 0.0)) or 0.0))
-    candidate_visits = sorted(visits_by_action.values(), reverse=True)
-    inner_total = sum(candidate_visits)
-    inner_top_share = candidate_visits[0] / inner_total if inner_total else 0.0
-    inner_second_share = candidate_visits[1] / inner_total if len(candidate_visits) > 1 and inner_total else 0.0
+        signatures = [str(value) for value in item["action_signatures"]]
+        if comparison_depth > 0:
+            signatures = signatures[:comparison_depth]
+        if signatures:
+            plans.append(tuple(signatures))
+    return plans
+
+
+def _material_plans(response: dict[str, Any], plan_count: int) -> list[Plan]:
+    """Return a loose first-action-plus-unordered-continuation diagnostic."""
+    exact_plans = _plans(response, plan_count, comparison_depth=0)
+    return [(plan[0], *sorted(plan[1:])) for plan in exact_plans]
+
+
+def _is_ordered_subsequence(shorter: Plan, longer: Plan) -> bool:
+    if len(shorter) > len(longer):
+        return False
+    cursor = 0
+    for action in longer:
+        if cursor < len(shorter) and action == shorter[cursor]:
+            cursor += 1
+    return cursor == len(shorter)
+
+
+def _plans_containment_aligned(left: Plan, right: Plan, identity: str) -> bool:
+    shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
+    if identity == "material":
+        return bool(shorter) and bool(longer) and shorter[0] == longer[0] and set(shorter[1:]).issubset(longer[1:])
+    if identity == "exact_sequence":
+        return bool(shorter) and bool(longer) and shorter[0] == longer[0] and _is_ordered_subsequence(shorter, longer)
+    raise ValueError(f"unknown plan identity: {identity}")
+
+
+def _maximum_containment_matching(candidate: list[Plan], reference: list[Plan], identity: str) -> int:
+    """Maximum one-to-one matching, so one generic short plan cannot cover many plans."""
+    adjacency = [
+        [index for index, other in enumerate(reference) if _plans_containment_aligned(plan, other, identity)]
+        for plan in candidate
+    ]
+    matched_candidate_by_reference = [-1] * len(reference)
+
+    def augment(candidate_index: int, seen: set[int]) -> bool:
+        for reference_index in adjacency[candidate_index]:
+            if reference_index in seen:
+                continue
+            seen.add(reference_index)
+            previous = matched_candidate_by_reference[reference_index]
+            if previous < 0 or augment(previous, seen):
+                matched_candidate_by_reference[reference_index] = candidate_index
+                return True
+        return False
+
+    return sum(augment(index, set()) for index in range(len(candidate)))
+
+
+def _compare(candidate: list[Plan], reference: list[Plan], identity: str = "exact_sequence") -> dict[str, float | int]:
+    candidate_set = set(candidate)
+    reference_set = set(reference)
+    union = candidate_set | reference_set
+    intersection = candidate_set & reference_set
+    slots = len(reference)
+    rank_matches = sum(
+        int(rank < len(candidate) and candidate[rank] == plan)
+        for rank, plan in enumerate(reference)
+    )
+    ranked_containment_matches = sum(
+        int(rank < len(candidate) and _plans_containment_aligned(candidate[rank], plan, identity))
+        for rank, plan in enumerate(reference)
+    )
+    containment_matches = _maximum_containment_matching(candidate, reference, identity)
+    largest_count = max(len(candidate), len(reference))
     return {
-        "elapsed_sec": float(profile.get("elapsed_sec", 0.0) or 0.0),
-        "inner_searches": int(profile.get("inner_searches", 0) or 0),
-        "inner_simulations": int(profile.get("inner_simulations", 0) or 0),
-        "inner_nodes_expanded": int(profile.get("inner_nodes_expanded", 0) or 0),
-        "root_turn_edges": int(profile.get("root_turn_edges", 0) or 0),
-        "outer_simulations": int(profile.get("outer_simulations", 0) or 0),
-        "root_top_visit_share": top_share,
-        "root_visit_margin": top_share - second_share,
-        "inner_candidates": len(candidates),
-        "inner_top_visit_share": inner_top_share,
-        "inner_visit_margin": inner_top_share - inner_second_share,
-        "inner_best_score_gap": candidate_scores[0] - candidate_scores[1] if len(candidate_scores) > 1 else float("inf"),
+        "reference_plans": slots,
+        "candidate_plans": len(candidate),
+        "ranked_plan_match_rate": rank_matches / slots if slots else float(not candidate),
+        "set_recall": len(intersection) / len(reference_set) if reference_set else float(not candidate_set),
+        "set_precision": len(intersection) / len(candidate_set) if candidate_set else float(not reference_set),
+        "set_jaccard": len(intersection) / len(union) if union else 1.0,
+        "containment_alignment_rate": containment_matches / largest_count if largest_count else 1.0,
+        "containment_candidate_rate": containment_matches / len(candidate) if candidate else float(not reference),
+        "containment_reference_rate": containment_matches / len(reference) if reference else float(not candidate),
+        "ranked_containment_rate": ranked_containment_matches / slots if slots else float(not candidate),
+        "exact_ranked_plans": int(candidate == reference),
+        "exact_plan_set": int(candidate_set == reference_set),
     }
-
-
-def _payload_features(payload: dict[str, Any]) -> dict[str, int]:
-    actions = list(payload.get("actions", []) or [])
-    counts = Counter(str(action.get("type") or action.get("t") or "UNKNOWN") for action in actions if isinstance(action, dict))
-    observation = payload.get("observation") if isinstance(payload.get("observation"), dict) else {}
-    units = list(observation.get("units", []) or [])
-    cities = list(observation.get("cities", []) or [])
-    player_id = int(payload.get("player_id", 0) or 0)
-    enemy_units = sum(1 for unit in units if isinstance(unit, dict) and int(unit.get("tribe_id", unit.get("p", player_id)) or player_id) != player_id)
-    return {
-        "tick": int(observation.get("tick", observation.get("turn", 0)) or 0),
-        "actions": len(actions),
-        "action_types": len(counts),
-        "tactical_actions": sum(counts[kind] for kind in ("ATTACK", "MOVE", "STEP_MOVE", "CONVERT", "INFILTRATE", "RECOVER")),
-        "research_actions": counts["RESEARCH_TECH"],
-        "cities": len(cities),
-        "units": len(units),
-        "enemy_units": enemy_units,
-    }
-
-
-def _condition_bucket(row: dict[str, Any], key: str) -> str:
-    value = float(row.get(key, 0) or 0)
-    if key == "actions":
-        return "<=24" if value <= 24 else "25-48" if value <= 48 else ">48"
-    if key in {"root_top_visit_share", "inner_top_visit_share"}:
-        return "<0.60" if value < 0.60 else "0.60-0.85" if value < 0.85 else ">=0.85"
-    if key in {"root_visit_margin", "inner_visit_margin"}:
-        return "<0.20" if value < 0.20 else "0.20-0.60" if value < 0.60 else ">=0.60"
-    if key == "root_turn_edges":
-        return "<=1" if value <= 1 else "2" if value == 2 else ">=3"
-    if key == "inner_candidates":
-        return "<=4" if value <= 4 else "5-12" if value <= 12 else ">12"
-    return str(value)
 
 
 def _run(
     exe: Path,
     payload: dict[str, Any],
     *,
-    outer_simulations: int,
-    measurement_mode: str,
     inner_simulations: int,
-    max_edges: int,
+    plan_count: int,
     max_primitives: int,
     inner_c_puct: float,
     outer_c: float,
-    prior_weight: float,
-    temperature: float,
     opponent_mode: str,
     max_actions: int,
     seed: int,
@@ -137,18 +152,16 @@ def _run(
     timeout_sec: float,
 ) -> dict[str, Any]:
     command = [
-        str(exe), "--search-mode", measurement_mode,
-        "--simulations", str(outer_simulations),
+        str(exe), "--search-mode", "turn-macro-exp",
+        "--simulations", "1",
         "--max-actions", str(max_actions),
         "--seed", str(seed),
         "--static-eval-variant", static_eval_variant,
-        "--turn-macro-max-edges-per-node", str(max_edges),
+        "--turn-macro-max-edges-per-node", str(plan_count),
         "--turn-macro-max-primitives-per-turn", str(max_primitives),
         "--turn-macro-inner-simulations", str(inner_simulations),
         "--turn-macro-inner-c-puct", str(inner_c_puct),
         "--turn-macro-outer-c", str(outer_c),
-        "--turn-macro-prior-weight", str(prior_weight),
-        "--turn-macro-temperature", str(temperature),
         "--turn-macro-opponent-mode", opponent_mode,
         "--profile-json", "--deterministic",
     ]
@@ -169,8 +182,9 @@ def _run(
     if not lines:
         raise RuntimeError(f"turn-macro run produced no response (inner={inner_simulations}): {completed.stderr[-2500:]}")
     response = json.loads(lines[-1])
-    if not isinstance(response, dict) or not _action_id(response):
-        raise RuntimeError(f"turn-macro run returned no action (inner={inner_simulations}): {response}")
+    profile = response.get("_profile") if isinstance(response, dict) else None
+    if not isinstance(profile, dict) or not isinstance(profile.get("root_turn_plans"), list):
+        raise RuntimeError(f"turn-macro run returned no root plans (inner={inner_simulations}): {response}")
     return response
 
 
@@ -187,153 +201,188 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--payload-dir", type=Path, default=PROJECT_ROOT / "debug-logs" / "mcts-profile-payloads")
-    parser.add_argument("--position-offset", type=int, default=0, help="Skip this many sorted payloads; useful for resumable corpus chunks.")
+    parser.add_argument("--position-offset", type=int, default=0)
     parser.add_argument("--max-positions", type=int, default=0)
-    parser.add_argument("--inner-budgets", type=int, nargs="+", default=[8, 16, 32, 64, 128])
-    parser.add_argument("--top-k-values", type=int, nargs="+", default=[1, 2, 4, 8], help="Candidate-plan counts evaluated against the 5x reference action.")
-    parser.add_argument("--outer-simulations", type=int, default=128)
-    parser.add_argument("--measurement-mode", choices=("turn-macro-inner-probe", "turn-macro-exp"), default="turn-macro-inner-probe")
-    parser.add_argument("--max-edges", type=int, default=4)
+    parser.add_argument("--inner-budgets", type=int, nargs="+", default=[32, 64, 128, 256, 512, 1024, 2048])
+    parser.add_argument("--comparison-multipliers", type=int, nargs="+", default=[2, 5])
+    parser.add_argument("--reference-inner-simulations", type=int, default=7500)
+    parser.add_argument("--plan-count", type=int, default=8)
+    parser.add_argument("--comparison-depth", type=int, default=0, help="Actions compared per plan; 0 compares the complete plan.")
     parser.add_argument("--max-primitives", type=int, default=0)
     parser.add_argument("--inner-c-puct", type=float, default=1.5)
     parser.add_argument("--outer-c", type=float, default=1.4)
-    parser.add_argument("--prior-weight", type=float, default=0.35)
-    parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--opponent-mode", choices=("root-max", "maximalist"), default="maximalist")
     parser.add_argument("--max-actions", type=int, default=512)
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--static-eval-variant", default="baseline")
     parser.add_argument("--native-static-exe", type=Path, default=PROJECT_ROOT / "out" / "native" / "static_mcts_bot.exe")
     parser.add_argument("--build-native-static-exe", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--timeout-sec", type=float, default=120.0)
-    parser.add_argument("--target-match-rate", type=float, default=0.90)
+    parser.add_argument("--timeout-sec", type=float, default=180.0)
+    parser.add_argument("--target-set-jaccard", type=float, default=0.90)
+    parser.add_argument("--target-containment-alignment", type=float, default=0.90)
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "debug-logs" / "analysis" / "turn-macro-inner-convergence")
     args = load_config_defaults(parser, default_config=DEFAULT_CONFIG)
 
+    budgets = sorted({int(value) for value in args.inner_budgets if int(value) > 0})
+    multipliers = sorted({int(value) for value in args.comparison_multipliers if int(value) > 1})
+    if not budgets or args.reference_inner_simulations <= 0 or args.plan_count <= 0 or args.comparison_depth < 0:
+        raise ValueError("budgets, reference_inner_simulations, and plan_count must be positive; comparison_depth cannot be negative")
+    run_budgets = sorted(
+        {args.reference_inner_simulations}
+        | set(budgets)
+        | {budget * multiplier for budget in budgets for multiplier in multipliers}
+    )
     payload_dir = _repo_path(args.payload_dir)
     output_dir = _repo_path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    payload_paths = sorted(path for path in payload_dir.glob("*.json") if path.name != "mcts_profile_position_selection_summary.json")
-    if args.position_offset > 0:
-        payload_paths = payload_paths[args.position_offset :]
+    paths = sorted(path for path in payload_dir.glob("*.json") if path.name != "mcts_profile_position_selection_summary.json")
+    paths = paths[max(0, args.position_offset):]
     if args.max_positions > 0:
-        payload_paths = payload_paths[: args.max_positions]
-    payloads = [(path, load_payload(path)) for path in payload_paths]
+        paths = paths[:args.max_positions]
+    payloads = [(path, load_payload(path)) for path in paths]
     payloads = [(path, payload) for path, payload in payloads if payload is not None]
     if not payloads:
         raise RuntimeError(f"No valid payloads found in {payload_dir}")
-    budgets = sorted({int(value) for value in args.inner_budgets if int(value) > 0})
-    if not budgets:
-        raise RuntimeError("inner_budgets must contain at least one positive budget")
-    top_k_values = sorted({int(value) for value in args.top_k_values if int(value) > 0})
-    if not top_k_values:
-        raise RuntimeError("top_k_values must contain at least one positive value")
-    run_budgets = sorted({multiple * budget for budget in budgets for multiple in (1, 2, 5)})
-    exe = _ensure_native_static_exe(args.native_static_exe, bool(args.build_native_static_exe))
-    print(f"[turn_macro_inner_convergence] positions={len(payloads)} outer={args.outer_simulations} inner_runs={run_budgets}", flush=True)
 
-    raw_rows: list[dict[str, Any]] = []
-    comparisons: list[dict[str, Any]] = []
+    exe = _ensure_native_static_exe(args.native_static_exe, bool(args.build_native_static_exe))
+    print(
+        f"[turn_macro_inner_convergence] positions={len(payloads)} plans={args.plan_count} "
+        f"depth={'full' if args.comparison_depth == 0 else args.comparison_depth} inner_runs={run_budgets}",
+        flush=True,
+    )
+    run_rows: list[dict[str, Any]] = []
+    comparison_rows: list[dict[str, Any]] = []
     started = time.perf_counter()
-    for position_index, (path, payload) in enumerate(payloads, start=1):
+    for position, (path, payload) in enumerate(payloads, start=1):
         assert payload is not None
-        features = _payload_features(payload)
-        responses: dict[int, tuple[str, list[str], dict[str, float | int]]] = {}
-        for inner_budget in run_budgets:
+        exact_plans_by_budget: dict[int, list[Plan]] = {}
+        material_plans_by_budget: dict[int, list[Plan]] = {}
+        for run_budget in run_budgets:
             response = _run(
-                exe, payload, outer_simulations=args.outer_simulations, inner_simulations=inner_budget,
-                measurement_mode=args.measurement_mode,
-                max_edges=args.max_edges, max_primitives=args.max_primitives, inner_c_puct=args.inner_c_puct,
-                outer_c=args.outer_c, prior_weight=args.prior_weight,
-                temperature=args.temperature,
-                opponent_mode=args.opponent_mode, max_actions=args.max_actions, seed=args.seed,
-                static_eval_variant=args.static_eval_variant, timeout_sec=args.timeout_sec,
+                exe,
+                payload,
+                inner_simulations=run_budget,
+                plan_count=args.plan_count,
+                max_primitives=args.max_primitives,
+                inner_c_puct=args.inner_c_puct,
+                outer_c=args.outer_c,
+                opponent_mode=args.opponent_mode,
+                max_actions=args.max_actions,
+                seed=args.seed,
+                static_eval_variant=args.static_eval_variant,
+                timeout_sec=args.timeout_sec,
             )
-            action = _action_id(response)
-            ranked = [str(value) for value in response.get("rankedActionIds", []) if value is not None]
-            if action not in ranked:
-                ranked.insert(0, action)
-            response_features = _response_features(response)
-            responses[inner_budget] = (action, ranked, response_features)
-            raw_rows.append({
-                "position": position_index, "payload": path.name, "payload_hash": payload_hash(payload),
-                "inner_budget": inner_budget, "action_id": action, "ranked_action_ids": json.dumps(ranked), **features, **response_features,
+            exact_plans = _plans(response, args.plan_count, args.comparison_depth)
+            material_plans = _material_plans(response, args.plan_count)
+            exact_plans_by_budget[run_budget] = exact_plans
+            material_plans_by_budget[run_budget] = material_plans
+            profile = response["_profile"]
+            run_rows.append({
+                "position": position,
+                "payload": path.name,
+                "payload_hash": payload_hash(payload),
+                "inner_budget": run_budget,
+                "plan_count": len(exact_plans),
+                "exact_sequence_plans": json.dumps(exact_plans),
+                "material_plans": json.dumps(material_plans),
+                "inner_nodes_expanded": int(profile.get("inner_nodes_expanded", 0) or 0),
+                "elapsed_sec": float(profile.get("elapsed_sec", 0.0) or 0.0),
             })
         for budget in budgets:
-            action, ranked, run_features = responses[budget]
-            action_2x, _, _ = responses[2 * budget]
-            action_5x, _, _ = responses[5 * budget]
-            comparison = {
-                "position": position_index, "payload": path.name, "payload_hash": payload_hash(payload),
-                "inner_budget": budget, "action_id": action, "action_2x": action_2x, "action_5x": action_5x,
-                "same_2x": int(action == action_2x), "same_5x": int(action == action_5x),
-                "stable_2x_5x": int(action_2x == action_5x), "stable_all": int(action == action_2x == action_5x),
-                **features, **run_features,
+            row: dict[str, Any] = {
+                "position": position,
+                "payload": path.name,
+                "payload_hash": payload_hash(payload),
+                "inner_budget": budget,
+                "exact_sequence_plans": json.dumps(exact_plans_by_budget[budget]),
+                "material_plans": json.dumps(material_plans_by_budget[budget]),
             }
-            for top_k in top_k_values:
-                comparison[f"top_{top_k}_contains_5x"] = int(action_5x in ranked[:top_k])
-            comparisons.append(comparison)
-        print(f"  {position_index}/{len(payloads)} {path.name}", flush=True)
+            references = {"reference": args.reference_inner_simulations}
+            references.update({f"{multiplier}x": budget * multiplier for multiplier in multipliers})
+            for label, reference_budget in references.items():
+                for identity, plans_by_budget in (
+                    ("material", material_plans_by_budget),
+                    ("exact_sequence", exact_plans_by_budget),
+                ):
+                    for key, value in _compare(
+                        plans_by_budget[budget], plans_by_budget[reference_budget], identity
+                    ).items():
+                        row[f"{identity}_{label}_{key}"] = value
+            comparison_rows.append(row)
+        print(f"  {position}/{len(payloads)} {path.name}", flush=True)
 
     summary_rows: list[dict[str, Any]] = []
+    labels = ["reference", *(f"{multiplier}x" for multiplier in multipliers)]
     for budget in budgets:
-        rows = [row for row in comparisons if row["inner_budget"] == budget]
-        total = len(rows)
-        successes = sum(int(row["stable_all"]) for row in rows)
-        summary = {
-            "inner_budget": budget,
-            "positions": total,
-            "same_2x_rate": sum(int(row["same_2x"]) for row in rows) / total,
-            "same_5x_rate": sum(int(row["same_5x"]) for row in rows) / total,
-            "stable_2x_5x_rate": sum(int(row["stable_2x_5x"]) for row in rows) / total,
-            "stable_all_rate": successes / total,
-            "stable_all_wilson_lower_95": _wilson_lower(successes, total),
-            "mean_elapsed_sec": sum(float(row["elapsed_sec"]) for row in rows) / total,
-            "mean_inner_searches": sum(int(row["inner_searches"]) for row in rows) / total,
-            "mean_inner_nodes_per_search": sum(int(row["inner_nodes_expanded"]) / max(1, int(row["inner_searches"])) for row in rows) / total,
-        }
-        for top_k in top_k_values:
-            summary[f"top_{top_k}_contains_5x_rate"] = sum(int(row[f"top_{top_k}_contains_5x"]) for row in rows) / total
+        rows = [row for row in comparison_rows if row["inner_budget"] == budget]
+        summary: dict[str, Any] = {"inner_budget": budget, "positions": len(rows)}
+        for identity in ("material", "exact_sequence"):
+            for label in labels:
+                for metric in (
+                    "ranked_plan_match_rate",
+                    "set_recall",
+                    "set_precision",
+                    "set_jaccard",
+                    "containment_alignment_rate",
+                    "containment_candidate_rate",
+                    "containment_reference_rate",
+                    "ranked_containment_rate",
+                ):
+                    key = f"{identity}_{label}_{metric}"
+                    summary[f"mean_{key}"] = sum(float(row[key]) for row in rows) / len(rows)
+                exact_sets = sum(int(row[f"{identity}_{label}_exact_plan_set"]) for row in rows)
+                exact_ranked = sum(int(row[f"{identity}_{label}_exact_ranked_plans"]) for row in rows)
+                summary[f"{identity}_{label}_exact_plan_set_rate"] = exact_sets / len(rows)
+                summary[f"{identity}_{label}_exact_plan_set_wilson_lower_95"] = _wilson_lower(exact_sets, len(rows))
+                summary[f"{identity}_{label}_exact_ranked_plans_rate"] = exact_ranked / len(rows)
         summary_rows.append(summary)
 
-    condition_rows: list[dict[str, Any]] = []
-    for budget in budgets:
-        budget_rows = [row for row in comparisons if row["inner_budget"] == budget]
-        for key in ("actions", "inner_top_visit_share", "inner_visit_margin", "inner_candidates"):
-            grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-            for row in budget_rows:
-                grouped[_condition_bucket(row, key)].append(row)
-            for bucket, rows in sorted(grouped.items()):
-                total = len(rows)
-                successes = sum(int(row["stable_all"]) for row in rows)
-                condition_rows.append({
-                    "inner_budget": budget, "condition": key, "bucket": bucket, "positions": total,
-                    "stable_all_rate": successes / total,
-                    "stable_all_wilson_lower_95": _wilson_lower(successes, total),
-                })
-
-    recommended = next((row for row in summary_rows if row["stable_all_rate"] >= args.target_match_rate), None)
+    strict_recommended = next((
+        row for row in summary_rows
+        if float(row["mean_material_reference_set_jaccard"]) >= args.target_set_jaccard
+        and all(float(row[f"mean_material_{multiplier}x_set_jaccard"]) >= args.target_set_jaccard for multiplier in multipliers)
+    ), None)
+    containment_recommendations: dict[str, int | None] = {}
+    for identity in ("exact_sequence", "material"):
+        recommended = next((
+            row for row in summary_rows
+            if float(row[f"mean_{identity}_reference_containment_alignment_rate"]) >= args.target_containment_alignment
+            and all(
+                float(row[f"mean_{identity}_{multiplier}x_containment_alignment_rate"])
+                >= args.target_containment_alignment
+                for multiplier in multipliers
+            )
+        ), None)
+        containment_recommendations[identity] = recommended["inner_budget"] if recommended else None
     result = {
         "method": {
-            "decision": "deterministic selected first action from the inner primitive MCTS" if args.measurement_mode == "turn-macro-inner-probe" else "deterministic final action returned by turn-macro MCTS",
-            "measurement_mode": args.measurement_mode,
-            "criterion": "N action equals both 2N and 5N actions at fixed payload, outer budget, evaluator, and seed",
-            "target_match_rate": args.target_match_rate,
-            "outer_simulations": args.outer_simulations,
+            "target": "complete root macro plans selected by the current visit/value policy",
+            "material_plan_identity": "diagnostic exact first action plus the unordered set of remaining action signatures",
+            "strict_diagnostic": "live exact-dedup identity: complete ordered action-signature sequence",
+            "length_invariant_alignment": "maximum one-to-one matching; ordered subsequence for exact sequences, or same first action plus subset of remaining commitments for material plans",
+            "comparison_depth": "complete plan" if args.comparison_depth == 0 else args.comparison_depth,
+            "plan_count": args.plan_count,
+            "max_primitives_per_plan": args.max_primitives,
             "inner_budgets": budgets,
-            "top_k_values": top_k_values,
-            "top_k_definition": "whether the action ranked first at 5N is present in N's top-K ranked inner candidates",
-            "run_budgets": run_budgets,
+            "comparison_multipliers": multipliers,
+            "reference_inner_simulations": args.reference_inner_simulations,
+            "target_set_jaccard": args.target_set_jaccard,
+            "target_containment_alignment": args.target_containment_alignment,
+            "strict_criterion": "mean plan-set Jaccard reaches the target against every multiplier and the fixed high-budget reference",
+            "containment_criterion": "mean one-to-one containment alignment reaches the target against every multiplier and the fixed high-budget reference",
             "positions": len(payloads),
+            "run_budgets": run_budgets,
         },
-        "recommended_inner_budget_by_point_estimate": recommended["inner_budget"] if recommended else None,
+        "recommended_inner_budget_by_point_estimate": strict_recommended["inner_budget"] if strict_recommended else None,
+        "recommended_inner_budget_by_ordered_containment": containment_recommendations["exact_sequence"],
+        "recommended_inner_budget_by_unordered_containment": containment_recommendations["material"],
         "summary": summary_rows,
         "elapsed_sec": time.perf_counter() - started,
-        "artifacts": {"runs": "runs.csv", "comparisons": "comparisons.csv", "conditions": "conditions.csv"},
+        "artifacts": {"runs": "runs.csv", "comparisons": "comparisons.csv", "summary": "summary.csv"},
     }
-    _write_csv(output_dir / "runs.csv", raw_rows)
-    _write_csv(output_dir / "comparisons.csv", comparisons)
-    _write_csv(output_dir / "conditions.csv", condition_rows)
+    _write_csv(output_dir / "runs.csv", run_rows)
+    _write_csv(output_dir / "comparisons.csv", comparison_rows)
+    _write_csv(output_dir / "summary.csv", summary_rows)
     (output_dir / "summary.json").write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

@@ -11,6 +11,42 @@ from profiling.analysis import value_breakdown as vb
 from profiling.analysis.schema import PositionAnalysis, ActionAnalysis
 
 
+def test_dominance_diagnostics_reports_per_evaluation_dominance_and_reconciliation() -> None:
+    positions = [
+        {
+            "payload_hash": "p",
+            "value_breakdown": {"raw_total": 10.0},
+            "actions": [{"action_id": "a", "value_breakdown": {"raw_total": 4.0}}],
+        }
+    ]
+    rows = [
+        {"payload_hash": "p", "action_id": "root", "name": "large", "raw": 8.0, "abs_raw": 8.0},
+        {"payload_hash": "p", "action_id": "root", "name": "small", "raw": 2.0, "abs_raw": 2.0},
+        {"payload_hash": "p", "action_id": "a", "name": "large", "raw": 3.0, "abs_raw": 3.0},
+        {"payload_hash": "p", "action_id": "a", "name": "small", "raw": 1.0, "abs_raw": 1.0},
+    ]
+
+    result = vb._dominance_diagnostics(positions, rows)
+
+    assert result["roots"]["dominant_abs_share_mean"] == 0.8
+    assert result["searched_actions"]["dominant_abs_share_mean"] == 0.75
+    assert result["all"]["dominant_term_counts"] == {"large": 2}
+    assert result["all"]["raw_total_reconciliation_max_abs_error"] == 0.0
+
+
+def test_dominance_uses_net_aggregate_not_component_l1_magnitude() -> None:
+    positions = [{"payload_hash": "p", "value_breakdown": {"raw_total": 11.0}, "actions": []}]
+    rows = [
+        {"payload_hash": "p", "action_id": "root", "name": "cancelled", "raw": 1.0, "abs_raw": 101.0},
+        {"payload_hash": "p", "action_id": "root", "name": "actual", "raw": 10.0, "abs_raw": 10.0},
+    ]
+
+    result = vb._dominance_diagnostics(positions, rows)["roots"]
+
+    assert result["dominant_term_counts"] == {"actual": 1}
+    assert result["dominant_abs_share_mean"] == 10 / 11
+
+
 def _payload(action_id: str) -> dict[str, object]:
     return {
         "player_id": 0,

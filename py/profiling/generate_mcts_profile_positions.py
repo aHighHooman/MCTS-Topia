@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-import torch
 
 PY_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = PY_ROOT.parent
@@ -18,8 +15,6 @@ if str(PY_ROOT) not in sys.path:
 
 from profiling.config import load_config_defaults
 from search.config import HybridAgentConfig
-from training.config import rl_path
-from training.replay import ReplayStore
 from training.selfplay import run_selfplay
 
 DEFAULT_CONFIG = PY_ROOT / "profiling" / "configs" / "generate_mcts_profile_positions.json"

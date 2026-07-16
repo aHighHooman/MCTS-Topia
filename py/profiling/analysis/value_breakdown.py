@@ -4,6 +4,8 @@ import argparse
 import csv
 import html
 import json
+import math
+import statistics
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -77,7 +79,15 @@ COMPARABLE_OLD_FIELDS = [
     "abs_share",
     "linearized_value",
 ]
-SUMMARY_FIELDS = ["parent_term", "raw_sum", "abs_raw_sum", "abs_share", "normalized_sum"]
+SUMMARY_FIELDS = [
+    "parent_term",
+    "raw_sum",
+    "abs_raw_sum",
+    "abs_share",
+    "net_abs_raw_sum",
+    "net_abs_share",
+    "normalized_sum",
+]
 COMPARISON_FIELDS = [
     "term",
     "baseline_share",
@@ -262,14 +272,25 @@ def _summary_rows(aggregate_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         term = str(row.get("name", ""))
         out = grouped.setdefault(
             term,
-            {"parent_term": term, "raw_sum": 0.0, "abs_raw_sum": 0.0, "abs_share": 0.0, "normalized_sum": 0.0},
+            {
+                "parent_term": term,
+                "raw_sum": 0.0,
+                "abs_raw_sum": 0.0,
+                "abs_share": 0.0,
+                "net_abs_raw_sum": 0.0,
+                "net_abs_share": 0.0,
+                "normalized_sum": 0.0,
+            },
         )
         out["raw_sum"] = float(out["raw_sum"]) + _float(row.get("raw"))
         out["abs_raw_sum"] = float(out["abs_raw_sum"]) + _float(row.get("abs_raw"))
+        out["net_abs_raw_sum"] = float(out["net_abs_raw_sum"]) + abs(_float(row.get("raw")))
         out["normalized_sum"] = float(out["normalized_sum"]) + _float(row.get("normalized"))
     total_abs = sum(float(row["abs_raw_sum"]) for row in grouped.values())
+    total_net_abs = sum(float(row["net_abs_raw_sum"]) for row in grouped.values())
     for row in grouped.values():
         row["abs_share"] = float(row["abs_raw_sum"]) / total_abs if total_abs else 0.0
+        row["net_abs_share"] = float(row["net_abs_raw_sum"]) / total_net_abs if total_net_abs else 0.0
     return sorted(grouped.values(), key=lambda row: -float(row["abs_raw_sum"]))
 
 
@@ -279,14 +300,25 @@ def _category_rows(summary_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         category = str(row["parent_term"]).split(".", 1)[0]
         out = grouped.setdefault(
             category,
-            {"category": category, "raw_sum": 0.0, "abs_raw_sum": 0.0, "abs_share": 0.0, "normalized_sum": 0.0},
+            {
+                "category": category,
+                "raw_sum": 0.0,
+                "abs_raw_sum": 0.0,
+                "abs_share": 0.0,
+                "net_abs_raw_sum": 0.0,
+                "net_abs_share": 0.0,
+                "normalized_sum": 0.0,
+            },
         )
         out["raw_sum"] = float(out["raw_sum"]) + _float(row.get("raw_sum"))
         out["abs_raw_sum"] = float(out["abs_raw_sum"]) + _float(row.get("abs_raw_sum"))
+        out["net_abs_raw_sum"] = float(out["net_abs_raw_sum"]) + _float(row.get("net_abs_raw_sum"))
         out["normalized_sum"] = float(out["normalized_sum"]) + _float(row.get("normalized_sum"))
     total_abs = sum(float(row["abs_raw_sum"]) for row in grouped.values())
+    total_net_abs = sum(float(row["net_abs_raw_sum"]) for row in grouped.values())
     for row in grouped.values():
         row["abs_share"] = float(row["abs_raw_sum"]) / total_abs if total_abs else 0.0
+        row["net_abs_share"] = float(row["net_abs_raw_sum"]) / total_net_abs if total_net_abs else 0.0
     return sorted(grouped.values(), key=lambda row: -float(row["abs_raw_sum"]))
 
 
@@ -404,6 +436,76 @@ def _hinge_rows(positions: list[dict[str, Any]], aggregate_rows: list[dict[str, 
     return sorted(totals.values(), key=lambda row: -float(row["abs_delta_raw_sum"]))[:25]
 
 
+def _percentile(values: list[float], quantile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, math.ceil(quantile * len(ordered)) - 1))
+    return ordered[index]
+
+
+def _dominance_diagnostics(
+    positions: list[dict[str, Any]],
+    aggregate_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Diagnose per-evaluation term dominance and raw-total reconciliation."""
+    expected_raw: dict[tuple[str, str], float] = {}
+    for position in positions:
+        digest = str(position.get("payload_hash", ""))
+        root = position.get("value_breakdown") or {}
+        if isinstance(root, dict):
+            expected_raw[(digest, "root")] = _float(root.get("raw_total"))
+        for action in position.get("actions", []):
+            breakdown = action.get("value_breakdown") if isinstance(action, dict) else None
+            if isinstance(breakdown, dict):
+                expected_raw[(digest, str(action.get("action_id", "")))] = _float(breakdown.get("raw_total"))
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in aggregate_rows:
+        grouped.setdefault((str(row.get("payload_hash", "")), str(row.get("action_id", ""))), []).append(row)
+
+    def summarize(groups: list[tuple[tuple[str, str], list[dict[str, Any]]]]) -> dict[str, Any]:
+        shares: list[float] = []
+        errors: list[float] = []
+        dominant_counts: dict[str, int] = {}
+        for key, rows in groups:
+            # Use the absolute *net aggregate* contribution here. abs_raw is
+            # the component L1 magnitude and can make an own-minus-enemy term
+            # look dominant even when its components mostly cancel.
+            total_abs = sum(abs(_float(row.get("raw"))) for row in rows)
+            dominant = max(rows, key=lambda row: abs(_float(row.get("raw"))), default=None)
+            if dominant is not None:
+                share = abs(_float(dominant.get("raw"))) / total_abs if total_abs else 0.0
+                shares.append(share)
+                term = str(dominant.get("name", ""))
+                dominant_counts[term] = dominant_counts.get(term, 0) + 1
+            if key in expected_raw:
+                errors.append(abs(sum(_float(row.get("raw")) for row in rows) - expected_raw[key]))
+        count = len(shares)
+        return {
+            "evaluations": count,
+            "dominant_abs_share_mean": statistics.fmean(shares) if shares else 0.0,
+            "dominant_abs_share_median": statistics.median(shares) if shares else 0.0,
+            "dominant_abs_share_p90": _percentile(shares, 0.90),
+            "dominant_abs_share_max": max(shares, default=0.0),
+            "share_ge_0_50": sum(value >= 0.50 for value in shares) / count if count else 0.0,
+            "share_ge_0_75": sum(value >= 0.75 for value in shares) / count if count else 0.0,
+            "share_ge_0_90": sum(value >= 0.90 for value in shares) / count if count else 0.0,
+            "dominant_term_counts": dict(sorted(dominant_counts.items(), key=lambda item: (-item[1], item[0]))),
+            "raw_total_reconciliation_max_abs_error": max(errors, default=0.0),
+        }
+
+    all_groups = list(grouped.items())
+    root_groups = [(key, rows) for key, rows in all_groups if key[1] == "root"]
+    action_groups = [(key, rows) for key, rows in all_groups if key[1] != "root"]
+    return {
+        "definition": "largest absolute net aggregate contribution divided by all terms' absolute net aggregate contributions for one evaluated state",
+        "all": summarize(all_groups),
+        "roots": summarize(root_groups),
+        "searched_actions": summarize(action_groups),
+    }
+
+
 def _table(headers: list[str], rows: list[dict[str, Any]], limit: int = 50) -> str:
     if not rows:
         return "<p>No rows.</p>"
@@ -459,11 +561,12 @@ def _write_value_report(
             "<h2>Validation / Consistency Checks</h2>",
             f"<pre>{html.escape(json.dumps(validation, indent=2, sort_keys=True, default=str))}</pre>",
             "<h2>Quick Verdict</h2>",
+            f"<pre>{html.escape(json.dumps(summary.get('dominance', {}), indent=2, sort_keys=True, default=str))}</pre>",
             _table(["positions", "root_value_min", "root_value_max", "root_value_avg", "abs_ge_0_95", "abs_ge_0_95_share"], _saturation_rows(positions), 5),
             "<h2>Root Aggregate Term Shares</h2>",
             _table(SUMMARY_FIELDS, root_rows, 30),
             "<h2>Root Category Shares</h2>",
-            _table(["category", "raw_sum", "abs_raw_sum", "abs_share", "normalized_sum"], category_rows, 20),
+            _table(["category", "raw_sum", "abs_raw_sum", "abs_share", "net_abs_raw_sum", "net_abs_share", "normalized_sum"], category_rows, 20),
             "<h2>Saturation Stats</h2>",
             _table(["positions", "root_value_min", "root_value_max", "root_value_avg", "abs_ge_0_95", "abs_ge_0_95_share"], _saturation_rows(positions), 5),
             "<h2>Visit Confidence Stats</h2>",
@@ -653,6 +756,7 @@ def run(args: argparse.Namespace) -> Path:
             "skipped_payloads": skipped_payloads,
             "processed_payloads": processed_payloads,
             "compare_dir": compare_dir,
+            "dominance": _dominance_diagnostics(positions, aggregate_rows),
             "validation": validation,
             "note": "Term rows are exact pre-tanh additive raw-space contributions; linearized_value is local tanh sensitivity, not an ablation.",
         }

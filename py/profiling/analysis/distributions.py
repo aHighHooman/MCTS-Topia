@@ -9,10 +9,6 @@ def normalize(values: list[float], epsilon: float = 1e-12) -> list[float]:
     return [value / total for value in clipped] if total > 0.0 else []
 
 
-def entropy_bits(dist: list[float]) -> float:
-    return -sum(value * math.log2(value) for value in dist if value > 0.0)
-
-
 def kl_bits(p: list[float], q: list[float]) -> float:
     return sum(pi * math.log2(pi / qi) for pi, qi in zip(p, q) if pi > 0.0 and qi > 0.0)
 
@@ -40,4 +36,3 @@ def jaccard(a: set[str], b: set[str]) -> float:
     if not a and not b:
         return 1.0
     return len(a & b) / float(len(a | b))
-

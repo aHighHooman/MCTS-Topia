@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -56,15 +54,3 @@ class PositionAnalysis:
     native_exe_path: str = ""
     native_extension_path: str = ""
     warnings: list[str] = field(default_factory=list)
-
-
-def to_jsonable(value: Any) -> Any:
-    if hasattr(value, "__dataclass_fields__"):
-        return asdict(value)
-    return value
-
-
-def append_jsonl(path: Path, row: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(to_jsonable(row), sort_keys=True, default=str) + "\n")

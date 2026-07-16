@@ -180,6 +180,12 @@ Command:
 python -m profiling.analysis.value_breakdown --config py/profiling/configs/value_breakdown.json
 ```
 
+The report includes per-evaluation dominance diagnostics. These use each
+aggregate term's absolute net raw contribution, not the component L1 magnitude;
+the latter can overstate own-minus-enemy terms whose components mostly cancel.
+Root and searched-action summaries report the dominant-term distribution,
+share thresholds, and raw-total reconciliation error.
+
 Outputs:
 
 - `positions.jsonl`
@@ -193,6 +199,30 @@ Outputs:
 - `report.html`
 
 Use this to answer "which terms are driving this value/action preference?"
+
+## Turn-Macro Inner-Plan Convergence
+
+Config:
+
+```text
+py/profiling/configs/turn_macro_inner_convergence.json
+```
+
+Command:
+
+```powershell
+python -m profiling.analysis.turn_macro_inner_convergence --config py/profiling/configs/turn_macro_inner_convergence.json
+```
+
+This analyzer compares the complete set of root macro plans generated at inner
+budget `N` with `2N`, `5N`, and a fixed high-budget reference. Its primary plan
+identity is the exact ordered action sequence used by the live selector's exact
+deduplication. An unordered-continuation identity is retained as a looser
+diagnostic. A shared first action alone is never counted as a plan match.
+Length-invariant diagnostics include both an ordered-subsequence match and an
+unordered continuation match; both require the same first action and use
+maximum one-to-one matching between plan sets. Outputs are
+`runs.csv`, `comparisons.csv`, `summary.csv`, and `summary.json`.
 
 ## Root Child Value Matrix
 

@@ -235,14 +235,6 @@ def _root_static_eval(payload: dict[str, Any], actions: list[dict[str, Any]], ma
     return priors, float(raw.get("value", 0.0))
 
 
-def _native_extension_path() -> str:
-    try:
-        extension = load_native_mcts_extension()
-    except Exception:
-        return ""
-    return str(getattr(extension, "__file__", "") or "")
-
-
 def _try_root_static_eval(
     payload: dict[str, Any],
     actions: list[dict[str, Any]],

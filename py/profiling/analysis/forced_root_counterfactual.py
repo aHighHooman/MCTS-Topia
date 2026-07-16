@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from profiling.config import load_config_defaults
-from project_paths import game_json_jar, game_root
+from project_paths import game_json_jar
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT = PROJECT_ROOT / "debug-logs" / "analysis" / "counterfactuals"
@@ -48,17 +48,6 @@ def _force_wrapper_command(delegate: list[str], forced_action: str, force_reques
     command.append("--")
     command.extend(delegate)
     return command
-
-
-def _classify(original_result: str, forced_result: str, original_margin: float, forced_margin: float) -> str:
-    if original_result != "WIN" and forced_result == "WIN":
-        return "rescue"
-    improvement = forced_margin - original_margin
-    if forced_result != "WIN" and improvement >= max(50.0, abs(original_margin) * 0.15):
-        return "improvement"
-    if improvement <= -max(50.0, abs(original_margin) * 0.15):
-        return "bad"
-    return "neutral"
 
 
 def run(args: argparse.Namespace) -> Path:

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from profiling.config import load_config_defaults
-from profiling.analysis.payload_store import load_payload, payload_hash, store_payload
+from profiling.analysis.payload_store import load_payload, store_payload
 from profiling.analysis.position_analyzer import parse_target
 from profiling.analysis.report_html import write_report
 from profiling.analysis.root_child_value_matrix import analyze_payload

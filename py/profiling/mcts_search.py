@@ -64,8 +64,6 @@ _MCTS_SEARCH_DEFAULTS: dict[str, Any] = {
     "turn_macro_max_primitives_per_turn": 0,
     "turn_macro_max_edges_per_node": 8,
     "turn_macro_outer_c": 1.4,
-    "turn_macro_prior_weight": 0.35,
-    "turn_macro_temperature": 1.0,
     "turn_macro_inner_simulations": 128,
     "turn_macro_inner_c_puct": 1.5,
     "turn_macro_opponent_mode": "maximalist",
@@ -117,7 +115,6 @@ from nn.model import HybridPolicyValueNet
 from search.config import HybridAgentConfig
 from search.native import mcts as native_mcts
 from search.native.cpp_extension import load_native_mcts_extension
-from training.config import rl_path
 
 _STATIC_TREE_DEPTH_SUM = 0
 _STATIC_TREE_MAX_DEPTH = 0
@@ -979,7 +976,6 @@ def _capture_selfplay_start_payload(args: argparse.Namespace, seed: int | None =
     Java runner has defaults, but we set them when the Python wrapper supports
     these dynamic attributes.
     """
-    from training.replay import ReplayStore
     from training.selfplay import run_selfplay
 
     run_seed = int(args.selfplay_seed if seed is None else seed)
@@ -1427,35 +1423,6 @@ def _profile_rows(profile: cProfile.Profile, *, root: Path) -> list[dict[str, An
         }
         for row in entries
     ]
-
-
-def _filtered_timing_rows(rows: list[dict[str, Any]], *, min_ms: float, min_pct: float, limit: int) -> list[dict[str, Any]]:
-    filtered = [
-        row
-        for row in rows
-        if float(row["total_ms"]) >= min_ms and float(row["pct"]) >= min_pct
-    ]
-    return filtered[:limit]
-
-
-def _filtered_profile_rows(rows: list[dict[str, Any]], *, min_ms: float, total_sec: float, min_pct: float, limit: int) -> list[dict[str, Any]]:
-    total_ms = max(1e-9, total_sec * 1000.0)
-    filtered = []
-    for row in rows:
-        cum_ms = float(row["cum_ms"])
-        pct = cum_ms / total_ms * 100.0
-        if cum_ms < min_ms or pct < min_pct:
-            continue
-        filtered.append(
-            {
-                "function": row["function"],
-                "calls": row["calls"],
-                "cum_ms": row["cum_ms"],
-                "self_ms": row["self_ms"],
-                "pct": f"{pct:.1f}",
-            }
-        )
-    return filtered[:limit]
 
 
 def _hotspot_rows(
@@ -2020,10 +1987,6 @@ def _native_static_exe_command(exe: Path, cfg: HybridAgentConfig, args: argparse
                 str(int(getattr(args, "turn_macro_max_edges_per_node", 8))),
                 "--turn-macro-outer-c",
                 str(float(getattr(args, "turn_macro_outer_c", 1.4))),
-                "--turn-macro-prior-weight",
-                str(float(getattr(args, "turn_macro_prior_weight", 0.35))),
-                "--turn-macro-temperature",
-                str(float(getattr(args, "turn_macro_temperature", 1.0))),
                 "--turn-macro-inner-simulations",
                 str(int(getattr(args, "turn_macro_inner_simulations", 128))),
                 "--turn-macro-inner-c-puct",

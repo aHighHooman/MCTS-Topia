@@ -24,12 +24,6 @@ def _repo_relative(path: Path) -> Path:
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
-def _terms_by_name(breakdown: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-    if not isinstance(breakdown, dict):
-        return {}
-    return {str(row.get("name")): dict(row) for row in breakdown.get("terms", []) if isinstance(row, dict)}
-
-
 def _breakdown_value(breakdown: dict[str, Any] | None, key: str, default: float = 0.0) -> float:
     if not isinstance(breakdown, dict):
         return default
