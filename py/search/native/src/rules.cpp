@@ -829,35 +829,6 @@ void append_payload_int_to_list(py::dict owner, const char* key, int value) {
 void append_city_payload_unit(NativeGameState& state, int city_id, int unit_id);
 int reveal_square_for_root(NativeGameState& state, int cx, int cy, int radius);
 
-void append_extra_unit_payload(NativeGameState& state, int tribe_id, int unit_id) {
-  if (!payload_sync_enabled(state)) {
-    return;
-  }
-  if (!state.observation.contains("tribes") || !py::isinstance<py::list>(state.observation["tribes"])) {
-    return;
-  }
-  py::list tribes = py::reinterpret_borrow<py::list>(state.observation["tribes"]);
-  for (const auto& item : tribes) {
-    if (!py::isinstance<py::dict>(item)) {
-      continue;
-    }
-    py::dict tribe = py::reinterpret_borrow<py::dict>(item);
-    if (read_int(tribe, "id", -1) != tribe_id) {
-      continue;
-    }
-    append_payload_int_to_list(tribe, "extra", unit_id);
-    if (tribe.contains("extra_unit_ids")) {
-      py::list copy;
-      py::list extra = py::reinterpret_borrow<py::list>(tribe["extra"]);
-      for (const auto& value : extra) {
-        copy.append(value);
-      }
-      tribe["extra_unit_ids"] = copy;
-    }
-    return;
-  }
-}
-
 void erase_int(std::vector<int>& values, int value) {
   values.erase(std::remove(values.begin(), values.end(), value), values.end());
 }
@@ -1369,11 +1340,6 @@ void mark_unit_removed(NativeGameState& state, NativeUnit& unit) {
   set_unit_payload_field(state, unit.id, "status", "s", py::str("FINISHED"));
 }
 
-bool is_loss_result(const NativeGameState& state, int tribe_id) {
-  const NativeTribe* tribe = tribe_by_id_const(state, tribe_id);
-  return tribe != nullptr && tribe->result == "LOSS";
-}
-
 bool uses_capital_objective(const NativeGameState& state) {
   const std::string mode = read_string(state.observation, "mode");
   return mode == "CAPITALS" || mode == "MIGHT";
@@ -1525,24 +1491,6 @@ void ingest_cities_from_board(NativeGameState& state) {
     }
     state.cities.push_back(city);
     known_ids.insert(city.id);
-  }
-}
-
-void refine_city_center(NativeCity& city, const NativeGameState& state) {
-  int best_score = -1;
-  for (const NativeTile& tile : state.tiles) {
-    if (tile.city_id != city.id) {
-      continue;
-    }
-    int score = tile.x + tile.y;
-    if (tile.terrain == "CITY" || tile.terrain == "VILLAGE") {
-      score += 1000;
-    }
-    if (score > best_score) {
-      best_score = score;
-      city.x = tile.x;
-      city.y = tile.y;
-    }
   }
 }
 
@@ -2412,10 +2360,6 @@ void append_tile_action(
   action.payload[position_key] = position_payload(x, y);
 #endif
   append_generated_action(state, actions, max_actions, std::move(action));
-}
-
-bool unit_can_act(const NativeUnit& unit, int active_player_id) {
-  return unit.tribe_id == active_player_id && unit.status != "MOVED" && unit.status != "FINISHED" && unit.status != "EXHAUSTED";
 }
 
 bool unit_is_fresh(const NativeUnit& unit) {
@@ -4593,21 +4537,6 @@ bool tile_visible_for_asset(const NativeGameState& state, int x, int y) {
     }
   }
   return false;
-}
-
-std::vector<int> visible_enemy_tribes(const NativeGameState& state) {
-  std::set<int> ids;
-  for (const NativeUnit& unit : state.units) {
-    if (unit.tribe_id != state.root_player_id && !unit.hidden && tile_visible_for_asset(state, unit.x, unit.y)) {
-      ids.insert(unit.tribe_id);
-    }
-  }
-  for (const NativeCity& city : state.cities) {
-    if (city.tribe_id != state.root_player_id && tile_visible_for_asset(state, city.x, city.y)) {
-      ids.insert(city.tribe_id);
-    }
-  }
-  return std::vector<int>(ids.begin(), ids.end());
 }
 
 int choose_next_active_player(const NativeGameState& state) {

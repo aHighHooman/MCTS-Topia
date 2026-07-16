@@ -21,6 +21,33 @@ def _require_exe() -> Path:
     return EXE
 
 
+def test_static_mcts_exe_defaults_to_max_visit_action() -> None:
+    message = _message()
+    message["type"] = "action_request"
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode",
+            "turn-macro-exp",
+            "--simulations",
+            "16",
+            "--turn-macro-inner-simulations",
+            "16",
+            "--seed",
+            "13",
+        ],
+        input=json.dumps(message) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+
+    response = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert response["rankedActionIds"]
+    assert response["actionId"] == response["rankedActionIds"][0]
+
+
 def _compact_board(board: dict) -> dict:
     size = int(board["size"])
     tiles = board["tiles"]
@@ -551,6 +578,35 @@ def test_static_mcts_exe_turn_macro_inner_confidence_matches_conditional_visit_p
         assert float(candidate["log_confidence"]) == pytest.approx(sum(math.log(value) for value in shares))
 
 
+def test_static_mcts_exe_turn_macro_inner_excludes_unvisited_root_actions() -> None:
+    message = _message_with_simple_unit_action_reuse("RECOVER")
+    message["type"] = "action_request"
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode",
+            "turn-macro-inner-probe",
+            "--turn-macro-inner-simulations",
+            "1",
+            "--deterministic",
+            "--profile-json",
+            "--seed",
+            "13",
+        ],
+        input=json.dumps(message) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+
+    response = json.loads(completed.stdout.strip().splitlines()[-1])
+    candidates = response["_profile"]["inner_candidates"]
+
+    assert candidates
+    assert all(int(candidate["visits"]) > 0 for candidate in candidates)
+
+
 def test_static_mcts_exe_turn_macro_inner_respects_primitive_depth_limit() -> None:
     message = _message_with_simple_unit_action_reuse("RECOVER")
     message["type"] = "action_request"
@@ -700,7 +756,72 @@ def test_static_mcts_exe_turn_macro_exp_replans_after_state_invalidation() -> No
     assert responses[1]["_profile"]["continuation_event"] == "replanned:state_mismatch"
 
 
-def test_static_mcts_exe_turn_macro_exp_exposes_confidence_metadata() -> None:
+def _run_turn_macro_request_policy(
+    policy: str,
+    *,
+    invalidate_second_state: bool = False,
+) -> list[dict]:
+    first = _message_with_simple_unit_action_reuse("RECOVER")
+    first["type"] = "action_request"
+    second = _request_after_first_recover_action(2)
+    if invalidate_second_state:
+        second["observation"]["tribes"][0]["stars"] += 1
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode",
+            "turn-macro-exp",
+            "--simulations",
+            "8",
+            "--turn-macro-inner-simulations",
+            "16",
+            "--turn-macro-max-primitives-per-turn",
+            "8",
+            "--turn-macro-request-policy",
+            policy,
+            "--deterministic",
+            "--profile-json",
+            "--seed",
+            "13",
+        ],
+        input="\n".join((json.dumps(first), json.dumps(second), json.dumps({"type": "game_over"}))) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+    return [json.loads(line) for line in completed.stdout.splitlines()]
+
+
+def test_static_mcts_exe_turn_budget_searches_only_once_after_invalidation() -> None:
+    responses = _run_turn_macro_request_policy("turn-budget", invalidate_second_state=True)
+
+    assert responses[0]["_profile"]["request_policy"] == "turn-budget"
+    assert responses[0]["_profile"]["searches_this_turn"] == 1
+    assert responses[1]["_profile"]["continuation_event"] == "turn_budget_exhausted"
+    assert responses[1]["_profile"]["searches_this_turn"] == 1
+    assert responses[1]["_profile"]["requests_this_turn"] == 2
+
+
+def test_static_mcts_exe_fresh_suffix_researches_second_request() -> None:
+    responses = _run_turn_macro_request_policy("fresh-suffix")
+
+    assert responses[1]["_profile"]["request_policy"] == "fresh-suffix"
+    assert responses[1]["_profile"]["continuation_event"] == "replanned:fresh_suffix"
+    assert responses[1]["_profile"]["searches_this_turn"] == 2
+    assert responses[1]["_profile"]["outer_simulations"] > 0
+
+
+def test_static_mcts_exe_choice_replan_researches_meaningful_second_request() -> None:
+    responses = _run_turn_macro_request_policy("choice-replan")
+
+    assert responses[1]["_profile"]["request_policy"] == "choice-replan"
+    assert responses[1]["_profile"]["continuation_event"] == "replanned:meaningful_choice"
+    assert responses[1]["_profile"]["searches_this_turn"] == 2
+    assert responses[1]["_profile"]["outer_simulations"] > 0
+
+
+def test_static_mcts_exe_turn_macro_exp_selects_plans_from_visits_and_value() -> None:
     message = _message()
     message["type"] = "action_request"
     completed = subprocess.run(
@@ -731,57 +852,14 @@ def test_static_mcts_exe_turn_macro_exp_exposes_confidence_metadata() -> None:
     plans = profile["root_turn_plans"]
 
     assert plans
-    assert len({plan["diversity_key"] for plan in plans}) == len(plans)
     assert all(plan["selection_reasons"] for plan in plans)
-    assert any("new_function" in plan["selection_reasons"] for plan in plans)
-    assert {"spawn", "road", "end"}.issubset({plan["first_action_id"] for plan in plans})
+    assert all(set(plan["selection_reasons"]) <= {"visited", "value", "confidence_fallback"} for plan in plans)
     assert all(float(plan["log_confidence"]) <= 0.0 for plan in plans)
-    assert sum(float(plan["edge_prior"]) for plan in plans) == pytest.approx(1.0)
-    assert all(float(plan["edge_prior"]) >= 0.0 for plan in plans)
+    assert len({tuple(plan["action_signatures"]) for plan in plans}) == len(plans)
     assert int(profile["macro_exp_raw_candidates"]) >= len(plans)
     assert int(profile["macro_exp_visited_candidates"]) > 0
     assert int(profile["macro_exp_value_candidates"]) > 0
-    assert int(profile["macro_exp_prior_candidates"]) > 0
     assert "macro_exp_exact_duplicates_removed" in profile
-    assert "macro_exp_material_duplicates_removed" in profile
-
-
-def test_static_mcts_exe_turn_macro_temperature_controls_edge_prior_sharpness() -> None:
-    message = _message_with_simple_unit_action_reuse("RECOVER")
-    message["type"] = "action_request"
-    prior_ranges = []
-    for temperature in (0.1, 10.0):
-        completed = subprocess.run(
-            [
-                str(_require_exe()),
-                "--search-mode",
-                "turn-macro-exp",
-                "--simulations",
-                "1",
-                "--turn-macro-inner-simulations",
-                "32",
-                "--turn-macro-max-edges-per-node",
-                "8",
-                "--turn-macro-temperature",
-                str(temperature),
-                "--deterministic",
-                "--profile-json",
-                "--seed",
-                "13",
-            ],
-            input=json.dumps(message) + "\n",
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=True,
-        )
-        response = json.loads(completed.stdout.strip().splitlines()[-1])
-        priors = [float(plan["edge_prior"]) for plan in response["_profile"]["root_turn_plans"]]
-        assert len(priors) >= 2
-        assert sum(priors) == pytest.approx(1.0)
-        prior_ranges.append(max(priors) - min(priors))
-
-    assert prior_ranges[0] > prior_ranges[1]
 
 
 def test_static_mcts_exe_turn_macro_exp_keeps_distinct_unit_commitments() -> None:
@@ -816,9 +894,9 @@ def test_static_mcts_exe_turn_macro_exp_keeps_distinct_unit_commitments() -> Non
     plans = response["_profile"]["root_turn_plans"]
     first_actions = {plan["first_action_id"] for plan in plans}
 
-    assert {"recover-u1", "recover-u2", "move-u1", "end"}.issubset(first_actions)
+    assert {"recover-u1", "recover-u2"}.issubset(first_actions)
     assert sum(plan["first_action_id"] == "recover-u2" for plan in plans) >= 2
-    assert len({plan["diversity_key"] for plan in plans}) == len(plans)
+    assert len({tuple(plan["action_signatures"]) for plan in plans}) == len(plans)
 
 
 @pytest.mark.parametrize(

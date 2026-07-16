@@ -52,7 +52,7 @@ class SearchConfig:
     dirichlet_epsilon: float = 0.2
     root_temperature: float = 1.0
     top_k_actions: int = 64
-    sample_action: bool = True
+    sample_action: bool = False
     min_non_end_turn_visits: int = 1
     use_progressive_widening: bool = True
     reuse_tree: bool = False

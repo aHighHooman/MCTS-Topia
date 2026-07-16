@@ -16,21 +16,18 @@ from nn.encoding import (
     ACTION_FEATURE_INDEX,
     ACTION_NATIVE_CONTEXT_START,
     BOARD_FEATURE_INDEX,
-    BUILDING_TYPES,
     LEVEL_UP_BONUS_TYPES,
-    RESOURCE_TYPES,
     SCALAR_MY_TECH_START,
     TECH_TYPES,
     TERRAIN_TYPES,
     UNIT_FEATURE_INDEX,
-    UNIT_STATUS_TYPES,
     encode_observation,
     normalize_message,
 )
 from nn.model import HybridPolicyValueNet
 from search.native import run_native_mcts
 from search.native.cpp_extension import load_native_mcts_extension
-from search.native.mcts import NativeSearchParityError, _apply_end_turn_visit_guard, _message_cache_key, _root_priors, _unique_action_mapping
+from search.native.mcts import _apply_end_turn_visit_guard, _message_cache_key, _root_priors, _unique_action_mapping
 from search.native.parity_runner import _canonical_state, run_parity, parse_args
 
 

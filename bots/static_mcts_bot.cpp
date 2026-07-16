@@ -23,6 +23,13 @@ using json = nlohmann::json;
 
 namespace {
 
+enum class MacroRequestPolicy {
+  Cached,
+  TurnBudget,
+  FreshSuffix,
+  ChoiceReplan,
+};
+
 struct CliConfig {
   int simulations = 64;
   double wall_clock_seconds = 0.0;
@@ -33,7 +40,7 @@ struct CliConfig {
   double dirichlet_alpha = 0.3;
   double dirichlet_epsilon = 0.25;
   double root_temperature = 1.0;
-  bool sample_action = true;
+  bool sample_action = false;
   bool reuse_tree = false;
   bool progressive_widening = true;
   bool profile_json = false;
@@ -46,6 +53,7 @@ struct CliConfig {
   std::string search_mode = "primitive";
   tribes::native::TurnMacroExpConfig turn_macro;
   bool turn_macro_simulations_set = false;
+  MacroRequestPolicy turn_macro_request_policy = MacroRequestPolicy::Cached;
 };
 
 py::object py_from_json(const json& value) {
@@ -137,10 +145,6 @@ json matrix_value(const json& matrix, int x, int y) {
   const json& row = matrix[static_cast<size_t>(y)];
   if (!row.is_array() || x < 0 || x >= static_cast<int>(row.size())) return nullptr;
   return row[static_cast<size_t>(x)];
-}
-
-bool has_usable_key(const json& object, const char* key) {
-  return object.is_object() && object.contains(key) && !object[key].is_null();
 }
 
 void set_default(json& object, const char* key, const json& value) {
@@ -917,6 +921,51 @@ struct MacroContinuationState {
   }
 };
 
+struct MacroTurnRequestState {
+  int tick = std::numeric_limits<int>::min();
+  int player_id = -1;
+  int requests_this_turn = 0;
+  int searches_this_turn = 0;
+  bool search_spent = false;
+
+  void observe(const json& message) {
+    const int observed_player = json_int(message, "player_id", -1);
+    const json& observation = value_or(message, "observation", json::object());
+    const int observed_tick = json_int(observation, "tick", std::numeric_limits<int>::min());
+    if (observed_player != player_id || observed_tick != tick) {
+      tick = observed_tick;
+      player_id = observed_player;
+      requests_this_turn = 0;
+      searches_this_turn = 0;
+      search_spent = false;
+    }
+    requests_this_turn += 1;
+  }
+
+  void record_search() {
+    searches_this_turn += 1;
+    search_spent = true;
+  }
+
+  void clear() {
+    tick = std::numeric_limits<int>::min();
+    player_id = -1;
+    requests_this_turn = 0;
+    searches_this_turn = 0;
+    search_spent = false;
+  }
+};
+
+const char* macro_request_policy_name(MacroRequestPolicy policy) {
+  switch (policy) {
+    case MacroRequestPolicy::TurnBudget: return "turn-budget";
+    case MacroRequestPolicy::FreshSuffix: return "fresh-suffix";
+    case MacroRequestPolicy::ChoiceReplan: return "choice-replan";
+    case MacroRequestPolicy::Cached:
+    default: return "cached";
+  }
+}
+
 bool cli_is_forced_macro_type(const std::string& type) {
   return type == "LEVEL_UP" || type == "MAKE_VETERAN" || type == "CAPTURE" || type == "EXAMINE";
 }
@@ -926,6 +975,19 @@ void attach_macro_profile_event(json& response, const CliConfig& cfg, const std:
   if (!response.contains("_profile") || !response["_profile"].is_object()) response["_profile"] = json::object();
   response["_profile"]["continuation_event"] = event;
   response["_profile"]["continuation_remaining"] = remaining;
+}
+
+void attach_macro_request_profile(
+    json& response,
+    const CliConfig& cfg,
+    const MacroTurnRequestState& request_state) {
+  if (!cfg.profile_json) return;
+  if (!response.contains("_profile") || !response["_profile"].is_object()) response["_profile"] = json::object();
+  response["_profile"]["request_policy"] = macro_request_policy_name(cfg.turn_macro_request_policy);
+  response["_profile"]["turn_tick"] = request_state.tick;
+  response["_profile"]["requests_this_turn"] = request_state.requests_this_turn;
+  response["_profile"]["searches_this_turn"] = request_state.searches_this_turn;
+  response["_profile"]["turn_search_spent"] = request_state.search_spent;
 }
 
 json direct_action_response(
@@ -1015,6 +1077,20 @@ bool try_macro_continuation(
     return false;
   }
 
+  if (cfg.turn_macro_request_policy == MacroRequestPolicy::ChoiceReplan) {
+    int meaningful_actions = 0;
+    for (int action_index : root.state.legal_action_indexes) {
+      if (action_index < 0 || action_index >= static_cast<int>(root.actions.size())) continue;
+      const std::string& type = root.actions[action_index].type;
+      if (type == "END_TURN" || cli_is_forced_macro_type(type)) continue;
+      meaningful_actions += 1;
+    }
+    if (meaningful_actions >= 2) {
+      continuation.clear("meaningful_choice");
+      return false;
+    }
+  }
+
   continuation.next_index += 1;
   const int remaining = static_cast<int>(continuation.action_signatures.size() - continuation.next_index);
   response = direct_action_response(root_actions, matched_index, cfg, "continued");
@@ -1023,6 +1099,51 @@ bool try_macro_continuation(
     continuation.clear(remaining == 0 ? "plan_exhausted" : "turn_boundary");
   }
   return true;
+}
+
+bool try_forced_macro_action(
+    const json& message,
+    const CliConfig& cfg,
+    const std::vector<json>& root_actions,
+    MacroContinuationState& continuation,
+    json& response) {
+  py::dict payload = py::reinterpret_borrow<py::dict>(py_from_json(message));
+  tribes::native::NativeRoot root = tribes::native::parse_root_payload(payload, cfg.max_actions);
+  for (int action_index : root.state.legal_action_indexes) {
+    if (action_index < 0 || action_index >= static_cast<int>(root.actions.size())) continue;
+    if (!cli_is_forced_macro_type(root.actions[action_index].type)) continue;
+    continuation.clear("forced_action");
+    response = direct_action_response(root_actions, action_index, cfg, "forced_action");
+    return true;
+  }
+  return false;
+}
+
+json turn_budget_exhausted_response(
+    const json& message,
+    const std::vector<json>& root_actions,
+    const CliConfig& cfg) {
+  int selected = 0;
+  py::dict root_payload = py::reinterpret_borrow<py::dict>(py_from_json(message));
+  py::dict eval_payload;
+  eval_payload["player_id"] = py::int_(json_int(message, "player_id", 0));
+  eval_payload["observation"] = root_payload["observation"];
+  eval_payload["actions"] = root_payload["actions"];
+  py::dict root_eval = tribes::native::evaluate_static(eval_payload, cfg.max_actions);
+  py::list raw_priors = py::reinterpret_borrow<py::list>(root_eval["priors"]);
+  double best_prior = -std::numeric_limits<double>::infinity();
+  for (int index = 0;
+       index < static_cast<int>(root_actions.size()) && index < static_cast<int>(py::len(raw_priors));
+       ++index) {
+    const double prior = py::cast<double>(raw_priors[index]);
+    if (prior > best_prior) {
+      best_prior = prior;
+      selected = index;
+    }
+  }
+  json response = direct_action_response(root_actions, selected, cfg, "turn_budget_exhausted");
+  if (cfg.profile_json) response["_profile"]["fallback_policy"] = "static_prior";
+  return response;
 }
 
 std::vector<double> coerce_priors(py::handle raw_priors, int action_count) {
@@ -1245,7 +1366,9 @@ json choose_action_with_turn_macro_exp_tree(
     const json& message,
     const CliConfig& cfg,
     std::mt19937_64& rng,
-    MacroContinuationState& continuation) {
+    MacroContinuationState& continuation,
+    MacroTurnRequestState& request_state) {
+  request_state.observe(message);
   tribes::native::TurnMacroExpConfig macro_cfg = cfg.turn_macro;
   macro_cfg.max_actions = cfg.max_actions;
   macro_cfg.simulations = cfg.turn_macro_simulations_set ? cfg.turn_macro.simulations : cfg.simulations;
@@ -1257,8 +1380,16 @@ json choose_action_with_turn_macro_exp_tree(
     return json{{"actionId", nullptr}, {"rankedActionIds", json::array()}, {"i", nullptr}, {"rankedActionIndexes", json::array()}};
   }
   json continuation_response;
-  if (try_macro_continuation(message, cfg, root_actions, continuation, continuation_response)) {
+  if (cfg.turn_macro_request_policy != MacroRequestPolicy::Cached &&
+      try_forced_macro_action(message, cfg, root_actions, continuation, continuation_response)) {
+    attach_macro_request_profile(continuation_response, cfg, request_state);
+    return continuation_response;
+  }
+  if (cfg.turn_macro_request_policy == MacroRequestPolicy::FreshSuffix && continuation.active()) {
+    continuation.clear("fresh_suffix");
+  } else if (try_macro_continuation(message, cfg, root_actions, continuation, continuation_response)) {
     continuation.last_clear_reason.clear();
+    attach_macro_request_profile(continuation_response, cfg, request_state);
     return continuation_response;
   }
   const std::string clear_reason = continuation.last_clear_reason;
@@ -1278,7 +1409,15 @@ json choose_action_with_turn_macro_exp_tree(
       };
     }
     if (!clear_reason.empty()) attach_macro_profile_event(response, cfg, "replanned:" + clear_reason, 0);
+    attach_macro_request_profile(response, cfg, request_state);
     attach_wire_indexes(response, root_actions);
+    return response;
+  }
+
+  if (cfg.turn_macro_request_policy == MacroRequestPolicy::TurnBudget && request_state.search_spent) {
+    continuation.clear("turn_budget_exhausted");
+    json response = turn_budget_exhausted_response(message, root_actions, cfg);
+    attach_macro_request_profile(response, cfg, request_state);
     return response;
   }
 
@@ -1289,6 +1428,7 @@ json choose_action_with_turn_macro_exp_tree(
   } else {
     tree.run(macro_cfg.simulations);
   }
+  request_state.record_search();
   json response = json_from_py(tree.result_py(cfg.root_temperature, cfg.sample_action));
   if (!response.contains("actionId") || response["actionId"].is_null() || tree.root_edge_count() <= 0) {
     throw std::runtime_error(
@@ -1297,8 +1437,13 @@ json choose_action_with_turn_macro_exp_tree(
         "root_edges=" + std::to_string(tree.root_edge_count()));
   }
   capture_macro_continuation(response, continuation);
+  if (cfg.turn_macro_request_policy == MacroRequestPolicy::FreshSuffix) {
+    continuation.clear("fresh_suffix");
+  }
   if (!clear_reason.empty()) attach_macro_profile_event(response, cfg, "replanned:" + clear_reason,
       static_cast<int>(continuation.action_signatures.size()));
+  else attach_macro_profile_event(response, cfg, "searched", static_cast<int>(continuation.action_signatures.size()));
+  attach_macro_request_profile(response, cfg, request_state);
   attach_wire_indexes(response, root_actions);
   return response;
 }
@@ -1344,8 +1489,6 @@ json choose_action_with_turn_macro_inner_probe(const json& message, const CliCon
         {"actionId", id},
         {"visits", candidate.visits},
         {"q_utility", candidate.q_utility},
-        {"prior", candidate.prior},
-        {"score", candidate.score},
         {"log_confidence", candidate.log_confidence},
         {"conditional_visit_shares", candidate.conditional_visit_shares},
         {"plan", candidate.action_signatures},
@@ -1390,6 +1533,7 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
     else if (arg == "--static-eval-variant") cfg.static_eval_variant = next();
     else if (arg == "--static-eval-weight-overrides") cfg.static_eval_weight_overrides = next();
     else if (arg == "--uniform-prior" || arg == "--uniform-priors") cfg.uniform_prior = true;
+    else if (arg == "--sample-action") cfg.sample_action = true;
     else if (arg == "--deterministic") {
       cfg.sample_action = false;
       cfg.root_temperature = 1e-6;
@@ -1421,10 +1565,6 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
       cfg.turn_macro.max_new_edges_per_node = std::stoi(next());
     } else if (arg == "--turn-macro-outer-c") {
       cfg.turn_macro.outer_c = std::stod(next());
-    } else if (arg == "--turn-macro-prior-weight") {
-      cfg.turn_macro.macro_exp_prior_weight = std::stod(next());
-    } else if (arg == "--turn-macro-temperature") {
-      cfg.turn_macro.macro_exp_temperature = std::stod(next());
     } else if (arg == "--turn-macro-inner-simulations") {
       cfg.turn_macro.inner_simulations = std::stoi(next());
     } else if (arg == "--turn-macro-inner-c-puct") {
@@ -1438,6 +1578,19 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
       } else {
         throw std::runtime_error("Unsupported --turn-macro-opponent-mode: " + mode);
       }
+    } else if (arg == "--turn-macro-request-policy") {
+      const std::string policy = next();
+      if (policy == "cached") {
+        cfg.turn_macro_request_policy = MacroRequestPolicy::Cached;
+      } else if (policy == "turn-budget") {
+        cfg.turn_macro_request_policy = MacroRequestPolicy::TurnBudget;
+      } else if (policy == "fresh-suffix") {
+        cfg.turn_macro_request_policy = MacroRequestPolicy::FreshSuffix;
+      } else if (policy == "choice-replan") {
+        cfg.turn_macro_request_policy = MacroRequestPolicy::ChoiceReplan;
+      } else {
+        throw std::runtime_error("Unsupported --turn-macro-request-policy: " + policy);
+      }
     } else if (arg == "--help" || arg == "-h") {
       std::cout
           << "static_mcts_bot.exe [--search-mode primitive|turn-macro-exp|turn-macro-inner-probe] [--simulations N]\n"
@@ -1445,14 +1598,15 @@ void parse_args(int argc, char** argv, CliConfig& cfg) {
           << "  [--top-k-actions N] [--max-actions N] [--search-batch-size N] [--c-puct X]\n"
           << "  [--static-eval-variant baseline|experimental|experimental-2|experimental-training] [--static-eval-weight-overrides SPEC]\n"
           << "  [--uniform-prior]\n"
-          << "  [--deterministic] [--reuse-tree]\n"
+          << "  [--sample-action] [--deterministic] [--reuse-tree]\n"
           << "  [--profile-json] [--profile-timing] [--seed N]\n"
           << "  [--native-opponent-mode root-adversarial|root-max]\n"
           << "  [--turn-macro-simulations N]\n"
           << "  [--turn-macro-max-primitives-per-turn N] [--turn-macro-max-edges-per-node N]\n"
-          << "  [--turn-macro-outer-c X] [--turn-macro-prior-weight X]\n"
-          << "  [--turn-macro-temperature X] [--turn-macro-inner-simulations N] [--turn-macro-inner-c-puct X]\n"
-           << "  [--turn-macro-opponent-mode root-max|maximalist]\n";
+          << "  [--turn-macro-outer-c X]\n"
+          << "  [--turn-macro-inner-simulations N] [--turn-macro-inner-c-puct X]\n"
+          << "  [--turn-macro-opponent-mode root-max|maximalist]\n"
+          << "  [--turn-macro-request-policy cached|turn-budget|fresh-suffix|choice-replan]\n";
       std::exit(0);
     }
   }
@@ -1485,6 +1639,7 @@ int main(int argc, char** argv) {
     set_static_eval_weight_overrides_env(cfg.static_eval_weight_overrides);
     std::mt19937_64 rng(cfg.seed);
     MacroContinuationState continuation;
+    MacroTurnRequestState macro_request_state;
     std::string line;
     while (std::getline(std::cin, line)) {
       if (line.empty()) continue;
@@ -1494,7 +1649,8 @@ int main(int argc, char** argv) {
       if (type == "action_request") {
         message = normalize_cli_message(message);
         if (cfg.search_mode == "turn-macro-exp") {
-          std::cout << choose_action_with_turn_macro_exp_tree(message, cfg, rng, continuation).dump() << std::endl;
+          std::cout << choose_action_with_turn_macro_exp_tree(
+              message, cfg, rng, continuation, macro_request_state).dump() << std::endl;
         } else if (cfg.search_mode == "turn-macro-inner-probe") {
           std::cout << choose_action_with_turn_macro_inner_probe(message, cfg).dump() << std::endl;
         } else {
@@ -1502,6 +1658,7 @@ int main(int argc, char** argv) {
         }
       } else if (type == "game_over") {
         continuation.clear("game_over");
+        macro_request_state.clear();
         break;
       }
     }

@@ -18,7 +18,7 @@ The default Python `SearchConfig` in `py/search/config.py` is:
 | `dirichlet_epsilon` | 0.2 | Root noise mixture amount. |
 | `root_temperature` | 1.0 | Visit distribution temperature. |
 | `top_k_actions` | 64 | Root action cap before tree construction. |
-| `sample_action` | true | Sample from visits instead of argmax. |
+| `sample_action` | false | Choose the maximum-visit action by default; enable explicitly for visit-proportional sampling. |
 | `min_non_end_turn_visits` | 1 | Avoid selecting `END_TURN` if no non-end action was visited. |
 | `use_progressive_widening` | true | Only expose a growing prefix of child actions. |
 | `reuse_tree` | false | Reusable session is off unless explicitly enabled. |
@@ -86,7 +86,7 @@ This means the local action order matters: actions earlier in the legal/prior li
 
 `turn-macro-exp` enumerates maximal positive-visit trajectories from its inner primitive MCTS, so multiple complete-turn candidates may share the same first action. A trajectory's log-confidence is the sum of the log conditional visit share chosen at each inner node. Sparse trajectory leaves are completed by applying forced actions and then ending the turn; these deterministic finalization steps do not reduce confidence.
 
-Candidates compete globally by confidence with no per-first-action quota. They are deduplicated first by exact executed trajectory and then by a material diversity key containing the first action and normalized continuation commitments. The accepted candidates' confidences are normalized with log-sum-exp and used as their outer edge priors; `max_new_edges_per_node` remains the final edge cap. Profile JSON records each root plan's log-confidence, normalized prior, selection reason, and deduplication counters.
+Candidates compete globally with no per-first-action quota. Plan admission alternates between rankings by root visit count (Q as the tie-break) and root Q (visits as the tie-break) until `max_new_edges_per_node` is filled. Only exact executed trajectories are deduplicated; there is no diversity filter or plan prior. Outer edge selection uses Q plus the ordinary UCB exploration term. Profile JSON records each root plan's visit-derived log-confidence, selection reasons, and the exact-deduplication counter.
 
 The standalone bot preserves the selected root plan across `action_request` messages. Remaining actions are matched by stable action signatures and remapped to each request's action IDs. A continuation is abandoned when its predicted native state fingerprint no longer matches, the next action is unavailable, a forced action appears, or the turn reaches a boundary; profile JSON reports whether a request continued or replanned.
 
@@ -134,10 +134,10 @@ otherwise: visits ** (1 / temperature), normalized
 
 If no paths were selected, Python falls back to prior/uniform distribution depending on path.
 
-Action selection is:
+Action selection is deterministic by default:
 
-- sample from visit probabilities when `sample_action=true`;
-- otherwise choose max visit probability;
+- choose the maximum-visit action when `sample_action=false` (the default);
+- sample from visit probabilities only when `sample_action=true` or the standalone bot receives `--sample-action`;
 - then apply the `END_TURN` guard, which rejects `END_TURN` if configured and no non-end action received any visit.
 
 The result includes:

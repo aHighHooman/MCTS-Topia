@@ -34,8 +34,6 @@ struct TurnMacroExpConfig {
   int progressive_base = 1;
   double progressive_scale = 1.0;
   double outer_c = 1.4;
-  double macro_exp_prior_weight = 0.35;
-  double macro_exp_temperature = 1.0;
   int inner_simulations = 128;
   double inner_c_puct = 1.5;
   bool profile_json = false;
@@ -44,7 +42,6 @@ struct TurnMacroExpConfig {
 
 struct MacroExpTurnPlan {
   std::vector<std::string> executed_macro_exp_action_signatures;
-  std::vector<std::string> commitment_signatures;
   std::string first_action_id;
   NativeGameState result_state;
   bool reached_turn_boundary = false;
@@ -112,9 +109,7 @@ class TurnMacroExpMCTS {
   int macro_exp_raw_candidates_ = 0;
   int macro_exp_visited_candidates_ = 0;
   int macro_exp_value_candidates_ = 0;
-  int macro_exp_prior_candidates_ = 0;
   int macro_exp_exact_duplicates_removed_ = 0;
-  int macro_exp_material_duplicates_removed_ = 0;
   int opponent_leaf_evaluations_ = 0;
   int deadline_stops_ = 0;
   int64_t deadline_ns_ = 0;
