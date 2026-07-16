@@ -1,5 +1,4 @@
 import json
-import math
 import os
 import random
 import sys
@@ -158,14 +157,6 @@ class ObservationView:
             and self.unit(tile["unit_id"])
             and self.unit(tile["unit_id"])["tribe_id"] != self.player_id
         )
-
-    def weakest_enemy_distance_from(self, pos):
-        best = None
-        for enemy in self.enemy_units:
-            dist = chebyshev(pos, enemy)
-            if best is None or dist < best:
-                best = dist
-        return best
 
     def stronger_enemy_near(self, unit):
         for enemy in self.enemy_units:

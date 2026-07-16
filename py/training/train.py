@@ -18,7 +18,6 @@ from typing import Dict, List
 
 import torch
 from torch import nn
-from torch.utils.data import Dataset
 
 from .augment_replay import augment_record, symmetry_specs
 from nn.encoding import EncodedObservation, encode_observation
@@ -27,18 +26,6 @@ from .config import HybridAgentConfig
 from search.device import move_optimizer_state, require_cuda_device
 from .replay import ReplayStore, StepRecord, record_to_payload, visit_target_tensor
 from .selfplay import run_selfplay
-
-
-class ReplayDataset(Dataset):
-    def __init__(self, records: List[StepRecord], cfg: HybridAgentConfig) -> None:
-        self.records = records
-        self.cfg = cfg
-
-    def __len__(self) -> int:
-        return len(self.records)
-
-    def __getitem__(self, idx: int) -> StepRecord:
-        return self.records[idx]
 
 
 def _stack_encoded(items: List[EncodedObservation]) -> EncodedObservation:

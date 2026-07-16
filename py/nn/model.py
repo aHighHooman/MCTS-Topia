@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
-from torch.fx.experimental.symbolic_shapes import expect_true as _torch_expect_true
 
 from search.config import ModelConfig
 from .encoding import BOARD_FEATURE_INDEX

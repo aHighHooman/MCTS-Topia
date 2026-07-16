@@ -624,43 +624,11 @@ std::pair<double, double> bounds_for(double initial, const Args& args) {
   return {lower, upper};
 }
 
-double predict(const std::unordered_map<std::string, double>& weights, const Example& example) {
-  double raw = example.fixed_raw;
-  for (const auto& [term, value] : example.features) {
-    auto found = weights.find(term);
-    if (found != weights.end()) raw += found->second * value;
-  }
-  return std::tanh(raw / kValueScale);
-}
-
 double predict_dense(const std::vector<double>& weights, const DenseExample& example) {
   double raw = example.fixed_raw;
   const size_t n = std::min(weights.size(), example.features.size());
   for (size_t i = 0; i < n; ++i) raw += weights[i] * example.features[i];
   return std::tanh(raw / kValueScale);
-}
-
-Metrics metrics_for(const std::unordered_map<std::string, double>& weights, const std::vector<Example>& examples) {
-  Metrics m;
-  m.count = static_cast<double>(examples.size());
-  if (examples.empty()) return m;
-  double weight_sum = 0.0;
-  for (const Example& example : examples) weight_sum += example.sample_weight;
-  if (weight_sum <= 0.0) weight_sum = 1.0;
-  double sign_ok = 0.0;
-  for (const Example& example : examples) {
-    const double pred = predict(weights, example);
-    const double err = pred - example.target;
-    m.mse += example.sample_weight * err * err;
-    m.mae += example.sample_weight * std::abs(err);
-    if ((pred >= 0.0 && example.target >= 0.0) || (pred < 0.0 && example.target < 0.0)) {
-      sign_ok += example.sample_weight;
-    }
-  }
-  m.mse /= weight_sum;
-  m.mae /= weight_sum;
-  m.sign_accuracy = sign_ok / weight_sum;
-  return m;
 }
 
 Metrics metrics_for_dense(const std::vector<double>& weights, const std::vector<DenseExample>& examples) {
