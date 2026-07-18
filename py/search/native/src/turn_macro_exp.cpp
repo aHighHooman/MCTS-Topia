@@ -258,19 +258,14 @@ bool macro_exp_is_end_turn_signature(const std::string& signature) {
 
 struct MacroExpInnerActionCandidate {
   int global_action_index = -1;
-  int inner_endpoint_state_index = -1;
   int visits = 0;
   double q_utility = 0.0;
   double prior = 0.0;
   double score = 0.0;
   double log_confidence = -std::numeric_limits<double>::infinity();
   std::vector<std::string> action_signatures;
-  std::vector<std::string> commitment_signatures;
   std::vector<double> action_priors;
   std::vector<double> conditional_visit_shares;
-  bool has_inner_endpoint_state = false;
-  NativeGameState inner_endpoint_state;
-  std::vector<NativeAction> inner_endpoint_actions;
 };
 
 struct MacroExpCandidateSelection {
@@ -473,18 +468,16 @@ class MacroExpInnerPrimitiveMCTS {
     std::vector<MacroExpInnerActionCandidate> out;
     if (nodes_.empty()) return out;
     std::vector<std::string> signatures;
-    std::vector<std::string> commitments;
     std::vector<double> priors;
     std::vector<double> visit_shares;
     const InnerNode& root_node = nodes_[0];
-    auto append_candidate = [&](double log_confidence, int root_action_index, int root_local, int endpoint_state_index) {
+    auto append_candidate = [&](double log_confidence, int root_action_index, int root_local) {
       if (signatures.empty() || root_action_index < 0 || root_local < 0 ||
           root_local >= static_cast<int>(root_node.visits.size())) {
         return;
       }
       MacroExpInnerActionCandidate candidate;
       candidate.global_action_index = root_action_index;
-      candidate.inner_endpoint_state_index = endpoint_state_index;
       candidate.visits = root_node.visits[root_local];
       candidate.prior = root_local < static_cast<int>(root_node.priors.size())
           ? root_node.priors[root_local]
@@ -493,7 +486,6 @@ class MacroExpInnerPrimitiveMCTS {
           ? root_node.value_sums_utility[root_local] / static_cast<double>(candidate.visits)
           : root_node.value_estimate_utility;
       candidate.action_signatures = signatures;
-      candidate.commitment_signatures = commitments;
       candidate.action_priors = priors;
       candidate.conditional_visit_shares = visit_shares;
       candidate.log_confidence = log_confidence;
@@ -518,7 +510,7 @@ class MacroExpInnerPrimitiveMCTS {
       // A searched prefix with no positively visited continuation is maximal.
       // The outer completion step will perform forced actions and end the turn.
       if (node.terminal || state.terminal || total_positive_visits <= 0) {
-        append_candidate(log_confidence, root_action_index, root_local, node.state_index);
+        append_candidate(log_confidence, root_action_index, root_local);
         return;
       }
 
@@ -532,7 +524,6 @@ class MacroExpInnerPrimitiveMCTS {
         const int next_root_action_index = is_root_action ? action_index : root_action_index;
         const int next_root_local = is_root_action ? local : root_local;
         signatures.push_back(macro_exp_action_signature(actions_[action_index]));
-        commitments.push_back(macro_exp_commitment_signature(actions_[action_index]));
         priors.push_back(local < static_cast<int>(node.priors.size()) ? node.priors[local] : 0.0);
         const double conditional_visit_share =
             static_cast<double>(visits) / static_cast<double>(total_positive_visits);
@@ -544,10 +535,9 @@ class MacroExpInnerPrimitiveMCTS {
         if (child_id >= 0 && child_id < static_cast<int>(nodes_.size())) {
           enumerate(child_id, next_log_confidence, next_root_action_index, next_root_local);
         } else {
-          append_candidate(next_log_confidence, next_root_action_index, next_root_local, -1);
+          append_candidate(next_log_confidence, next_root_action_index, next_root_local);
         }
         signatures.pop_back();
-        commitments.pop_back();
         priors.pop_back();
         visit_shares.pop_back();
       }
@@ -578,7 +568,6 @@ class MacroExpInnerPrimitiveMCTS {
       candidate.score = std::log(confidence_share);
       candidate.log_confidence = candidate.score;
       candidate.action_signatures.push_back(macro_exp_action_signature(actions_[action_index]));
-      candidate.commitment_signatures.push_back(macro_exp_commitment_signature(actions_[action_index]));
       candidate.action_priors.push_back(prior);
       candidate.conditional_visit_shares.push_back(confidence_share);
       out.push_back(std::move(candidate));
@@ -592,13 +581,6 @@ class MacroExpInnerPrimitiveMCTS {
 
   int expanded_nodes() const {
     return std::max(0, static_cast<int>(nodes_.size()) - 1);
-  }
-
-  NativeGameState copy_state(int state_index) const {
-    if (state_index < 0 || state_index >= static_cast<int>(states_.size())) {
-      return NativeGameState{};
-    }
-    return states_[state_index];
   }
 
   const NativeTransitionTiming& transition_timing() const {
@@ -979,42 +961,6 @@ std::vector<TurnMacroExpMCTS::TurnEdge> TurnMacroExpMCTS::generate_turn_edges(in
           return candidate.global_action_index < 0;
         }),
         candidates.end());
-    // Macro completion normally replays a selected inner trajectory in the
-    // outer action pool.  Preserve the endpoint for the candidates that can
-    // actually be selected, so their searched prefix can be reused instead.
-    // The fallback candidates deliberately retain replay behavior to avoid
-    // copying every leaf state from a wide inner tree.
-    std::vector<bool> retain_endpoint(candidates.size(), false);
-    const int confidence_fallback_limit = std::min(
-        static_cast<int>(candidates.size()),
-        std::max(1, config_.max_new_edges_per_node));
-    for (int index = 0; index < confidence_fallback_limit; ++index) {
-      retain_endpoint[index] = true;
-    }
-    const std::vector<MacroExpCandidateSelection> diverse_selections =
-        macro_exp_select_diverse_candidates(
-            candidates, actions_, state, config_.max_new_edges_per_node);
-    for (const MacroExpCandidateSelection& selection : diverse_selections) {
-      if (selection.candidate_index >= 0 &&
-          selection.candidate_index < static_cast<int>(retain_endpoint.size())) {
-        retain_endpoint[selection.candidate_index] = true;
-      }
-    }
-    for (int index = 0; index < static_cast<int>(candidates.size()); ++index) {
-      MacroExpInnerActionCandidate& candidate = candidates[index];
-      if (!retain_endpoint[index] || candidate.inner_endpoint_state_index < 0) continue;
-      NativeGameState endpoint_state = inner.copy_state(candidate.inner_endpoint_state_index);
-      std::vector<int> endpoint_legal_indexes;
-      endpoint_legal_indexes.reserve(endpoint_state.legal_action_indexes.size());
-      for (int local_action_index : endpoint_state.legal_action_indexes) {
-        if (local_action_index < 0 || local_action_index >= static_cast<int>(inner_actions.size())) continue;
-        endpoint_legal_indexes.push_back(static_cast<int>(candidate.inner_endpoint_actions.size()));
-        candidate.inner_endpoint_actions.push_back(inner_actions[local_action_index]);
-      }
-      endpoint_state.legal_action_indexes = std::move(endpoint_legal_indexes);
-      candidate.inner_endpoint_state = std::move(endpoint_state);
-      candidate.has_inner_endpoint_state = true;
-    }
     if (config_.profile_json) {
       const auto finished = Clock::now();
       inner_candidate_ms_ += std::chrono::duration<double, std::milli>(finished - candidate_started).count();
@@ -1086,50 +1032,25 @@ std::vector<TurnMacroExpMCTS::TurnEdge> TurnMacroExpMCTS::generate_turn_edges(in
     return true;
   };
 
-  auto complete_plan = [&](const MacroExpInnerActionCandidate& candidate) {
+  auto complete_plan = [&](const std::vector<std::string>& forced_action_signatures, const std::vector<double>& forced_priors) {
     NativeGameState current = root_state;
     MacroExpTurnPlan plan;
     double prior_sum = 0.0;
     int prior_count = 0;
 
-    if (candidate.has_inner_endpoint_state) {
-      current = candidate.inner_endpoint_state;
-      const int action_base = static_cast<int>(actions_.size());
-      actions_.insert(
-          actions_.end(),
-          candidate.inner_endpoint_actions.begin(),
-          candidate.inner_endpoint_actions.end());
-      for (int& local_action_index : current.legal_action_indexes) {
-        local_action_index += action_base;
-      }
-      plan.executed_macro_exp_action_signatures = candidate.action_signatures;
-      plan.commitment_signatures = candidate.commitment_signatures;
-      if (candidate.global_action_index >= 0 &&
-          candidate.global_action_index < static_cast<int>(actions_.size())) {
-        plan.first_action_id = actions_[candidate.global_action_index].id;
-      }
-      plan.primitives_executed = static_cast<int>(candidate.action_signatures.size());
-      primitive_actions_executed_ += plan.primitives_executed;
-      for (double prior : candidate.action_priors) {
-        prior_sum += std::max(0.0, prior);
-        prior_count += 1;
-      }
-      plan.reached_turn_boundary = current.active_player_id != starting_player;
-    } else {
-      for (size_t i = 0; i < candidate.action_signatures.size(); ++i) {
-        if (current.terminal || current.active_player_id != starting_player || plan.reached_turn_boundary) break;
-        if (config_.max_primitives_per_turn > 0 &&
-            plan.primitives_executed >= config_.max_primitives_per_turn) break;
-        const double prior = i < candidate.action_priors.size() ? candidate.action_priors[i] : 0.0;
-        const int resolved_index = resolve_action_signature(current, candidate.action_signatures[i]);
-        // These signatures are the inner MCTS trajectory itself.  They have
-        // already been selected from successive legal child states, so do not
-        // truncate the trajectory merely because it contains a tactical action.
-        // The old guard made every sampled plan stop after its first primitive.
-        if (!apply_recorded_action(plan, current, resolved_index, prior)) break;
-        prior_sum += std::max(0.0, prior);
-        prior_count += 1;
-      }
+    for (size_t i = 0; i < forced_action_signatures.size(); ++i) {
+      if (current.terminal || current.active_player_id != starting_player || plan.reached_turn_boundary) break;
+      if (config_.max_primitives_per_turn > 0 &&
+          plan.primitives_executed >= config_.max_primitives_per_turn) break;
+      const double prior = i < forced_priors.size() ? forced_priors[i] : 0.0;
+      const int resolved_index = resolve_action_signature(current, forced_action_signatures[i]);
+      // These signatures are the inner MCTS trajectory itself.  They have
+      // already been selected from successive legal child states, so do not
+      // truncate the trajectory merely because it contains a tactical action.
+      // The old guard made every sampled plan stop after its first primitive.
+      if (!apply_recorded_action(plan, current, resolved_index, prior)) break;
+      prior_sum += std::max(0.0, prior);
+      prior_count += 1;
     }
 
     int forced_finalize_steps = 0;
@@ -1233,7 +1154,7 @@ std::vector<TurnMacroExpMCTS::TurnEdge> TurnMacroExpMCTS::generate_turn_edges(in
           !std::isfinite(candidate.log_confidence)) {
         return;
       }
-      TurnEdge edge = complete_plan(candidate);
+      TurnEdge edge = complete_plan(candidate.action_signatures, candidate.action_priors);
       edge.log_confidence = candidate.log_confidence;
       if (accept_edge(std::move(edge), reasons)) {
         if (std::find(reasons.begin(), reasons.end(), "visited") != reasons.end()) {
