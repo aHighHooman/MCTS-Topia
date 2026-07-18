@@ -159,6 +159,11 @@ struct NativeGameState {
   // True only when legal_action_indexes was produced by native regeneration,
   // rather than supplied by the request-scoped Java action list.
   bool legal_actions_native_generated = false;
+  // An END_TURN transition can defer building the next player's legal action
+  // set when the caller only needs the material state/value.  The state is
+  // not terminal in this case; ensure_legal_actions() must run before it is
+  // expanded or otherwise queried for legal actions.
+  bool legal_actions_deferred = false;
 };
 
 struct NativeRoot {
@@ -183,6 +188,11 @@ NativeGameState apply_action_strict(
     const NativeGameState& state,
     std::vector<NativeAction>& actions,
     int global_action_index,
+    int max_actions,
+    bool defer_end_turn_action_generation = false);
+void ensure_legal_actions(
+    NativeGameState& state,
+    std::vector<NativeAction>& actions,
     int max_actions);
 NativeTransitionTiming last_transition_timing();
 py::dict serialize_evaluation_payload(

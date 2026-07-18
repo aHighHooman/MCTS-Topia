@@ -267,6 +267,7 @@ NativeGameState copy_transition_state_without_observation(const NativeGameState&
   next.leveling_up = state.leveling_up;
   next.can_end_turn = state.can_end_turn;
   next.legal_actions_native_generated = state.legal_actions_native_generated;
+  next.legal_actions_deferred = state.legal_actions_deferred;
 #ifdef TRIBES_NATIVE_MCTS_STANDALONE
   next.generated_action_ids_enabled = false;
 #else
@@ -7057,7 +7058,8 @@ NativeGameState apply_action_strict(
     const NativeGameState& state,
     std::vector<NativeAction>& actions,
     int global_action_index,
-    int max_actions) {
+    int max_actions,
+    bool defer_end_turn_action_generation) {
   g_last_transition_timing = NativeTransitionTiming{};
   auto started_at = TimingClock::now();
   NativeGameState next = copy_transition_state_without_observation(state);
@@ -7092,11 +7094,21 @@ NativeGameState apply_action_strict(
     sync_all_tiles_to_payload(next);
     g_last_transition_timing.reveal_sync_ms += elapsed_ms(started_at);
     next.transition_kind = "END_TURN";
+    if (defer_end_turn_action_generation) {
+      // The macro inner search stops at the turn boundary, and most
+      // crystallized macro endpoints are never expanded.  Avoid generating a
+      // next-player action set until a caller actually needs it.
+      next.legal_action_indexes.clear();
+      next.legal_actions_native_generated = false;
+      next.legal_actions_deferred = true;
+      return next;
+    }
     started_at = TimingClock::now();
     rebuild_state_indexes(next);
     regenerate_actions(next, actions, max_actions);
     g_last_transition_timing.full_action_regenerations += 1;
     g_last_transition_timing.regenerate_actions_ms += elapsed_ms(started_at);
+    next.legal_actions_deferred = false;
     next.terminal = next.legal_action_indexes.empty();
     if (next.terminal) {
       next.terminal_reason = "no_regenerated_actions";
@@ -7253,6 +7265,26 @@ NativeGameState apply_action_strict(
     next.terminal_reason = "no_regenerated_actions";
   }
   return next;
+}
+
+void ensure_legal_actions(
+    NativeGameState& state,
+    std::vector<NativeAction>& actions,
+    int max_actions) {
+  g_last_transition_timing = NativeTransitionTiming{};
+  if (!state.legal_actions_deferred) {
+    return;
+  }
+  auto started_at = TimingClock::now();
+  rebuild_state_indexes(state);
+  regenerate_actions(state, actions, max_actions);
+  g_last_transition_timing.full_action_regenerations += 1;
+  g_last_transition_timing.regenerate_actions_ms += elapsed_ms(started_at);
+  state.legal_actions_deferred = false;
+  state.terminal = state.terminal || state.legal_action_indexes.empty();
+  if (state.terminal && state.terminal_reason.empty()) {
+    state.terminal_reason = "no_regenerated_actions";
+  }
 }
 
 NativeTransitionTiming last_transition_timing() {

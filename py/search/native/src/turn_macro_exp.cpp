@@ -728,11 +728,16 @@ class MacroExpInnerPrimitiveMCTS {
       path_actions.push_back(local_action);
       const int child_node_id = nodes_[node_id].child_node_ids[local_action];
       if (child_node_id < 0) {
+        const int global_action_index = state.legal_action_indexes[local_action];
+        const bool defer_end_turn_action_generation =
+            global_action_index >= 0 && global_action_index < static_cast<int>(actions_.size()) &&
+            actions_[global_action_index].type == "END_TURN";
         NativeGameState child = apply_action_strict(
             state,
             actions_,
-            state.legal_action_indexes[local_action],
-            max_actions_);
+            global_action_index,
+            max_actions_,
+            defer_end_turn_action_generation);
         macro_exp_add_transition_timing(transition_timing_, last_transition_timing());
 
         // The completed outer plan cannot execute beyond this cap, so do not
@@ -790,7 +795,8 @@ int TurnMacroExpMCTS::make_turn_node(NativeGameState state) {
 
 int TurnMacroExpMCTS::make_turn_node_with_value(NativeGameState state, double value_estimate_root) {
   const int state_index = static_cast<int>(states_.size());
-  const bool terminal = state.terminal || state.legal_action_indexes.empty();
+  const bool terminal = state.terminal ||
+      (!state.legal_actions_deferred && state.legal_action_indexes.empty());
   states_.push_back(std::move(state));
   TurnNode node;
   node.state_index = state_index;
@@ -860,7 +866,15 @@ int TurnMacroExpMCTS::select_existing_turn_edge(const TurnNode& node) const {
 
 std::vector<TurnMacroExpMCTS::TurnEdge> TurnMacroExpMCTS::generate_turn_edges(int node_id, int max_edges) {
   const int state_index = nodes_[node_id].state_index;
-  const NativeGameState& root_state = states_[state_index];
+  NativeGameState& root_state = states_[state_index];
+  if (root_state.legal_actions_deferred) {
+    ensure_legal_actions(root_state, actions_, config_.max_actions);
+    macro_exp_add_transition_timing(transition_timing_, last_transition_timing());
+  }
+  if (root_state.terminal) {
+    nodes_[node_id].terminal = true;
+    nodes_[node_id].value_estimate_root = evaluate_state_root_perspective(root_state);
+  }
   const int starting_player = root_state.active_player_id;
   std::unordered_set<std::string> used_plan_keys;
   std::unordered_set<std::string> used_diversity_keys;
@@ -992,7 +1006,12 @@ std::vector<TurnMacroExpMCTS::TurnEdge> TurnMacroExpMCTS::generate_turn_edges(in
     }
     record_selected_action(plan, resolved_index, prior);
     const auto apply_started = Clock::now();
-    current = apply_action_strict(current, actions_, resolved_index, config_.max_actions);
+    current = apply_action_strict(
+        current,
+        actions_,
+        resolved_index,
+        config_.max_actions,
+        is_end_turn);
     macro_exp_add_transition_timing(transition_timing_, last_transition_timing());
     if (std::getenv("TRIBES_TURN_MACRO_TRACE") != nullptr) {
       std::cerr << "turn_macro_apply_done primitive=" << (plan.primitives_executed + 1)
@@ -1305,7 +1324,13 @@ void TurnMacroExpMCTS::run(int simulations) {
           leaf_state = &nodes_[node_id].edges[edge_id].plan.result_state;
           break;
         }
-        if (nodes_[node_id].edges.empty()) break;
+        if (nodes_[node_id].edges.empty()) {
+          if (nodes_[node_id].terminal) {
+            leaf_value_root = nodes_[node_id].value_estimate_root;
+            leaf_state = &states_[nodes_[node_id].state_index];
+          }
+          break;
+        }
       }
 
       const auto selection_started = Clock::now();
