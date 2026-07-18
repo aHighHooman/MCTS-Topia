@@ -991,17 +991,21 @@ bool try_macro_continuation(
   py::dict payload = py::reinterpret_borrow<py::dict>(py_from_json(message));
   tribes::native::NativeRoot root = tribes::native::parse_root_payload(payload, cfg.max_actions);
 
+  int current_forced_index = -1;
   for (int action_index : root.state.legal_action_indexes) {
     if (action_index >= 0 && action_index < static_cast<int>(root.actions.size()) &&
         cli_is_forced_macro_type(root.actions[action_index].type)) {
-      continuation.clear("forced_action");
-      response = direct_action_response(root_actions, action_index, cfg, "forced_action");
-      return true;
+      current_forced_index = action_index;
+      break;
     }
   }
 
   if (root.state.terminal || root.state.active_player_id != continuation.root_player_id) {
     continuation.clear(root.state.terminal ? "terminal" : "actor_changed");
+    if (current_forced_index >= 0) {
+      response = direct_action_response(root_actions, current_forced_index, cfg, "forced_action");
+      return true;
+    }
     return false;
   }
   if (continuation.next_index >= continuation.state_fingerprints.size()) {
@@ -1010,6 +1014,10 @@ bool try_macro_continuation(
   const std::string observed = tribes::native::macro_exp_state_fingerprint(root.state, root.actions);
   if (observed != continuation.state_fingerprints[continuation.next_index]) {
     continuation.clear("state_mismatch");
+    if (current_forced_index >= 0) {
+      response = direct_action_response(root_actions, current_forced_index, cfg, "forced_action");
+      return true;
+    }
     return false;
   }
 
@@ -1027,11 +1035,26 @@ bool try_macro_continuation(
     // unexpectedly coarsened request can contain more than one match. Never
     // arbitrarily replay one: discard the speculative suffix and replan.
     continuation.clear("planned_action_ambiguous");
+    if (current_forced_index >= 0) {
+      response = direct_action_response(root_actions, current_forced_index, cfg, "forced_action");
+      return true;
+    }
     return false;
   }
   if (match_count == 0) {
     continuation.clear("planned_action_illegal");
+    if (current_forced_index >= 0) {
+      response = direct_action_response(root_actions, current_forced_index, cfg, "forced_action");
+      return true;
+    }
     return false;
+  }
+
+  if (current_forced_index >= 0 &&
+      !cli_is_forced_macro_type(root.actions[matched_index].type)) {
+    continuation.clear("forced_action");
+    response = direct_action_response(root_actions, current_forced_index, cfg, "forced_action");
+    return true;
   }
 
   continuation.next_index += 1;

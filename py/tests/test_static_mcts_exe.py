@@ -643,6 +643,55 @@ def _request_after_first_recover_action(first_action_index: int = 0) -> dict:
     return payload
 
 
+def _level_up_continuation_fixture() -> dict:
+    message = _message()
+    message["observation"]["cities"][0]["population"] = 1
+    message["observation"]["cities"][0]["population_need"] = 1
+    message["actions"] = [
+        {"id": "road", "type": "BUILD_ROAD", "position": {"x": 1, "y": 2}, "x": 1, "y": 2},
+        {"id": "end", "type": "END_TURN"},
+    ]
+    return message
+
+
+def _request_after_native_action(message: dict, action_index: int) -> dict:
+    extension = load_native_mcts_extension()
+    assert extension is not None
+    action_count = len(message["actions"])
+    priors = [0.0] * action_count
+    priors[action_index] = 1.0
+    tree = extension.NativeMCTS(message, list(range(action_count)), priors, 0.1, False, 7, 64)
+    selection = dict(tree.select_leaf(1.5))
+    payload = dict(selection["leaf_payload"])
+    for key in ("_native_board_tensor", "_native_explored_tiles", "_native_visible_tiles"):
+        payload.pop(key, None)
+    payload["type"] = "action_request"
+    payload["player_id"] = message.get("player_id", 0)
+    for action in payload["actions"]:
+        action["id"] = "next-" + str(action["id"])
+    return payload
+
+
+def _run_turn_macro_requests(*messages: dict) -> list[dict]:
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode", "turn-macro-exp",
+            "--simulations", "8",
+            "--turn-macro-inner-simulations", "16",
+            "--deterministic",
+            "--profile-json",
+            "--seed", "13",
+        ],
+        input="\n".join([*(json.dumps(message) for message in messages), json.dumps({"type": "game_over"})]) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+    return [json.loads(line) for line in completed.stdout.splitlines()]
+
+
 def test_static_mcts_exe_turn_macro_exp_continues_selected_plan_across_requests() -> None:
     first = _message_with_simple_unit_action_reuse("RECOVER")
     first["type"] = "action_request"
@@ -674,6 +723,65 @@ def test_static_mcts_exe_turn_macro_exp_continues_selected_plan_across_requests(
     assert responses[0]["actionId"] == "recover-u2"
     assert responses[1]["actionId"] == "next-recover-u1"
     assert responses[1]["_profile"]["continuation_event"] == "continued"
+
+
+def test_static_mcts_exe_preserves_matching_forced_continuation_after_reordering() -> None:
+    first = _level_up_continuation_fixture()
+    first["type"] = "action_request"
+    second = _request_after_native_action(first, 0)
+    assert [(action["type"], action.get("bonus")) for action in second["actions"]] == [
+        ("LEVEL_UP", "WORKSHOP"),
+        ("LEVEL_UP", "EXPLORER"),
+    ]
+    second["actions"] = [second["actions"][1], second["actions"][0]]
+
+    responses = _run_turn_macro_requests(first, second)
+
+    assert responses[0]["actionId"] == "road"
+    assert responses[1]["actionId"] == "next-A2"
+    assert responses[1]["_profile"]["continuation_event"] == "continued"
+
+
+def test_static_mcts_exe_preempts_for_different_forced_action_without_replay() -> None:
+    first = _level_up_continuation_fixture()
+    first["type"] = "action_request"
+    second = _request_after_native_action(first, 0)
+    different_forced = second["actions"][1]
+    second["actions"] = [different_forced]
+
+    responses = _run_turn_macro_requests(first, second, second)
+
+    assert responses[1]["actionId"] == "next-A3"
+    assert responses[1]["_profile"]["continuation_event"] == "forced_action"
+    assert responses[2]["_profile"].get("continuation_event") != "continued"
+
+
+def test_static_mcts_exe_preempts_for_ambiguous_forced_continuation_without_replay() -> None:
+    first = _level_up_continuation_fixture()
+    first["type"] = "action_request"
+    second = _request_after_native_action(first, 0)
+    duplicate = dict(second["actions"][0])
+    duplicate["id"] = "duplicate-next-A2"
+    second["actions"] = [second["actions"][1], second["actions"][0], duplicate]
+
+    responses = _run_turn_macro_requests(first, second, second)
+
+    assert responses[1]["actionId"] == "next-A3"
+    assert responses[1]["_profile"]["continuation_event"] == "forced_action"
+    assert responses[2]["_profile"].get("continuation_event") != "continued"
+
+
+def test_static_mcts_exe_preempts_for_invalid_forced_continuation() -> None:
+    first = _level_up_continuation_fixture()
+    first["type"] = "action_request"
+    second = _request_after_native_action(first, 0)
+    second["observation"]["tribes"][0]["stars"] += 1
+    second["actions"] = [second["actions"][1], second["actions"][0]]
+
+    responses = _run_turn_macro_requests(first, second)
+
+    assert responses[1]["actionId"] == "next-A3"
+    assert responses[1]["_profile"]["continuation_event"] == "forced_action"
 
 
 def test_static_mcts_exe_compact_actions_default_to_active_player() -> None:

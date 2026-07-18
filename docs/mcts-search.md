@@ -88,7 +88,7 @@ This means the local action order matters: actions earlier in the legal/prior li
 
 Candidates compete globally by confidence with no per-first-action quota. They are deduplicated first by exact executed trajectory and then by a material diversity key containing the first action and normalized continuation commitments. The accepted candidates' confidences are normalized with log-sum-exp and used as their outer edge priors; `max_new_edges_per_node` remains the final edge cap. Profile JSON records each root plan's log-confidence, normalized prior, selection reason, and deduplication counters.
 
-The standalone bot preserves the selected root plan across `action_request` messages. Remaining actions are matched by stable action signatures and remapped to each request's action IDs. A continuation is abandoned when its predicted native state fingerprint no longer matches, the next action is unavailable, a forced action appears, or the turn reaches a boundary; profile JSON reports whether a request continued or replanned.
+The standalone bot preserves the selected root plan across `action_request` messages. Remaining actions are matched by stable action signatures and remapped to each request's action IDs. The bot validates the actor, predicted native state fingerprint, and unique planned signature before handling forced-action status: an exact planned signature remains selected even when that action is forced, while a different forced action, missing or ambiguous signature, or invalid state discards the suffix and directly issues the current forced action. Profile JSON reports whether a request continued or replanned.
 
 ## Batched NN Search
 
