@@ -165,7 +165,7 @@ json normalize_board_json(const json& board);
 json normalize_unit_json(const json& unit);
 json normalize_city_json(const json& city);
 json normalize_tribe_json(const json& tribe);
-json normalize_action_json(const json& action);
+json normalize_action_json(const json& action, int default_tribe_id = 0);
 
 const char* enum_name(const std::vector<const char*>& names, const json& value) {
   if (value.is_string()) {
@@ -567,7 +567,7 @@ json normalize_tribe_json(const json& tribe) {
   return out;
 }
 
-json normalize_action_json(const json& action) {
+json normalize_action_json(const json& action, int default_tribe_id) {
   json out = action.is_object() ? action : json::object();
   set_default(out, "id", "A" + std::to_string(json_int(out, "i", 0)));
   set_default(out, "type", value_or(out, "t", nullptr));
@@ -578,7 +578,8 @@ json normalize_action_json(const json& action) {
   }
   set_default(out, "unit_id", value_or(out, "u", 0));
   set_default(out, "city_id", value_or(out, "c", 0));
-  set_default(out, "tribe_id", value_or(out, "p", 0));
+  set_default(out, "tribe_id", value_or(out, "p", default_tribe_id));
+  set_default(out, "p", out["tribe_id"]);
   set_default(out, "target_unit_id", value_or(out, "tu", 0));
   set_default(out, "target_city_id", value_or(out, "tc", 0));
   set_default(out, "target_player_id", value_or(out, "tp", -1));
@@ -597,9 +598,10 @@ json normalize_action_json(const json& action) {
   return out;
 }
 
-json normalize_dense_action_json(const json& action, int index) {
+json normalize_dense_action_json(const json& action, int index, int default_tribe_id) {
   if (!action.is_array() || action.empty()) {
-    return normalize_action_json(json{{"i", index}, {"id", "A" + std::to_string(index)}});
+    return normalize_action_json(
+        json{{"i", index}, {"id", "A" + std::to_string(index)}}, default_tribe_id);
   }
   json out = json::object();
   out["i"] = index;
@@ -657,7 +659,7 @@ json normalize_dense_action_json(const json& action, int index) {
   } else {
     out["unit_id"] = array_value(action, 1, 0);
   }
-  return normalize_action_json(out);
+  return normalize_action_json(out, default_tribe_id);
 }
 
 bool board_tiles_look_expanded(const json& board) {
@@ -720,10 +722,18 @@ bool message_looks_normalized(const json& message) {
 }
 
 json normalize_cli_message(const json& message) {
-  if (message_looks_normalized(message)) {
-    return message;
-  }
   json out = message.is_object() ? message : json::object();
+  if (message_looks_normalized(message)) {
+    const json& observation = out["observation"];
+    const int active_player_id = json_int(
+        observation, "active_player_id", json_int(out, "player_id", 0));
+    json actions = json::array();
+    for (const json& action : out["actions"]) {
+      actions.push_back(normalize_action_json(action, active_player_id));
+    }
+    out["actions"] = std::move(actions);
+    return out;
+  }
   if (!out.contains("observation") && out.contains("obs")) out["observation"] = out["obs"];
   if (!out.contains("forward_model") && out.contains("fm")) out["forward_model"] = out["fm"];
   if (out.contains("observation") && out["observation"].is_array()) {
@@ -762,10 +772,15 @@ json normalize_cli_message(const json& message) {
 
   json actions = json::array();
   const json raw_actions = value_or(out, "actions", json::array());
+  const int active_player_id = out.contains("observation") && out["observation"].is_object()
+      ? json_int(out["observation"], "active_player_id", json_int(out, "player_id", 0))
+      : json_int(out, "player_id", 0);
   if (raw_actions.is_array()) {
     for (int i = 0; i < static_cast<int>(raw_actions.size()); ++i) {
       const json& action = raw_actions[static_cast<size_t>(i)];
-      actions.push_back(action.is_array() ? normalize_dense_action_json(action, i) : normalize_action_json(action));
+      actions.push_back(action.is_array()
+          ? normalize_dense_action_json(action, i, active_player_id)
+          : normalize_action_json(action, active_player_id));
     }
   }
   out["actions"] = std::move(actions);
@@ -1008,7 +1023,11 @@ bool try_macro_continuation(
     match_count += 1;
   }
   if (match_count > 1) {
-    throw std::runtime_error("Turn-macro continuation signature matched multiple current legal actions: " + signature);
+    // Signatures deliberately exclude request-scoped IDs, so a malformed or
+    // unexpectedly coarsened request can contain more than one match. Never
+    // arbitrarily replay one: discard the speculative suffix and replan.
+    continuation.clear("planned_action_ambiguous");
+    return false;
   }
   if (match_count == 0) {
     continuation.clear("planned_action_illegal");

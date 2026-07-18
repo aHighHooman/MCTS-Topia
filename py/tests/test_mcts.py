@@ -1121,6 +1121,90 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertEqual(leaf_payload["observation"]["board"]["tiles"][1][1]["unit_id"], 0)
         self.assertEqual(leaf_payload["observation"]["board"]["tiles"][1][2]["unit_id"], 1)
 
+    def test_regenerated_moves_match_java_terrain_research_and_bridge_gates(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+
+        def regenerated_destinations(
+            terrain: str,
+            researched: list[str],
+            *,
+            road: bool = False,
+            building: str | None = None,
+        ) -> set[tuple[int, int]]:
+            message = _message_with_unit_move()
+            tribe = message["observation"]["tribes"][0]
+            tribe["stars"] = 50
+            tribe["researched_tech_ids"] = researched
+            target = message["observation"]["board"]["tiles"][1][2]
+            target["terrain"] = terrain
+            target["road"] = road
+            target["building"] = building
+            message["actions"] = [
+                {
+                    "id": "research",
+                    "type": "RESEARCH_TECH",
+                    "tribe_id": 0,
+                    "p": 0,
+                    "technology": "ORGANIZATION",
+                    "tech": "ORGANIZATION",
+                }
+            ]
+            tree = extension.NativeMCTS(message, [0], [1.0], 0.1, False, 7, 64)
+            selection = dict(tree.select_leaf(1.5))
+            leaf_payload = dict(selection["leaf_payload"])
+            return {
+                (int(action["x"]), int(action["y"]))
+                for action in leaf_payload["actions"]
+                if action["type"] == "MOVE" and int(action.get("unit_id", 0)) == 1
+            }
+
+        target = (2, 1)
+        self.assertNotIn(target, regenerated_destinations("MOUNTAIN", []))
+        self.assertIn(target, regenerated_destinations("MOUNTAIN", ["CLIMBING"]))
+        self.assertNotIn(target, regenerated_destinations("SHALLOW_WATER", []))
+        self.assertNotIn(target, regenerated_destinations("SHALLOW_WATER", ["FISHING"]))
+        self.assertIn(target, regenerated_destinations("SHALLOW_WATER", ["FISHING"], building="PORT"))
+        self.assertNotIn(target, regenerated_destinations("DEEP_WATER", []))
+        self.assertIn(target, regenerated_destinations("DEEP_WATER", ["SAILING"], building="PORT"))
+        # Board.traversable grants bridges an explicit water-research override.
+        self.assertIn(target, regenerated_destinations("SHALLOW_WATER", [], road=True))
+        self.assertIn(target, regenerated_destinations("DEEP_WATER", [], road=True))
+
+        # StepMove also spends the remainder of a ground unit's movement on
+        # embark. Isolate a rider behind a port so that the tile beyond it is
+        # reachable only through that port in the native path search.
+        port_message = _message_with_unit_move()
+        port_message["observation"]["units"][0]["type"] = "RIDER"
+        port_message["observation"]["tribes"][0]["stars"] = 50
+        port_message["observation"]["tribes"][0]["researched_tech_ids"] = ["FISHING"]
+        for row in port_message["observation"]["board"]["tiles"]:
+            for tile in row:
+                if (tile["x"], tile["y"]) not in {(1, 1), (2, 1), (3, 1)}:
+                    tile["terrain"] = "MOUNTAIN"
+        port_tile = port_message["observation"]["board"]["tiles"][1][2]
+        port_tile["terrain"] = "SHALLOW_WATER"
+        port_tile["building"] = "PORT"
+        port_message["actions"] = [
+            {
+                "id": "research",
+                "type": "RESEARCH_TECH",
+                "tribe_id": 0,
+                "p": 0,
+                "technology": "ORGANIZATION",
+                "tech": "ORGANIZATION",
+            }
+        ]
+        tree = extension.NativeMCTS(port_message, [0], [1.0], 0.1, False, 7, 64)
+        port_leaf = dict(tree.select_leaf(1.5))["leaf_payload"]
+        port_destinations = {
+            (int(action["x"]), int(action["y"]))
+            for action in port_leaf["actions"]
+            if action["type"] == "MOVE" and int(action.get("unit_id", 0)) == 1
+        }
+        self.assertIn((2, 1), port_destinations)
+        self.assertNotIn((3, 1), port_destinations)
+
     def test_recover_reuses_parent_actions_without_recovered_unit_actions(self) -> None:
         extension = load_native_mcts_extension()
         self.assertIsNotNone(extension)

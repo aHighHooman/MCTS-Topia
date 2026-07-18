@@ -2437,14 +2437,69 @@ bool unit_can_attack(const NativeUnit& unit) {
        unit.type == "SCOUT" || unit.type == "PIRATE" || unit.type == "DINGHY");
 }
 
-bool passable_move_target(const NativeGameState& state, const NativeTile& tile) {
-  const bool explored_for_actor = tile.explored || state.active_player_id != state.root_player_id;
-  return explored_for_actor && tile.unit_id <= 0 && tile.terrain != "DEEP_WATER" && tile.terrain != "WATER";
-}
-
 bool water_unit_type(const std::string& type) {
   return type == "RAFT" || type == "RAMMER" || type == "SCOUT" || type == "BOMBER" ||
       type == "JUGGERNAUT" || type == "DINGHY" || type == "PIRATE";
+}
+
+bool water_terrain(const NativeTile& tile) {
+  return tile.terrain == "SHALLOW_WATER" || tile.terrain == "DEEP_WATER" || tile.terrain == "WATER";
+}
+
+bool water_bridge(const NativeTile& tile) {
+  return water_terrain(tile) && tile.road && tile.building != "PORT";
+}
+
+bool terrain_traversable_for_tribe(
+    const NativeGameState& state,
+    int tribe_id,
+    const NativeTile& tile) {
+  // Match Board.traversable: bridges override water research, while ordinary
+  // mountain/shallow/deep destinations require their respective technology.
+  if (water_bridge(tile)) {
+    return true;
+  }
+  const NativeTribe* tribe = tribe_by_id_const(state, tribe_id);
+  if (tribe == nullptr) {
+    return false;
+  }
+  if (tile.terrain == "MOUNTAIN") {
+    return has_tech(*tribe, "CLIMBING");
+  }
+  if (tile.terrain == "SHALLOW_WATER") {
+    return has_tech(*tribe, "FISHING");
+  }
+  if (tile.terrain == "DEEP_WATER" || tile.terrain == "WATER") {
+    return has_tech(*tribe, "SAILING");
+  }
+  return true;
+}
+
+bool can_use_port_at(const NativeGameState& state, int tribe_id, const NativeTile& tile) {
+  if (tile.building != "PORT") {
+    return false;
+  }
+  if (tile.city_id <= 0) {
+    return true;
+  }
+  const NativeCity* city = city_by_id(const_cast<NativeGameState&>(state), tile.city_id);
+  return city != nullptr &&
+      (city->tribe_id == tribe_id || relationship_between(state, tribe_id, city->tribe_id) == "TREATY");
+}
+
+bool passable_move_target(
+    const NativeGameState& state,
+    const NativeUnit& unit,
+    const NativeTile& tile) {
+  const bool explored_for_actor = tile.explored || state.active_player_id != state.root_player_id;
+  if (!explored_for_actor || tile.unit_id > 0 ||
+      !terrain_traversable_for_tribe(state, unit.tribe_id, tile)) {
+    return false;
+  }
+  // Ground units may only embark via a usable port or cross water by bridge.
+  // Water units may occupy water and disembark onto traversable land.
+  return !water_terrain(tile) || water_unit_type(unit.type) || water_bridge(tile) ||
+      can_use_port_at(state, unit.tribe_id, tile);
 }
 
 bool can_use_road_at(const NativeGameState& state, int tribe_id, const NativeTile& tile) {
@@ -2531,7 +2586,12 @@ const std::vector<std::pair<int, int>>& reachable_move_targets(
         }
         NativeTile* tile = tile_at(const_cast<NativeGameState&>(state), x, y);
         if (tile == nullptr || !(tile->explored || state.active_player_id != state.root_player_id) ||
-            tile->terrain == "DEEP_WATER" || tile->terrain == "WATER") {
+            !terrain_traversable_for_tribe(state, unit.tribe_id, *tile)) {
+          continue;
+        }
+        const bool entering_port = water_terrain(*tile) && !water_bridge(*tile) &&
+            can_use_port_at(state, unit.tribe_id, *tile);
+        if (water_terrain(*tile) && !water_bridge(*tile) && !entering_port) {
           continue;
         }
         if (tile->unit_id > 0) {
@@ -2552,6 +2612,12 @@ const std::vector<std::pair<int, int>>& reachable_move_targets(
         }
         double step_cost = 1.0;
         if ((tile->terrain == "FOREST" || tile->terrain == "MOUNTAIN") && unit.type != "CLOAK") {
+          step_cost = cost_from < max_cost ? max_cost - cost_from : max_cost;
+        }
+        // StepMove consumes all remaining movement when a ground unit embarks
+        // through a port. Without this, a fast ground unit could continue
+        // through the port in the same turn, creating moves Java cannot emit.
+        if (entering_port) {
           step_cost = cost_from < max_cost ? max_cost - cost_from : max_cost;
         }
         if (unit.type != "CLOAK" && on_road && can_use_road_at(state, unit.tribe_id, *tile)) {
@@ -3711,7 +3777,7 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
           continue;
         }
         NativeTile* tile = tile_at(state, x, y);
-        if (tile != nullptr && passable_move_target(state, *tile)) {
+        if (tile != nullptr && passable_move_target(state, unit, *tile)) {
           java_priority_order[java_priority_count++] = {x, y};
         }
       }
@@ -3724,7 +3790,7 @@ void regenerate_unit_actions(NativeGameState& state, std::vector<NativeAction>& 
             continue;
           }
           NativeTile* tile = tile_at(state, x, y);
-          if (tile != nullptr && passable_move_target(state, *tile)) {
+          if (tile != nullptr && passable_move_target(state, unit, *tile)) {
             move_targets[move_target_count++] = {x, y};
           }
         }
@@ -6957,6 +7023,19 @@ NativeRoot parse_root_payload(const py::dict& payload, int max_actions) {
       if (action.city_id != 0) {
         action_payload["city_id"] = action.city_id;
       }
+    }
+    // Java's compact action protocol omits the actor for actions whose owner
+    // is unambiguously the current player (notably MOVE). Canonicalize that
+    // omission at the native boundary so plausibility checks, signatures and
+    // regenerated legal actions all describe the same actor. An explicitly
+    // supplied owner remains authoritative, including player zero.
+    action.tribe_id = read_int(
+        action_payload, "tribe_id", read_int(action_payload, "p", root.state.active_player_id));
+    if (!action_payload.contains("tribe_id")) {
+      action_payload["tribe_id"] = action.tribe_id;
+    }
+    if (!action_payload.contains("p")) {
+      action_payload["p"] = action.tribe_id;
     }
     action.payload = action_payload;
 #ifdef TRIBES_NATIVE_MCTS_STANDALONE

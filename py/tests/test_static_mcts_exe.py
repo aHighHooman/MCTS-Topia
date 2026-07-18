@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from test_mcts import _message, _message_with_capital_capture, _message_with_end_turn, _message_with_simple_unit_action_reuse
+from test_mcts import (
+    _message,
+    _message_with_capital_capture,
+    _message_with_end_turn,
+    _message_with_simple_unit_action_reuse,
+    _message_with_unit_move,
+)
 from search.native.cpp_extension import load_native_mcts_extension
 
 
@@ -668,6 +674,79 @@ def test_static_mcts_exe_turn_macro_exp_continues_selected_plan_across_requests(
     assert responses[0]["actionId"] == "recover-u2"
     assert responses[1]["actionId"] == "next-recover-u1"
     assert responses[1]["_profile"]["continuation_event"] == "continued"
+
+
+def test_static_mcts_exe_compact_actions_default_to_active_player() -> None:
+    message = _message_with_unit_move()
+    message["player_id"] = 1
+    observation = message["observation"]
+    observation["active_player_id"] = 1
+    observation["units"][0]["tribe_id"] = 1
+    observation["cities"][0]["tribe_id"] = 1
+    observation["tribes"][0]["cities"] = []
+    observation["tribes"][1]["cities"] = [10]
+    message["actions"] = [message["actions"][0], {"id": "end", "type": "END_TURN"}]
+    compact = _compact_payload(message)
+    for action in compact["actions"]:
+        action.pop("p", None)
+
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode", "turn-macro-exp",
+            "--simulations", "8",
+            "--turn-macro-inner-simulations", "16",
+            "--deterministic",
+            "--profile-json",
+            "--seed", "13",
+        ],
+        input=json.dumps(compact) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+
+    response = json.loads(completed.stdout.strip())
+    assert any(
+        plan["first_action_id"] == "move"
+        for plan in response["_profile"]["root_turn_plans"]
+    )
+
+
+def test_static_mcts_exe_turn_macro_replans_when_continuation_signature_is_ambiguous() -> None:
+    first = _message_with_simple_unit_action_reuse("RECOVER")
+    first["type"] = "action_request"
+    second = _request_after_first_recover_action(2)
+    # Request-local action IDs are deliberately excluded from signatures. An
+    # ambiguous current request must safely replan instead of picking one.
+    duplicate = next(
+        dict(action) for action in second["actions"] if action["id"] == "next-recover-u1"
+    )
+    duplicate["id"] = "duplicate-next-recover-u1"
+    second["actions"].append(duplicate)
+
+    completed = subprocess.run(
+        [
+            str(_require_exe()),
+            "--search-mode", "turn-macro-exp",
+            "--simulations", "8",
+            "--turn-macro-inner-simulations", "16",
+            "--turn-macro-max-primitives-per-turn", "8",
+            "--deterministic",
+            "--profile-json",
+            "--seed", "13",
+        ],
+        input="\n".join((json.dumps(first), json.dumps(second), json.dumps({"type": "game_over"}))) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+
+    responses = [json.loads(line) for line in completed.stdout.splitlines()]
+    assert responses[1]["_profile"]["continuation_event"] == "replanned:planned_action_ambiguous"
+    assert responses[1]["actionId"] in {action["id"] for action in second["actions"]}
 
 
 def test_static_mcts_exe_turn_macro_exp_replans_after_state_invalidation() -> None:

@@ -128,6 +128,7 @@ std::string macro_exp_action_signature(const NativeAction& action) {
 std::string macro_exp_state_fingerprint(
     const NativeGameState& state,
     const std::vector<NativeAction>& actions) {
+  (void)actions;
   std::ostringstream out;
   out << "board_size=" << state.board_size << "|root=" << state.root_player_id
       << "|active=" << state.active_player_id
@@ -205,12 +206,10 @@ std::string macro_exp_state_fingerprint(
     for (const std::string& value : row) out << value << ',';
     out << "]";
   }
-  out
-      << "|legal=";
-  for (int index : state.legal_action_indexes) {
-    if (index < 0 || index >= static_cast<int>(actions.size())) continue;
-    out << macro_exp_action_signature(actions[index]) << ';';
-  }
+  // Legal-action enumeration is request-local protocol data, not material
+  // game state. Native regeneration can legitimately contain additional or
+  // differently ordered actions. Continuation separately requires the exact
+  // planned signature to be legal in the current request before executing it.
   return out.str();
 }
 
