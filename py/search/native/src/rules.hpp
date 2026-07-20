@@ -17,9 +17,45 @@ namespace py = pybind11;
 
 namespace tribes::native {
 
+enum class NativeActionKind : std::uint8_t {
+  Unknown = 0,
+  Move,
+  StepMove,
+  Attack,
+  Convert,
+  Infiltrate,
+  HealOthers,
+  Examine,
+  Recover,
+  Spawn,
+  Capture,
+  BuildRoad,
+  ResourceGathering,
+  ResearchTech,
+  Build,
+  LevelUp,
+  BurnForest,
+  ClearForest,
+  GrowForest,
+  Destroy,
+  Disband,
+  MakeVeteran,
+  UpgradeRammer,
+  UpgradeScout,
+  UpgradeBomber,
+  BuildEmbassy,
+  ProposePeace,
+  AcceptPeace,
+  ProposeTreaty,
+  AcceptTreaty,
+  CancelTreaty,
+  EndTurn,
+};
+
 struct NativeAction {
   std::string id;
   std::string type;
+  NativeActionKind kind = NativeActionKind::Unknown;
   int unit_id = 0;
   int city_id = 0;
   int tribe_id = 0;

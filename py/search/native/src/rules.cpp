@@ -7,6 +7,7 @@
 #include <cmath>
 #include <map>
 #include <set>
+#include <string_view>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -221,12 +222,20 @@ py::list shallow_copy_list(const py::handle& input) {
   return out;
 }
 
-py::dict deepish_copy_observation(const py::dict& input) {
+py::dict deepish_copy_observation(const py::dict& input, bool unit_payload_only) {
   py::dict out = shallow_copy_dict(input);
-  for (const char* key : {"units", "cities", "tribes"}) {
+  for (const char* key : unit_payload_only
+           ? std::initializer_list<const char*>{"units"}
+           : std::initializer_list<const char*>{"units", "cities", "tribes"}) {
     if (out.contains(key) && py::isinstance<py::list>(out[py::str(key)])) {
       out[py::str(key)] = shallow_copy_list(out[py::str(key)]);
     }
+  }
+  if (unit_payload_only) {
+    // RECOVER and MAKE_VETERAN only edit a unit payload row plus scalar turn
+    // flags. Board, city, tribe, and hidden-memory objects remain immutable
+    // and can be structurally shared with the parent observation.
+    return out;
   }
   if (out.contains("board") && py::isinstance<py::dict>(out["board"])) {
     py::dict board = shallow_copy_dict(py::reinterpret_borrow<py::dict>(out["board"]));
@@ -279,6 +288,69 @@ NativeGameState copy_transition_state_without_observation(const NativeGameState&
 std::string canonical_action_type(const NativeAction& action) {
   std::string type = action.type.empty() ? read_string(action.payload, "t") : action.type;
   return type;
+}
+
+NativeActionKind action_kind_from_type(std::string_view type) {
+  if (type == "MOVE") return NativeActionKind::Move;
+  if (type == "STEP_MOVE") return NativeActionKind::StepMove;
+  if (type == "ATTACK") return NativeActionKind::Attack;
+  if (type == "CONVERT") return NativeActionKind::Convert;
+  if (type == "INFILTRATE") return NativeActionKind::Infiltrate;
+  if (type == "HEAL_OTHERS") return NativeActionKind::HealOthers;
+  if (type == "EXAMINE") return NativeActionKind::Examine;
+  if (type == "RECOVER") return NativeActionKind::Recover;
+  if (type == "SPAWN") return NativeActionKind::Spawn;
+  if (type == "CAPTURE") return NativeActionKind::Capture;
+  if (type == "BUILD_ROAD") return NativeActionKind::BuildRoad;
+  if (type == "RESOURCE_GATHERING") return NativeActionKind::ResourceGathering;
+  if (type == "RESEARCH_TECH") return NativeActionKind::ResearchTech;
+  if (type == "BUILD") return NativeActionKind::Build;
+  if (type == "LEVEL_UP") return NativeActionKind::LevelUp;
+  if (type == "BURN_FOREST") return NativeActionKind::BurnForest;
+  if (type == "CLEAR_FOREST") return NativeActionKind::ClearForest;
+  if (type == "GROW_FOREST") return NativeActionKind::GrowForest;
+  if (type == "DESTROY") return NativeActionKind::Destroy;
+  if (type == "DISBAND") return NativeActionKind::Disband;
+  if (type == "MAKE_VETERAN") return NativeActionKind::MakeVeteran;
+  if (type == "UPGRADE_RAMMER") return NativeActionKind::UpgradeRammer;
+  if (type == "UPGRADE_SCOUT") return NativeActionKind::UpgradeScout;
+  if (type == "UPGRADE_BOMBER") return NativeActionKind::UpgradeBomber;
+  if (type == "BUILD_EMBASSY") return NativeActionKind::BuildEmbassy;
+  if (type == "PROPOSE_PEACE") return NativeActionKind::ProposePeace;
+  if (type == "ACCEPT_PEACE") return NativeActionKind::AcceptPeace;
+  if (type == "PROPOSE_TREATY") return NativeActionKind::ProposeTreaty;
+  if (type == "ACCEPT_TREATY") return NativeActionKind::AcceptTreaty;
+  if (type == "CANCEL_TREATY") return NativeActionKind::CancelTreaty;
+  if (type == "END_TURN") return NativeActionKind::EndTurn;
+  return NativeActionKind::Unknown;
+}
+
+struct TransitionAction {
+  NativeActionKind kind = NativeActionKind::Unknown;
+  std::string type;
+  int unit_id = 0;
+  int city_id = 0;
+  int target_unit_id = 0;
+  int x = 0;
+  int y = 0;
+  bool has_xy = false;
+  std::string building_type;
+  std::string tech;
+};
+
+TransitionAction transition_action_snapshot(const NativeAction& action) {
+  TransitionAction snapshot;
+  snapshot.kind = action.kind;
+  snapshot.type = canonical_action_type(action);
+  snapshot.unit_id = action.unit_id;
+  snapshot.city_id = action.city_id;
+  snapshot.target_unit_id = action.target_unit_id;
+  snapshot.x = action.x;
+  snapshot.y = action.y;
+  snapshot.has_xy = action.has_xy;
+  snapshot.building_type = action.building_type;
+  snapshot.tech = action.tech;
+  return snapshot;
 }
 
 int action_scalar_int(const NativeAction& action, const char* key, bool* found) {
@@ -2210,6 +2282,7 @@ py::dict position_payload(int x, int y) {
 }
 
 void populate_action_scalars_from_payload(NativeAction& action) {
+  action.kind = action_kind_from_type(canonical_action_type(action));
   action.tribe_id = action_int(action, "tribe_id", "p", action.tribe_id);
   action.unit_id = action_int(action, "unit_id", "u", action.unit_id);
   action.city_id = action_int(action, "city_id", "c", action.city_id);
@@ -2353,6 +2426,7 @@ void append_generated_action(
   if (max_actions >= 0 && static_cast<int>(state.legal_action_indexes.size()) >= max_actions) {
     return;
   }
+  action.kind = action_kind_from_type(action.type);
   const int index = static_cast<int>(actions.size());
 #ifdef TRIBES_NATIVE_MCTS_STANDALONE
   if (state.generated_action_ids_enabled && action.id.empty()) {
@@ -2899,6 +2973,42 @@ int reveal_from_current_assets(NativeGameState& state) {
   return newly_explored;
 }
 
+bool reveal_from_current_assets_is_noop(const NativeGameState& state) {
+  auto square_is_stable = [&](int cx, int cy, int radius) {
+    for (const NativeTile& tile : state.tiles) {
+      if (std::max(std::abs(tile.x - cx), std::abs(tile.y - cy)) > radius) {
+        continue;
+      }
+      if (!tile.explored || !tile.visible || tile.terrain.empty()) {
+        return false;
+      }
+      if (tile.city_id <= 0) {
+        for (const NativeCity& city : state.cities) {
+          if (std::max(std::abs(tile.x - city.x), std::abs(tile.y - city.y)) <= 1) {
+            return false;
+          }
+        }
+      }
+    }
+    return true;
+  };
+  for (const NativeCity& city : state.cities) {
+    if (city.tribe_id == state.root_player_id && !square_is_stable(city.x, city.y, 1)) {
+      return false;
+    }
+  }
+  for (const NativeUnit& unit : state.units) {
+    if (unit.tribe_id != state.root_player_id || unit.current_hp == 0) {
+      continue;
+    }
+    const int radius = unit.type == "SCOUT" || unit.type == "CLOAK" ? 2 : 1;
+    if (!square_is_stable(unit.x, unit.y, radius)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 int unit_reveal_radius_on_tile(const NativeGameState& state, const NativeUnit& unit, int x, int y) {
   const NativeTile* tile = tile_at(const_cast<NativeGameState&>(state), x, y);
   if ((tile != nullptr && tile->terrain == "MOUNTAIN") ||
@@ -3004,11 +3114,11 @@ void prune_invisible_enemy_units_payload(NativeGameState& state) {
 int estimate_hidden_enemy_move_exploration_score(
     const NativeGameState& previous,
     NativeGameState& next,
-    const NativeAction& action) {
+    const TransitionAction& action) {
   if (previous.active_player_id == previous.root_player_id) {
     return 0;
   }
-  const int unit_id = action_int(action, "unit_id", "u", 0);
+  const int unit_id = action.unit_id;
   const NativeUnit* previous_unit = unit_by_id_const(previous, unit_id);
   const NativeUnit* moved_unit = unit_by_id_const(next, unit_id);
   if (previous_unit == nullptr || moved_unit == nullptr || moved_unit->tribe_id != previous.active_player_id) {
@@ -4174,7 +4284,7 @@ bool try_reuse_legal_actions_after_simple_unit_update(
     const NativeGameState& previous,
     NativeGameState& next,
     const std::vector<NativeAction>& actions,
-    const NativeAction& applied,
+    const TransitionAction& applied,
     const std::string& type,
     int max_actions) {
   if (type != "RECOVER" && type != "MAKE_VETERAN") {
@@ -4183,7 +4293,7 @@ bool try_reuse_legal_actions_after_simple_unit_update(
   if (max_actions >= 0 && static_cast<int>(previous.legal_action_indexes.size()) >= max_actions) {
     return false;
   }
-  const int unit_id = action_int(applied, "unit_id", "u", 0);
+  const int unit_id = applied.unit_id;
   if (unit_id <= 0) {
     return false;
   }
@@ -4297,9 +4407,93 @@ bool partially_regenerate_action_components(
     return false;
   }
 
+  struct ActionComponentSpan {
+    int city_begin = -1;
+    int city_end = -1;
+    int unit_begin = -1;
+    int unit_end = -1;
+  };
+  // Native regeneration emits each actor's actions as one contiguous block.
+  // Record just those spans so targeted regeneration does not rescan the full
+  // parent action list for every clean city and unit.  A malformed or
+  // non-canonical parent list safely takes the original scan path below.
+  const size_t span_count = std::max(previous.city_id_index.size(), previous.unit_id_index.size());
+  std::vector<ActionComponentSpan> component_spans(span_count);
+  int tribe_begin = -1;
+  int tribe_end = -1;
+  bool spans_valid = true;
+  for (int position = 0;
+       position < static_cast<int>(previous.legal_action_indexes.size());
+       ++position) {
+    const int action_index = previous.legal_action_indexes[static_cast<size_t>(position)];
+    if (action_index < 0 || action_index >= static_cast<int>(actions.size())) {
+      spans_valid = false;
+      break;
+    }
+    const NativeAction& action = actions[static_cast<size_t>(action_index)];
+    int* begin = &tribe_begin;
+    int* end = &tribe_end;
+    if (action.unit_id > 0) {
+      if (action.unit_id >= static_cast<int>(previous.unit_id_index.size()) ||
+          previous.unit_id_index[static_cast<size_t>(action.unit_id)] < 0) {
+        spans_valid = false;
+        break;
+      }
+      begin = &component_spans[static_cast<size_t>(action.unit_id)].unit_begin;
+      end = &component_spans[static_cast<size_t>(action.unit_id)].unit_end;
+    } else if (action.city_id > 0) {
+      if (action.city_id >= static_cast<int>(previous.city_id_index.size()) ||
+          previous.city_id_index[static_cast<size_t>(action.city_id)] < 0) {
+        spans_valid = false;
+        break;
+      }
+      begin = &component_spans[static_cast<size_t>(action.city_id)].city_begin;
+      end = &component_spans[static_cast<size_t>(action.city_id)].city_end;
+    }
+    if (*begin < 0) {
+      *begin = position;
+      *end = position + 1;
+    } else if (*end == position) {
+      *end = position + 1;
+    } else {
+      spans_valid = false;
+      break;
+    }
+  }
+
   std::vector<int> merged;
   merged.reserve(previous.legal_action_indexes.size());
   auto append_preserved_component = [&](int unit_id, int city_id) {
+    if (spans_valid) {
+      int begin = tribe_begin;
+      int end = tribe_end;
+      if (unit_id > 0) {
+        if (unit_id >= static_cast<int>(previous.unit_id_index.size())) {
+          spans_valid = false;
+        } else {
+          begin = component_spans[static_cast<size_t>(unit_id)].unit_begin;
+          end = component_spans[static_cast<size_t>(unit_id)].unit_end;
+        }
+      } else if (city_id > 0) {
+        if (city_id >= static_cast<int>(previous.city_id_index.size())) {
+          spans_valid = false;
+        } else {
+          begin = component_spans[static_cast<size_t>(city_id)].city_begin;
+          end = component_spans[static_cast<size_t>(city_id)].city_end;
+        }
+      }
+      if (spans_valid) {
+        for (int position = begin; position >= 0 && position < end; ++position) {
+          if (max_actions >= 0 && static_cast<int>(merged.size()) >= max_actions) {
+            return false;
+          }
+          merged.push_back(previous.legal_action_indexes[static_cast<size_t>(position)]);
+        }
+        return true;
+      }
+    }
+    // Preserve the original filtering behavior when the compact span proof
+    // is unavailable (invalid ids, non-contiguous blocks, or reordered data).
     for (int action_index : previous.legal_action_indexes) {
       if (action_index < 0 || action_index >= static_cast<int>(actions.size())) {
         continue;
@@ -4432,14 +4626,14 @@ bool partially_regenerate_research_preserving_unit_actions(
     const NativeGameState& previous,
     NativeGameState& next,
     std::vector<NativeAction>& actions,
-    const NativeAction& applied,
+    const TransitionAction& applied,
     int max_actions,
     int newly_explored) {
   if (newly_explored != 0 || previous.leveling_up || next.leveling_up ||
       active_player_has_level_up_action(next)) {
     return false;
   }
-  const std::string researched_tech = action_string(applied, "tech");
+  const std::string& researched_tech = applied.tech;
   if (researched_tech.empty() || researched_tech == "DIPLOMACY") {
     return false;
   }
@@ -4468,7 +4662,7 @@ bool try_partially_regenerate_actions_after_attack_or_move(
     const NativeGameState& previous,
     NativeGameState& next,
     std::vector<NativeAction>& actions,
-    const NativeAction& applied,
+    const TransitionAction& applied,
     const std::string& type,
     int max_actions,
     int newly_explored) {
@@ -4481,13 +4675,13 @@ bool try_partially_regenerate_actions_after_attack_or_move(
   }
 
   if (type == "MOVE" || type == "STEP_MOVE") {
-    const int unit_id = action_int(applied, "unit_id", "u", 0);
+    const int unit_id = applied.unit_id;
     const NativeUnit* previous_unit = unit_by_id(const_cast<NativeGameState&>(previous), unit_id);
     if (previous_unit == nullptr) {
       return false;
     }
-    const int destination_x = action_int(applied, "x", nullptr, previous_unit->x);
-    const int destination_y = action_int(applied, "y", nullptr, previous_unit->y);
+    const int destination_x = applied.has_xy ? applied.x : previous_unit->x;
+    const int destination_y = applied.has_xy ? applied.y : previous_unit->y;
     if (destination_x == previous_unit->x && destination_y == previous_unit->y) {
       return false;
     }
@@ -4516,8 +4710,8 @@ bool try_partially_regenerate_actions_after_attack_or_move(
     return false;
   }
 
-  const int attacker_id = action_int(applied, "unit_id", "u", 0);
-  const int target_id = action_int(applied, "target_unit_id", "tu", 0);
+  const int attacker_id = applied.unit_id;
+  const int target_id = applied.target_unit_id;
   const NativeUnit* previous_attacker = unit_by_id(const_cast<NativeGameState&>(previous), attacker_id);
   const NativeUnit* previous_target = unit_by_id(const_cast<NativeGameState&>(previous), target_id);
   if (previous_attacker == nullptr || previous_target == nullptr) {
@@ -4593,7 +4787,7 @@ bool try_partially_regenerate_actions_after_economy_or_board_change(
     const NativeGameState& previous,
     NativeGameState& next,
     std::vector<NativeAction>& actions,
-    const NativeAction& applied,
+    const TransitionAction& applied,
     const std::string& type,
     int max_actions,
     int newly_explored) {
@@ -4608,7 +4802,7 @@ bool try_partially_regenerate_actions_after_economy_or_board_change(
     return false;
   }
 
-  const int city_id = action_int(applied, "city_id", "c", 0);
+  const int city_id = applied.city_id;
   std::unordered_set<int> dirty_city_ids;
   if (city_id > 0) {
     dirty_city_ids.insert(city_id);
@@ -4625,13 +4819,13 @@ bool try_partially_regenerate_actions_after_economy_or_board_change(
     add_star_sensitive_active_units(next, dirty_unit_ids);
   }
 
-  const std::string building = action_string(applied, "building_type", "bt");
+  const std::string& building = applied.building_type;
   const bool square_affects_units =
       type == "BUILD_ROAD" || type == "BURN_FOREST" || type == "CLEAR_FOREST" ||
       type == "GROW_FOREST" || (type == "BUILD" && building == "LUMBER_HUT");
   if (square_affects_units) {
-    const int x = action_int(applied, "x", nullptr, -1);
-    const int y = action_int(applied, "y", nullptr, -1);
+    const int x = applied.has_xy ? applied.x : -1;
+    const int y = applied.has_xy ? applied.y : -1;
     if (x >= 0 && y >= 0) {
       add_active_units_depending_on_squares(
           next,
@@ -7039,9 +7233,7 @@ NativeRoot parse_root_payload(const py::dict& payload, int max_actions) {
       action_payload["p"] = action.tribe_id;
     }
     action.payload = action_payload;
-#ifdef TRIBES_NATIVE_MCTS_STANDALONE
     populate_action_scalars_from_payload(action);
-#endif
     root.state.legal_action_indexes.push_back(static_cast<int>(root.actions.size()));
     root.actions.push_back(action);
   }
@@ -7061,12 +7253,22 @@ NativeGameState apply_action_strict(
     int max_actions,
     bool defer_end_turn_action_generation) {
   g_last_transition_timing = NativeTransitionTiming{};
+  if (global_action_index < 0 || global_action_index >= static_cast<int>(actions.size())) {
+    throw_transition_error("invalid_action_index:" + std::to_string(global_action_index));
+  }
+
+  const NativeAction& applied = actions[global_action_index];
+  const TransitionAction transition = transition_action_snapshot(applied);
+  const std::string& type = transition.type;
+  const bool unit_payload_only =
+      (transition.kind == NativeActionKind::Recover || transition.kind == NativeActionKind::MakeVeteran) &&
+      reveal_from_current_assets_is_noop(state);
   auto started_at = TimingClock::now();
   NativeGameState next = copy_transition_state_without_observation(state);
   g_last_transition_timing.state_copy_ms += elapsed_ms(started_at);
   started_at = TimingClock::now();
 #ifndef TRIBES_NATIVE_MCTS_STANDALONE
-  next.observation = deepish_copy_observation(state.observation);
+  next.observation = deepish_copy_observation(state.observation, unit_payload_only);
 #endif
   g_last_transition_timing.observation_copy_ms += elapsed_ms(started_at);
   next.terminal_reason.clear();
@@ -7075,13 +7277,7 @@ NativeGameState apply_action_strict(
   next.terminal_value = 0.0;
   next.winner_id = -1;
 
-  if (global_action_index < 0 || global_action_index >= static_cast<int>(actions.size())) {
-    throw_transition_error("invalid_action_index:" + std::to_string(global_action_index));
-  }
-
-  const NativeAction applied = actions[global_action_index];
-  const std::string type = canonical_action_type(applied);
-  if (type == "END_TURN") {
+  if (transition.kind == NativeActionKind::EndTurn) {
     started_at = TimingClock::now();
     apply_end_turn_transition(next);
     evaluate_capital_terminal(next);
@@ -7118,64 +7314,39 @@ NativeGameState apply_action_strict(
 
   bool applied_ok = false;
   started_at = TimingClock::now();
-  if (type == "MOVE" || type == "STEP_MOVE") {
-    applied_ok = apply_move(next, applied);
-  } else if (type == "ATTACK") {
-    applied_ok = apply_attack(next, applied);
-  } else if (type == "CONVERT") {
-    applied_ok = apply_convert(next, applied);
-  } else if (type == "INFILTRATE") {
-    applied_ok = apply_infiltrate(next, applied);
-  } else if (type == "HEAL_OTHERS") {
-    applied_ok = apply_heal_others(next, applied);
-  } else if (type == "EXAMINE") {
-    applied_ok = apply_examine(next, applied);
-  } else if (type == "RECOVER") {
-    applied_ok = apply_recover(next, applied);
-  } else if (type == "SPAWN") {
-    applied_ok = apply_spawn(next, applied);
-  } else if (type == "CAPTURE") {
-    applied_ok = apply_capture(next, applied);
-  } else if (type == "BUILD_ROAD") {
-    applied_ok = apply_build_road(next, applied);
-  } else if (type == "RESOURCE_GATHERING") {
-    applied_ok = apply_resource_gathering(next, applied);
-  } else if (type == "RESEARCH_TECH") {
-    applied_ok = apply_research(next, applied);
-  } else if (type == "BUILD") {
-    applied_ok = apply_build(next, applied);
-  } else if (type == "LEVEL_UP") {
-    applied_ok = apply_level_up(next, applied);
-  } else if (type == "BURN_FOREST") {
-    applied_ok = apply_clear_or_burn_forest(next, applied, true);
-  } else if (type == "CLEAR_FOREST") {
-    applied_ok = apply_clear_or_burn_forest(next, applied, false);
-  } else if (type == "GROW_FOREST") {
-    applied_ok = apply_grow_forest(next, applied);
-  } else if (type == "DESTROY") {
-    applied_ok = apply_destroy(next, applied);
-  } else if (type == "DISBAND") {
-    applied_ok = apply_disband(next, applied);
-  } else if (type == "MAKE_VETERAN") {
-    applied_ok = apply_make_veteran(next, applied);
-  } else if (type == "UPGRADE_RAMMER") {
-    applied_ok = apply_upgrade_unit(next, applied, "RAMMER");
-  } else if (type == "UPGRADE_SCOUT") {
-    applied_ok = apply_upgrade_unit(next, applied, "SCOUT");
-  } else if (type == "UPGRADE_BOMBER") {
-    applied_ok = apply_upgrade_unit(next, applied, "BOMBER");
-  } else if (type == "BUILD_EMBASSY") {
-    applied_ok = apply_build_embassy(next, applied);
-  } else if (type == "PROPOSE_PEACE") {
-    applied_ok = apply_propose_peace(next, applied);
-  } else if (type == "ACCEPT_PEACE") {
-    applied_ok = apply_accept_peace(next, applied);
-  } else if (type == "PROPOSE_TREATY") {
-    applied_ok = apply_propose_treaty(next, applied);
-  } else if (type == "ACCEPT_TREATY") {
-    applied_ok = apply_accept_treaty(next, applied);
-  } else if (type == "CANCEL_TREATY") {
-    applied_ok = apply_cancel_treaty(next, applied);
+  switch (transition.kind) {
+    case NativeActionKind::Move:
+    case NativeActionKind::StepMove: applied_ok = apply_move(next, applied); break;
+    case NativeActionKind::Attack: applied_ok = apply_attack(next, applied); break;
+    case NativeActionKind::Convert: applied_ok = apply_convert(next, applied); break;
+    case NativeActionKind::Infiltrate: applied_ok = apply_infiltrate(next, applied); break;
+    case NativeActionKind::HealOthers: applied_ok = apply_heal_others(next, applied); break;
+    case NativeActionKind::Examine: applied_ok = apply_examine(next, applied); break;
+    case NativeActionKind::Recover: applied_ok = apply_recover(next, applied); break;
+    case NativeActionKind::Spawn: applied_ok = apply_spawn(next, applied); break;
+    case NativeActionKind::Capture: applied_ok = apply_capture(next, applied); break;
+    case NativeActionKind::BuildRoad: applied_ok = apply_build_road(next, applied); break;
+    case NativeActionKind::ResourceGathering: applied_ok = apply_resource_gathering(next, applied); break;
+    case NativeActionKind::ResearchTech: applied_ok = apply_research(next, applied); break;
+    case NativeActionKind::Build: applied_ok = apply_build(next, applied); break;
+    case NativeActionKind::LevelUp: applied_ok = apply_level_up(next, applied); break;
+    case NativeActionKind::BurnForest: applied_ok = apply_clear_or_burn_forest(next, applied, true); break;
+    case NativeActionKind::ClearForest: applied_ok = apply_clear_or_burn_forest(next, applied, false); break;
+    case NativeActionKind::GrowForest: applied_ok = apply_grow_forest(next, applied); break;
+    case NativeActionKind::Destroy: applied_ok = apply_destroy(next, applied); break;
+    case NativeActionKind::Disband: applied_ok = apply_disband(next, applied); break;
+    case NativeActionKind::MakeVeteran: applied_ok = apply_make_veteran(next, applied); break;
+    case NativeActionKind::UpgradeRammer: applied_ok = apply_upgrade_unit(next, applied, "RAMMER"); break;
+    case NativeActionKind::UpgradeScout: applied_ok = apply_upgrade_unit(next, applied, "SCOUT"); break;
+    case NativeActionKind::UpgradeBomber: applied_ok = apply_upgrade_unit(next, applied, "BOMBER"); break;
+    case NativeActionKind::BuildEmbassy: applied_ok = apply_build_embassy(next, applied); break;
+    case NativeActionKind::ProposePeace: applied_ok = apply_propose_peace(next, applied); break;
+    case NativeActionKind::AcceptPeace: applied_ok = apply_accept_peace(next, applied); break;
+    case NativeActionKind::ProposeTreaty: applied_ok = apply_propose_treaty(next, applied); break;
+    case NativeActionKind::AcceptTreaty: applied_ok = apply_accept_treaty(next, applied); break;
+    case NativeActionKind::CancelTreaty: applied_ok = apply_cancel_treaty(next, applied); break;
+    case NativeActionKind::EndTurn:
+    case NativeActionKind::Unknown: break;
   }
   g_last_transition_timing.action_mutation_ms += elapsed_ms(started_at);
 
@@ -7190,13 +7361,13 @@ NativeGameState apply_action_strict(
     return next;
   }
   started_at = TimingClock::now();
-  const int newly_explored = reveal_from_current_assets(next);
+  const int newly_explored = unit_payload_only ? 0 : reveal_from_current_assets(next);
   if (type == "MOVE" || type == "STEP_MOVE" || type == "ATTACK" || type == "SPAWN" ||
       type == "UPGRADE_RAMMER" || type == "UPGRADE_SCOUT" || type == "UPGRADE_BOMBER") {
     update_tribe_economy(next, next.active_player_id, 0, newly_explored * 5);
   }
   if (type == "MOVE" || type == "STEP_MOVE") {
-    const int hidden_enemy_score = estimate_hidden_enemy_move_exploration_score(state, next, applied);
+    const int hidden_enemy_score = estimate_hidden_enemy_move_exploration_score(state, next, transition);
     if (hidden_enemy_score != 0) {
       update_tribe_economy(next, next.active_player_id, 0, hidden_enemy_score);
     }
@@ -7211,12 +7382,14 @@ NativeGameState apply_action_strict(
     g_last_transition_timing.hidden_enemy_ms += elapsed_ms(started_at);
   }
   started_at = TimingClock::now();
-  sync_all_tiles_to_payload(next);
+  if (!unit_payload_only) {
+    sync_all_tiles_to_payload(next);
+  }
   g_last_transition_timing.reveal_sync_ms += elapsed_ms(started_at);
   next.transition_kind = type;
   started_at = TimingClock::now();
   bool regenerated = try_reuse_legal_actions_after_simple_unit_update(
-      state, next, actions, applied, type, max_actions);
+      state, next, actions, transition, type, max_actions);
   const bool reused_action_set = regenerated;
   bool partially_regenerated = false;
   bool indexes_rebuilt = false;
@@ -7231,13 +7404,13 @@ NativeGameState apply_action_strict(
     }
     if (type == "RESEARCH_TECH") {
       regenerated = partially_regenerate_research_preserving_unit_actions(
-          state, next, actions, applied, max_actions, newly_explored);
+          state, next, actions, transition, max_actions, newly_explored);
     } else if (type == "MOVE" || type == "STEP_MOVE" || type == "ATTACK") {
       regenerated = try_partially_regenerate_actions_after_attack_or_move(
-          state, next, actions, applied, type, max_actions, newly_explored);
+          state, next, actions, transition, type, max_actions, newly_explored);
     } else {
       regenerated = try_partially_regenerate_actions_after_economy_or_board_change(
-          state, next, actions, applied, type, max_actions, newly_explored);
+          state, next, actions, transition, type, max_actions, newly_explored);
     }
     partially_regenerated = regenerated;
   }

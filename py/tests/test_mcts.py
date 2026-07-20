@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import unittest
@@ -1255,6 +1256,45 @@ class NativeMCTSTest(unittest.TestCase):
         self.assertTrue(veteran["is_veteran"])
         self.assertEqual(veteran["max_hp"], 15)
         self.assertEqual(veteran["current_hp"], 15)
+
+    def test_simple_unit_observation_sharing_does_not_mutate_parent_or_unrelated_sections(self) -> None:
+        extension = load_native_mcts_extension()
+        self.assertIsNotNone(extension)
+        for action_type in ("RECOVER", "MAKE_VETERAN"):
+            with self.subTest(action_type=action_type):
+                message = _message_with_simple_unit_action_reuse(action_type)
+                # Make current-asset revelation provably stable so this test
+                # exercises the selective observation-sharing path. Synthetic
+                # incomplete observations intentionally fall back to the full
+                # copy/reveal transition.
+                cities = message["observation"]["cities"]
+                for row in message["observation"]["board"]["tiles"]:
+                    for tile in row:
+                        tile["visible"] = True
+                        tile["explored"] = True
+                        for city in cities:
+                            if max(abs(tile["x"] - city["x"]), abs(tile["y"] - city["y"])) <= 1:
+                                tile["city_id"] = city["id"]
+                                break
+                original_observation = copy.deepcopy(message["observation"])
+                action_count = len(message["actions"])
+                tree = extension.NativeMCTS(
+                    message,
+                    list(range(action_count)),
+                    [1.0] + [0.0] * (action_count - 1),
+                    0.1,
+                    False,
+                    7,
+                    64,
+                )
+
+                leaf = dict(tree.select_leaf(1.5))["leaf_payload"]["observation"]
+                root = dict(tree.root_payload())["observation"]
+
+                self.assertEqual(root, original_observation)
+                for key in ("board", "cities", "tribes"):
+                    self.assertEqual(leaf[key], original_observation[key])
+                self.assertNotEqual(leaf["units"], original_observation["units"])
 
     def test_promote_root_child_compacts_selected_subtree(self) -> None:
         extension = load_native_mcts_extension()
